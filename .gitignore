@@ -13,3 +13,4 @@ run.ps1
 
 chromadb/
 output.mp3
+temp_*
