@@ -1,0 +1,15 @@
+venv/
+build/
+dist/
+.env
+*/__pycache__/
+
+device_details.txt
+speakers.json
+main.spec
+GameAssistant.lnk
+GameAssistant.spec
+run.ps1
+
+chromadb/
+output.mp3
