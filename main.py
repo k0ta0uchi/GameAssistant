@@ -87,6 +87,11 @@ class GameAssistantApp:
         default_audio_device = self.settings.get("audio_device", self.audio_devices[0] if self.audio_devices else "")
         self.selected_device = ttk.StringVar(value=default_audio_device)
         self.device_index = None  # デバイスインデックスを保存する変数
+        
+        # self.loopback_devices = self.audio_devices # 同じリストを共有
+        # default_loopback_device = self.settings.get("loopback_device", self.loopback_devices[0] if self.loopback_devices else "")
+        # self.selected_loopback_device = ttk.StringVar(value=default_loopback_device)
+        self.loopback_device_index = None # 無効化のためNoneに設定
         self.recording = False
         self.recording_complete = False  # 録音完了フラグ
         self.record_waiting = False
@@ -159,6 +164,7 @@ class GameAssistantApp:
     def save_settings(self):
         """設定を保存する"""
         self.settings["audio_device"] = self.selected_device.get()
+        # self.settings["loopback_device"] = self.selected_loopback_device.get()
         self.settings["window"] = self.selected_window_title.get()
         self.settings["use_image"] = self.use_image.get()
         self.settings["is_private"] = self.is_private.get()
@@ -185,7 +191,7 @@ class GameAssistantApp:
             width=48
         )
         self.audio_dropdown.pack(pady=(0, 10))
-        self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)  # 選択が変わったときにインデックスを更新
+        self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
 
         # ラベル (デバイスインデックスを表示)
         self.device_index_label = ttk.Label(
@@ -297,7 +303,7 @@ class GameAssistantApp:
         self.record_wait_button = ttk.Button(self.record_container, text="録音待機", style="success.TButton", command=self.toggle_record_waiting)
         self.record_wait_button.pack(side=LEFT, pady=10)
 
-        # デフォルトで最初のデバイスのインデックスを取得
+        # デフォルトでデバイスインデックスを取得
         if self.audio_devices:
             self.update_device_index()
 
@@ -471,20 +477,40 @@ class GameAssistantApp:
 
 
     def record_audio_thread(self):
-        """別スレッドで録音処理を実行する"""
-        record.record_audio(self.device_index, self.update_level_meter, self.audio_file_path)  # record.py の関数を呼び出す, コールバック関数を渡す
+        """別スレッドで録音処理を実行する（エコーキャンセリング付き）"""
+        if self.device_index is None:
+            print("マイクが選択されていません。")
+            return
+        
+        record.record_audio_with_echo_cancellation(
+            mic_device_index=self.device_index,
+            loopback_device_index=None, # ループバックを無効化
+            update_callback=self.update_level_meter,
+            audio_file_path=self.audio_file_path,
+            stop_event=self.stop_event # 通常録音でも停止イベントを渡すように変更
+        )
         print("録音完了")
         self.recording_complete = True
-        # 録音完了後にボタンを「録音開始」に戻す
-        self.root.after(0, self.stop_recording)
+        if self.recording: # ユーザーが手動で停止した場合のみ後処理を行う
+            self.root.after(0, self.stop_recording)
     
     def record_audio_with_keyword_thread(self):
-        """キーワード検出で録音を待機するスレッド"""
-        record.record_audio_with_keyword(self.device_index, self.update_level_meter, self.audio_file_path, self.stop_event)
+        """キーワード検出で録音を待機するスレッド（エコーキャンセリング付き）"""
+        if self.device_index is None:
+            print("マイクが選択されていません。")
+            return
+
+        record.record_audio_with_echo_cancellation(
+            mic_device_index=self.device_index,
+            loopback_device_index=None, # ループバックを無効化
+            update_callback=self.update_level_meter,
+            audio_file_path=self.audio_file_path,
+            stop_event=self.stop_event
+        )
         print("録音完了")
         self.recording_complete = True
-        # 録音完了後にボタンを「録音開始」に戻す
-        self.root.after(0, self.stop_record_temporary)
+        if not self.stop_event.is_set(): # 待機がキャンセルされなかった場合のみ後処理
+            self.root.after(0, self.stop_record_temporary)
 
     def update_level_meter(self, volume):
         """レベルメーターを更新する"""
@@ -531,9 +557,14 @@ class GameAssistantApp:
         print("音声認識を開始します...")
         try:
             text = whisper.recognize_speech(self.audio_file_path)
+            if text:
+                print(f"*** 認識されたテキスト: '{text}' ***")
+            else:
+                print("*** 音声は検出されましたが、テキストとして認識されませんでした。***")
             return text
         except Exception as e:
             print(f"音声認識エラー: {e}")
+            return None
 
     def ask_gemini(self):
         # Gemini APIを呼び出す
@@ -544,7 +575,14 @@ class GameAssistantApp:
             return response
         return "プロンプトがありません。"
 
+def on_closing():
+    print("アプリケーションを終了します...")
+    if record.p:
+        record.p.terminate()
+    root.destroy()
+
 if __name__ == "__main__":
     root = ttk.Window(themename="darkly")
     app = GameAssistantApp(root)
+    root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()

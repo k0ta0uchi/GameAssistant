@@ -16,3 +16,4 @@ SpeechRecognition
 kokoro
 playwright
 google.generativeai
+sounddevice

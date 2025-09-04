@@ -1,9 +1,10 @@
 {
     "audio_device": "Voicemeeter Out B1 (VB-Audio Vo",
-    "window": "(1) かなたろ - Twitch — Mozilla Firefox",
+    "window": "Xユーザーのおちょむらさん: 「@k0ta0uchi こたさん！久しぶり😘 コツコツ集めたレア物たちです😎」 / Twitter — Mozilla Firefox",
     "use_image": true,
     "is_private": false,
     "show_response_in_new_window": false,
     "response_display_duration": 5000,
-    "tts_engine": "gemini"
+    "tts_engine": "gemini",
+    "loopback_device": "Voicemeeter Out B2 (VB-Audio Vo"
 }
