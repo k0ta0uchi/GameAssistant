@@ -750,9 +750,8 @@ class GameAssistantApp:
             )
             print("録音完了")
             self.recording_complete = True
-            # stop_recordingがすでに呼び出されているはずなので、ここでの呼び出しは不要
-            # if self.recording:
-            #     self.root.after(0, self.stop_recording)
+            if self.recording:
+                self.root.after(0, self.stop_recording)
     
     def wait_for_keyword_thread(self):
         """キーワード検出で録音を待機するスレッド"""
