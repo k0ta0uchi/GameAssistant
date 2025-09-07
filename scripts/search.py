@@ -5,19 +5,16 @@ import requests
 from dotenv import load_dotenv
 import os
 from playwright.async_api import async_playwright
-from google import genai
+from .clients import get_gemini_client
 
 load_dotenv()
 
 # --- 設定 ---
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY")
 GEMINI_MODEL_NAME = os.environ.get("GEMINI_MODEL")
 
 # Geminiクライアント初期化
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY is not set.")
-client = genai.Client(api_key=GOOGLE_API_KEY)
+client = get_gemini_client()
 
 # --- 検索関数（Brave） ---
 def search_brave(query, count=5):
