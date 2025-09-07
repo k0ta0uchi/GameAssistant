@@ -266,7 +266,7 @@ class GameAssistantApp:
             text="画像を使用する",
             variable=self.use_image,
             style="success-square-toggle",
-            command=self.save_settings
+            command=lambda: (self.save_settings(), self.update_record_buttons_state())
         )
         self.use_image_check.pack(fill=X, pady=5)
 
@@ -330,6 +330,9 @@ class GameAssistantApp:
         # デフォルトで最初のウィンドウタイトルを取得
         if self.windows:
             self.update_window()
+        
+        # ボタンの初期状態を更新
+        self.update_record_buttons_state()
 
     def update_device_index(self, event=None):
         """選択されたデバイスのインデックスを更新"""
@@ -349,6 +352,7 @@ class GameAssistantApp:
             print("ウィンドウが見つかりませんでした")
             self.selected_window_label.config(text="選択されたウィンドウ: (見つかりません)")
         self.save_settings()  # 設定を保存
+        self.update_record_buttons_state()
 
     def toggle_recording(self, event=None):
         """録音の開始/停止を切り替える"""
@@ -385,7 +389,8 @@ class GameAssistantApp:
     def stop_recording(self):
         """録音を停止する"""
         self.recording = False
-        self.record_button.config(text="録音開始", style="success.TButton")
+        self.record_button.config(text="処理中...", style="success.TButton", state="disabled")
+        self.record_wait_button.config(state="disabled")
 
         # ウィンドウをキャプチャする
         if self.selected_window:
@@ -398,26 +403,12 @@ class GameAssistantApp:
         self.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
         self.play_random_nod_thread.start()
 
-        # 録音停止後にテキスト変換を実行
+        # 録音停止後にテキスト変換と応答生成をバックグラウンドで実行
         if self.recording_complete:
-            self.prompt = self.transcribe_audio()
+            thread = threading.Thread(target=self.process_audio_and_generate_response)
+            thread.start()
         else:
             print("録音が停止されていません")
-            return
-        
-        # "検索" または "けんさく" が含まれているか確認
-        if self.prompt and ("検索" in self.prompt or "けんさく" in self.prompt):
-            # 検索キーワードを抽出
-            search_keyword = self.prompt
-            search_results = asyncio.run(self.run_ai_search(search_keyword))
-            
-            # 検索結果をpromptに追加
-            if search_results:
-                self.prompt += "\n\n検索結果:\n" + "\n".join(search_results)
-    
-        if self.prompt:
-            thread = threading.Thread(target=self.process_response)
-            thread.start()
         
     def start_record_waiting(self):
         """録音待機を開始する"""
@@ -431,6 +422,9 @@ class GameAssistantApp:
         self.record_waiting_thread.start()
 
     def stop_record_temporary(self):
+        self.record_wait_button.config(text="処理中...", style="danger.TButton", state="disabled")
+        self.record_button.config(state="disabled")
+
         # ウィンドウをキャプチャする
         if self.selected_window:
             self.capture_window()
@@ -442,50 +436,96 @@ class GameAssistantApp:
         self.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
         self.play_random_nod_thread.start()
 
-        # 録音停止後にテキスト変換を実行
+        # 録音停止後にテキスト変換と応答生成をバックグラウンドで実行
         if self.recording_complete:
-            self.prompt = self.transcribe_audio()
-        else:
-            print("録音が停止されていません")
-            return
-
-        if self.prompt != "":
-            thread = threading.Thread(target=self.process_response)
+            thread = threading.Thread(target=self.process_audio_and_generate_response, args=(True,))
             thread.start()
         else:
-            self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
-            self.record_waiting_thread.start()
-
+            print("録音が停止されていません")
 
     def stop_record_waiting(self):
-        """録音待機を停止する""" 
+        """録音待機を停止する"""
         self.record_waiting = False
         self.record_wait_button.config(text="録音待機", style="success.TButton")
         self.stop_event.set()  # スレッド停止イベントをセット
-        
-        
-    def process_response(self):
-        self.response = self.ask_gemini()
 
-        # レスポンスを別ウィンドウに表示するか、テキストボックスに表示するかを切り替える
-        if self.show_response_in_new_window.get():
-            if self.response:
-                self.show_gemini_response(self.response)
+    def update_record_buttons_state(self, event=None):
+        """録音ボタンの状態を更新する"""
+        if self.use_image.get() and self.selected_window is None:
+            self.record_button.config(state="disabled")
+            self.record_wait_button.config(state="disabled")
+            print("画像利用がオンですが、ウィンドウが選択されていないため録音ボタンを無効化しました。")
         else:
-            if self.response:
-                self.output_textbox.insert(END, "Geminiの回答: " + self.response + "\n")
-                self.output_textbox.see(END)  # スクロールして常に一番下を表示
-
-        voice.text_to_speech(self.response)
-        # 一時ファイルを削除
-        if os.path.exists(self.audio_file_path):
-            os.remove(self.audio_file_path)
-        if os.path.exists(self.screenshot_file_path):
-            os.remove(self.screenshot_file_path)
+            self.record_button.config(state="normal")
+            self.record_wait_button.config(state="normal")
         
-        if self.record_waiting:
-            self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
-            self.record_waiting_thread.start()
+    def process_audio_and_generate_response(self, from_temporary_stop=False):
+        """音声認識、応答生成、GUI更新をまとめて行う"""
+        prompt = self.transcribe_audio()
+        if not prompt:
+            print("プロンプトが空です。")
+            def enable_buttons():
+                self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+                self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
+                if self.record_waiting:
+                    self.record_wait_button.config(text="録音待機中", style="danger.TButton")
+                    self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
+                    self.record_waiting_thread.start()
+
+            self.root.after(0, enable_buttons)
+            return
+
+        # "検索" または "けんさく" が含まれているか確認
+        if "検索" in prompt or "けんさく" in prompt:
+            search_keyword = prompt
+            # asyncioのイベントループを管理
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:  # 'RuntimeError: There is no current event loop...'
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            search_results = loop.run_until_complete(self.run_ai_search(search_keyword))
+            
+            if search_results:
+                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
+
+        self.prompt = prompt
+        response = self.ask_gemini()
+        self.response = response
+
+        # --- GUI更新と音声再生（メインスレッドで実行） ---
+        def update_gui_and_speak():
+            if self.show_response_in_new_window.get():
+                if response:
+                    self.show_gemini_response(response)
+            else:
+                if response:
+                    self.output_textbox.insert(END, "Geminiの回答: " + response + "\n")
+                    self.output_textbox.see(END)
+            
+            voice.text_to_speech(response)
+
+            # 一時ファイルを削除
+            if os.path.exists(self.audio_file_path):
+                os.remove(self.audio_file_path)
+            if os.path.exists(self.screenshot_file_path):
+                os.remove(self.screenshot_file_path)
+
+            # 待機モードの場合は再度待機を開始
+            if self.record_waiting:
+                self.record_wait_button.config(text="録音待機中", style="danger.TButton")
+                self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
+                self.record_waiting_thread.start()
+            
+            # ボタンを再度有効化
+            self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+            self.record_wait_button.config(state="normal")
+            if not self.record_waiting:
+                self.record_wait_button.config(text="録音待機", style="success.TButton")
+
+
+        self.root.after(0, update_gui_and_speak)
 
     async def run_ai_search(self, query: str):
         """ai_searchを非同期で実行する"""
