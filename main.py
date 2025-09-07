@@ -261,7 +261,6 @@ class GameAssistantApp:
         self.response_display_duration = ttk.IntVar(value=self.settings.get("response_display_duration", 10000))  # デフォルト値を設定ファイルから読み込む
         self.tts_engine = ttk.StringVar(value=self.settings.get("tts_engine", "voicevox"))  # TTSエンジン設定
         self.session = gemini.GeminiSession(self.custom_instruction)
-        # GeminiSessionの初期化でmem0がDBファイルを作成した後でMemoryManagerを初期化する
         self.memory_manager = MemoryManager()
 
         self.create_widgets()

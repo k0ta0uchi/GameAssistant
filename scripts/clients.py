@@ -19,3 +19,15 @@ def get_gemini_client():
             raise ValueError("GOOGLE_API_KEY is not set in the environment.")
         _gemini_client = genai.Client(api_key=google_api_key)
     return _gemini_client
+import chromadb
+
+_chroma_client = None
+
+def get_chroma_client(path="chromadb"):
+    """
+    ChromaDBクライアントのシングルトンインスタンスを返す。
+    """
+    global _chroma_client
+    if _chroma_client is None:
+        _chroma_client = chromadb.PersistentClient(path=path)
+    return _chroma_client
