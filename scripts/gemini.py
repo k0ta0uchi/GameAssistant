@@ -83,7 +83,7 @@ class GeminiSession:
         try:
             response = self.client.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
-                contents=f"萌え声でかわいく高く透明感のある声で: {text}",
+                contents=f"優しく控えめでオドオドしていて、萌え声でかわいく高く透明感のある声で: {text}",
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
                     speech_config=types.SpeechConfig(
