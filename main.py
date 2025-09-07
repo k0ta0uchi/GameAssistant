@@ -230,15 +230,23 @@ class GameAssistantApp:
         window_frame = ttk.Frame(left_frame)
         window_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(window_frame, text="ウィンドウ", style="inverse-primary").pack(fill=X, pady=(0, 8))
+        # ドロップダウンとボタンを横並びにするためのフレーム
+        combo_button_frame = ttk.Frame(window_frame)
+        combo_button_frame.pack(fill=X)
+
         self.window_dropdown = ttk.Combobox(
-            master=window_frame,
+            master=combo_button_frame,
             textvariable=self.selected_window_title,
             values=self.windows,
             state=READONLY,
-            width=30, # 固定幅を設定
         )
-        self.window_dropdown.pack(fill=X, pady=(0, 5))
+        self.window_dropdown.pack(side=LEFT, fill=X, expand=True)
         self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
+
+        # ウィンドウリスト更新ボタン (アイコン風)
+        refresh_button = ttk.Button(combo_button_frame, text="🔄", command=self.refresh_window_list, style="info.TButton", width=2)
+        refresh_button.pack(side=LEFT, padx=(5, 0))
+
         self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230) # 折り返しを設定
         self.selected_window_label.pack(fill=X)
 
@@ -373,6 +381,22 @@ class GameAssistantApp:
             self.selected_window_label.config(text="選択されたウィンドウ: (見つかりません)")
         self.save_settings()  # 設定を保存
         self.update_record_buttons_state()
+
+    def refresh_window_list(self):
+        """ウィンドウリストを更新する"""
+        print("ウィンドウリストを更新します...")
+        self.windows = capture.list_available_windows()
+        self.window_dropdown['values'] = self.windows
+        current_selection = self.selected_window_title.get()
+
+        if self.windows:
+            if current_selection not in self.windows:
+                self.selected_window_title.set(self.windows[0])
+        else:
+            self.selected_window_title.set("")
+        
+        self.update_window()
+        print("ウィンドウリストを更新しました。")
 
     def toggle_recording(self, event=None):
         """録音の開始/停止を切り替える"""
