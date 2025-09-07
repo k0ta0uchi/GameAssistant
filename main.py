@@ -20,9 +20,23 @@ class OutputRedirector:
     """print文をテキストボックスにリダイレクトするクラス"""
     def __init__(self, widget):
         self.widget = widget
+        self.widget.tag_config("error", foreground="red")
+        self.widget.tag_config("warning", foreground="yellow")
+        self.widget.tag_config("success", foreground="green")
+        self.widget.tag_config("info", foreground="cyan")
 
     def write(self, str):
-        self.widget.insert(END, str)
+        tag = None
+        if "エラー" in str or "error" in str.lower():
+            tag = "error"
+        elif "警告" in str or "warning" in str.lower():
+            tag = "warning"
+        elif "成功" in str or "success" in str.lower() or "完了" in str:
+            tag = "success"
+        elif "***" in str:
+            tag = "info"
+
+        self.widget.insert(END, str, tag)
         self.widget.see(END)  # スクロールして常に一番下を表示
 
     def flush(self):
@@ -179,50 +193,58 @@ class GameAssistantApp:
         return record.get_device_index_from_name(device_name)
 
     def create_widgets(self):
-        self.audio_container = ttk.LabelFrame(self.root, text="インプットデバイス", padding=10)
-        self.audio_container.pack(fill=X)
+        # メインフレームの作成
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(fill=BOTH, expand=True)
 
-        # オーディオデバイス選択ドロップダウンメニュー
+        # 左カラムの作成
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=LEFT, fill=Y, padx=(0, 20))
+
+        # 右カラムの作成
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
+
+        # --- 左カラム ---
+        # デバイス設定
+        device_frame = ttk.Frame(left_frame)
+        device_frame.pack(fill=X, pady=(0, 15))
+        ttk.Label(device_frame, text="インプットデバイス", style="inverse-primary").pack(fill=X, pady=(0, 8))
         self.audio_dropdown = ttk.Combobox(
-            master=self.audio_container,
+            master=device_frame,
             textvariable=self.selected_device,
             values=self.audio_devices,
             state=READONLY,
-            width=48
         )
-        self.audio_dropdown.pack(pady=(0, 10))
+        self.audio_dropdown.pack(fill=X, pady=(0, 5))
         self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
+        self.device_index_label = ttk.Label(master=device_frame, text="Device index: ")
+        self.device_index_label.pack(fill=X)
 
-        # ラベル (デバイスインデックスを表示)
-        self.device_index_label = ttk.Label(
-            master=self.audio_container,
-            text="Device index: "
-        )
-        self.device_index_label.pack(pady=5)
-
-        self.window_container = ttk.LabelFrame(self.root, text="ウィンドウ", padding=10)
-        self.window_container.pack(fill=X)
-
-        # ウィンドウ選択ドロップダウンメニュー
+        # ウィンドウ設定
+        window_frame = ttk.Frame(left_frame)
+        window_frame.pack(fill=X, pady=(0, 15))
+        ttk.Label(window_frame, text="ウィンドウ", style="inverse-primary").pack(fill=X, pady=(0, 8))
         self.window_dropdown = ttk.Combobox(
-            master=self.window_container,
+            master=window_frame,
             textvariable=self.selected_window_title,
             values=self.windows,
             state=READONLY,
-            width=48
         )
-        self.window_dropdown.pack(pady=(0, 10))
+        self.window_dropdown.pack(fill=X, pady=(0, 5))
         self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
+        self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ")
+        self.selected_window_label.pack(fill=X)
 
-        # 選択されたウィンドウタイトルを表示するラベル
-        self.selected_window_label = ttk.Label(
-            master=self.window_container,
-            text="Selected window: "
-        )
-        self.selected_window_label.pack(pady=5)
+        # --- 右カラム ---
+        # Geminiレスポンス表示エリア
+        self.response_frame = ttk.Frame(right_frame, padding=(0, 0, 0, 10))
+        self.response_frame.pack(fill=X)
+        self.response_label = ttk.Label(self.response_frame, text="", wraplength=400, justify=LEFT, font=("Arial", 14), style="inverse-info")
+        self.response_label.pack(fill=X, ipady=10)
 
-        self.meter_container = ttk.LabelFrame(self.root, text="レベルメーター", padding=10)
-        self.meter_container.pack(fill=X)
+        self.meter_container = ttk.Frame(right_frame)
+        self.meter_container.pack(fill=X, pady=(0, 10))
 
         # レベルメーター
         self.level_meter = ttk.Progressbar(
@@ -234,65 +256,63 @@ class GameAssistantApp:
         )
         self.level_meter.pack(pady=10)
 
-        # 設定コンテナ
-        self.config_container = ttk.LabelFrame(self.root, text="設定", padding=10)
-        self.config_container.pack(fill=X)
+        # 設定
+        config_frame = ttk.Frame(left_frame)
+        config_frame.pack(fill=X, pady=(0, 15))
+        ttk.Label(config_frame, text="設定", style="inverse-primary").pack(fill=X, pady=(0, 8))
 
-        # 画像使用チェックボックス
         self.use_image_check = ttk.Checkbutton(
-            self.config_container,
+            config_frame,
             text="画像を使用する",
             variable=self.use_image,
             style="success-square-toggle",
-            command=self.save_settings  # チェックボックスの状態が変わったときに設定を保存
+            command=self.save_settings
         )
-        self.use_image_check.pack(side=LEFT, pady=5)
+        self.use_image_check.pack(fill=X, pady=5)
 
-        # プライベートチェックボックス
         self.is_private_check = ttk.Checkbutton(
-            self.config_container,
+            config_frame,
             text="プライベート",
             variable=self.is_private,
             style="success-square-toggle",
-            command=self.save_settings  # チェックボックスの状態が変わったときに設定を保存
+            command=self.save_settings
         )
-        self.is_private_check.pack(side=LEFT, pady=10)
-        
-        # レスポンスを別ウィンドウに表示するかのチェックボックス
+        self.is_private_check.pack(fill=X, pady=5)
+
         self.show_response_in_new_window_check = ttk.Checkbutton(
-            self.config_container,
-            text="レスポンスを別ウィンドウに表示する",
+            config_frame,
+            text="レスポンスを別ウィンドウに表示",
             variable=self.show_response_in_new_window,
             style="success-square-toggle",
-            command=self.save_settings  # チェックボックスの状態が変わったときに設定を保存
+            command=self.save_settings
         )
-        self.show_response_in_new_window_check.pack(side=LEFT, pady=10)
-
-        # レスポンス表示時間設定
-        self.response_duration_label = ttk.Label(self.config_container, text="レスポンス表示時間 (ミリ秒):")
-        self.response_duration_label.pack(side=LEFT, pady=5)
-        self.response_duration_entry = ttk.Entry(self.config_container, textvariable=self.response_display_duration, width=10)
-        self.response_duration_entry.pack(side=LEFT, pady=5)
+        self.show_response_in_new_window_check.pack(fill=X, pady=5)
+        
+        duration_frame = ttk.Frame(config_frame)
+        duration_frame.pack(fill=X, pady=5)
+        ttk.Label(duration_frame, text="表示時間(ms):").pack(side=LEFT)
+        self.response_duration_entry = ttk.Entry(duration_frame, textvariable=self.response_display_duration, width=8)
+        self.response_duration_entry.pack(side=LEFT)
         self.response_duration_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
         # 画像を表示するラベル
-        self.image_label = ttk.Label(self.root)
+        self.image_label = ttk.Label(right_frame)
         self.image_label.pack(pady=10)
 
         # ログ表示コンテナ
-        self.text_container = ttk.Frame(self.root, padding=10)
-        self.text_container.pack(fill=X)
+        self.text_container = ttk.Frame(right_frame)
+        self.text_container.pack(fill=BOTH, expand=True)
 
         # テキストボックスとスクロールバーの追加
         self.output_textbox = ttk.Text(master=self.text_container, height=10, width=50, wrap=WORD)
-        self.output_textbox.pack(side=LEFT, fill=BOTH, expand=True, padx=10, pady=10)
+        self.output_textbox.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5), pady=(0, 10))
 
         self.scrollbar = ttk.Scrollbar(self.text_container, orient=VERTICAL, command=self.output_textbox.yview)
-        self.scrollbar.pack(side=RIGHT, fill=Y, padx=(0, 10), pady=10)
+        self.scrollbar.pack(side=RIGHT, fill=Y, pady=(0, 10))
 
         self.output_textbox['yscrollcommand'] = self.scrollbar.set
 
-        self.record_container = ttk.Frame(self.root, padding=10)
+        self.record_container = ttk.Frame(right_frame)
         self.record_container.pack(fill=X)
 
         # 録音ボタン
@@ -472,22 +492,26 @@ class GameAssistantApp:
         return await ai_search(query)
     
     def show_gemini_response(self, response_text):
-        """Geminiのレスポンスを別ウィンドウで表示する"""
-        GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
+        """Geminiのレスポンスを表示する"""
+        if self.show_response_in_new_window.get():
+            GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
+        else:
+            self.response_label.config(text=response_text)
+            # 一定時間後にテキストを消去
+            self.root.after(self.response_display_duration.get(), lambda: self.response_label.config(text=""))
 
 
     def record_audio_thread(self):
-        """別スレッドで録音処理を実行する（エコーキャンセリング付き）"""
+        """別スレッドで録音処理を実行する"""
         if self.device_index is None:
             print("マイクが選択されていません。")
             return
         
-        record.record_audio_with_echo_cancellation(
-            mic_device_index=self.device_index,
-            loopback_device_index=None, # ループバックを無効化
+        record.record_audio(
+            device_index=self.device_index,
             update_callback=self.update_level_meter,
             audio_file_path=self.audio_file_path,
-            stop_event=self.stop_event # 通常録音でも停止イベントを渡すように変更
+            stop_event=self.stop_event
         )
         print("録音完了")
         self.recording_complete = True
@@ -495,14 +519,13 @@ class GameAssistantApp:
             self.root.after(0, self.stop_recording)
     
     def record_audio_with_keyword_thread(self):
-        """キーワード検出で録音を待機するスレッド（エコーキャンセリング付き）"""
+        """キーワード検出で録音を待機するスレッド"""
         if self.device_index is None:
             print("マイクが選択されていません。")
             return
 
-        record.record_audio_with_echo_cancellation(
-            mic_device_index=self.device_index,
-            loopback_device_index=None, # ループバックを無効化
+        record.record_audio_with_keyword(
+            device_index=self.device_index,
             update_callback=self.update_level_meter,
             audio_file_path=self.audio_file_path,
             stop_event=self.stop_event
@@ -571,7 +594,6 @@ class GameAssistantApp:
         image_path = self.screenshot_file_path if self.use_image.get() and os.path.exists(self.screenshot_file_path) else None
         if self.prompt:
             response = self.session.generate_content(self.prompt, image_path, self.is_private.get())
-            print("Geminiの回答:", response)
             return response
         return "プロンプトがありません。"
 
@@ -582,7 +604,7 @@ def on_closing():
     root.destroy()
 
 if __name__ == "__main__":
-    root = ttk.Window(themename="darkly")
+    root = ttk.Window(themename="superhero")
     app = GameAssistantApp(root)
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()

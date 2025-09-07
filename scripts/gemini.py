@@ -3,26 +3,23 @@ import os
 from dotenv import load_dotenv
 from PIL import Image
 from mem0 import Memory
-from google import genai
 from google.genai import types
 import wave
+from .clients import get_gemini_client
 
 # --- Environment Setup ---
 load_dotenv()
 
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
 USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
 class GeminiSession:
     def __init__(self, custom_instruction: str | None = None):
-        if not GOOGLE_API_KEY:
-            raise ValueError("GOOGLE_API_KEY is not set.")
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")
 
-        self.client = genai.Client(api_key=GOOGLE_API_KEY)
+        self.client = get_gemini_client()
         
         # --- Chat Session Initialization ---
         history = []
