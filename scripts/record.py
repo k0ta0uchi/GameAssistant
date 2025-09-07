@@ -5,6 +5,7 @@ import os
 import pvporcupine
 import struct
 from dotenv import load_dotenv
+from scripts.voice import play_wav_data
 
 load_dotenv()
 
@@ -133,7 +134,16 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
 
             keyword_index = porcupine.process(pcm)
             if keyword_index >= 0:
-                print("\nキーワード検出！録音を開始します...")
+                print("\nキーワード検出！")
+                # wav/nod/1.wavを再生
+                try:
+                    with open("wav/nod/1.wav", "rb") as f:
+                        wav_data = f.read()
+                    play_wav_data(wav_data)
+                except Exception as e:
+                    print(f"音声ファイルの再生エラー: {e}")
+                
+                print("録音を開始します...")
                 break
         
         if stop_event and stop_event.is_set():
