@@ -427,7 +427,7 @@ class GameAssistantApp:
         self.stop_event.clear()  # イベントをクリア
 
         # 録音をバックグラウンドスレッドで実行
-        self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
+        self.record_waiting_thread = threading.Thread(target=self.wait_for_keyword_thread)
         self.record_waiting_thread.start()
 
     def stop_record_temporary(self):
@@ -478,7 +478,7 @@ class GameAssistantApp:
                 self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
                 if self.record_waiting:
                     self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-                    self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
+                    self.record_waiting_thread = threading.Thread(target=self.wait_for_keyword_thread)
                     self.record_waiting_thread.start()
 
             self.root.after(0, enable_buttons)
@@ -524,7 +524,7 @@ class GameAssistantApp:
             # 待機モードの場合は再度待機を開始
             if self.record_waiting:
                 self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-                self.record_waiting_thread = threading.Thread(target=self.record_audio_with_keyword_thread)
+                self.record_waiting_thread = threading.Thread(target=self.wait_for_keyword_thread)
                 self.record_waiting_thread.start()
             
             # ボタンを再度有効化
@@ -567,22 +567,24 @@ class GameAssistantApp:
         if self.recording: # ユーザーが手動で停止した場合のみ後処理を行う
             self.root.after(0, self.stop_recording)
     
-    def record_audio_with_keyword_thread(self):
+    def wait_for_keyword_thread(self):
         """キーワード検出で録音を待機するスレッド"""
         if self.device_index is None:
             print("マイクが選択されていません。")
             return
 
-        record.record_audio_with_keyword(
+        result = record.wait_for_keyword(
             device_index=self.device_index,
             update_callback=self.update_level_meter,
             audio_file_path=self.audio_file_path,
             stop_event=self.stop_event
         )
-        print("録音完了")
-        self.recording_complete = True
-        if not self.stop_event.is_set(): # 待機がキャンセルされなかった場合のみ後処理
-            self.root.after(0, self.stop_record_temporary)
+        
+        if result:
+            print("録音完了")
+            self.recording_complete = True
+            if not self.stop_event.is_set(): # 待機がキャンセルされなかった場合のみ後処理
+                self.root.after(0, self.stop_record_temporary)
 
     def update_level_meter(self, volume):
         """レベルメーターを更新する"""
