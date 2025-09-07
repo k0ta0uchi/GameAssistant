@@ -69,7 +69,7 @@ class GeminiSession:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
 
-    def generate_speech(self, text: str):
+    def generate_speech(self, text: str, voice_name: str = 'Laomedeia'):
         """
         Gemini APIを使用してテキストから音声を生成します。
 
@@ -80,11 +80,10 @@ class GeminiSession:
         Returns:
             bytes: 生成された音声データ(PCM)。
         """
-        voice_name = "Laomedeia"
         try:
             response = self.client.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
-                contents=f"控えめかつおどおどしていて、かわいい、萌え声かつ透明感のある声で: {text}",
+                contents=f"萌え声でかわいく高く透明感のある声で: {text}",
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
                     speech_config=types.SpeechConfig(
