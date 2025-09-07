@@ -14,6 +14,7 @@ from PIL import Image, ImageTk
 import keyboard  # keyboardライブラリをインポート
 import json  # JSONライブラリをインポート
 import asyncio  # asyncioを追加
+from scripts.memory import MemoryManager # MemoryManagerをインポート
 
 
 class OutputRedirector:
@@ -85,6 +86,116 @@ class GeminiResponseWindow(ttk.Toplevel):
         if self.label:
             self.label.configure(text="")
 
+class MemoryWindow(ttk.Toplevel):
+    def __init__(self, parent, memory_manager):
+        super().__init__(parent)
+        self.parent = parent
+        self.memory_manager = memory_manager
+        self.title("メモリー管理")
+        self.geometry("500x400")
+
+        self.create_widgets()
+        self.load_memories_to_listbox()
+
+    def create_widgets(self):
+        # フレーム
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=BOTH, expand=True)
+
+        # 左側（リストボックス）
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
+
+        self.memory_listbox = ttk.Treeview(left_frame, columns=("key", "value"), show="headings")
+        self.memory_listbox.heading("key", text="キー")
+        self.memory_listbox.heading("value", text="値")
+        self.memory_listbox.pack(fill=BOTH, expand=True)
+        self.memory_listbox.bind("<<TreeviewSelect>>", self.on_memory_select)
+
+        # 右側（編集エリア）
+        right_frame = ttk.Frame(main_frame, width=200)
+        right_frame.pack(side=RIGHT, fill=Y)
+        right_frame.pack_propagate(False)
+
+        key_label = ttk.Label(right_frame, text="キー:")
+        key_label.pack(fill=X, pady=(0, 5))
+        self.key_entry = ttk.Entry(right_frame)
+        self.key_entry.pack(fill=X, pady=(0, 10))
+
+        value_label = ttk.Label(right_frame, text="値:")
+        value_label.pack(fill=X, pady=(0, 5))
+        self.value_text = ttk.Text(right_frame, height=5)
+        self.value_text.pack(fill=BOTH, expand=True, pady=(0, 10))
+
+        # ボタン
+        button_frame = ttk.Frame(right_frame)
+        button_frame.pack(fill=X)
+
+        save_button = ttk.Button(button_frame, text="保存", command=self.save_memory, style="success.TButton")
+        save_button.pack(side=LEFT, expand=True, fill=X, padx=(0, 5))
+
+        delete_button = ttk.Button(button_frame, text="削除", command=self.delete_memory, style="danger.TButton")
+        delete_button.pack(side=LEFT, expand=True, fill=X)
+
+    def load_memories_to_listbox(self):
+        """メモリーをリストボックスに読み込む"""
+        # 既存のアイテムをクリア
+        for item in self.memory_listbox.get_children():
+            self.memory_listbox.delete(item)
+        # メモリーを読み込んで追加
+        memories = self.memory_manager.get_all_memories()
+        for key, value in memories.items():
+            self.memory_listbox.insert("", "end", values=(key, value))
+
+    def on_memory_select(self, event):
+        """リストボックスでメモリーが選択されたときの処理"""
+        selected_items = self.memory_listbox.selection()
+        if not selected_items:
+            return
+
+        selected_item = selected_items[0]
+        item = self.memory_listbox.item(selected_item)
+        key, value = item['values']
+
+        self.key_entry.delete(0, END)
+        self.key_entry.insert(0, key)
+        self.value_text.delete("1.0", END)
+        self.value_text.insert("1.0", value)
+
+    def save_memory(self):
+        """メモリーを保存する"""
+        key = self.key_entry.get()
+        value = self.value_text.get("1.0", END).strip()
+        if not key:
+            # ttkbootstrap.dialogs.Messagebox.show_error("キーは必須です。", title="エラー")
+            print("キーは必須です。")
+            return
+
+        self.memory_manager.add_or_update_memory(key, value)
+        self.load_memories_to_listbox()
+        self.clear_entries()
+
+    def delete_memory(self):
+        """メモリーを削除する"""
+        key = self.key_entry.get()
+        if not key:
+            # ttkbootstrap.dialogs.Messagebox.show_error("削除するキーを指定してください。", title="エラー")
+            print("削除するキーを指定してください。")
+            return
+
+        if self.memory_manager.delete_memory(key):
+            self.load_memories_to_listbox()
+            self.clear_entries()
+        else:
+            # ttkbootstrap.dialogs.Messagebox.show_error("指定されたキーのメモリーが見つかりません。", title="エラー")
+            print("指定されたキーのメモリーが見つかりません。")
+
+    def clear_entries(self):
+        """入力フィールドをクリアする"""
+        self.key_entry.delete(0, END)
+        self.value_text.delete("1.0", END)
+        self.memory_listbox.selection_remove(self.memory_listbox.selection())
+
 class GameAssistantApp:
     def __init__(self, root):
         self.root = root
@@ -145,10 +256,13 @@ class GameAssistantApp:
         # デフォルト値を設定ファイルから読み込む
         self.use_image = ttk.BooleanVar(value=self.settings.get("use_image", True)) # 画像を使用するかどうかの変数を追加
         self.is_private = ttk.BooleanVar(value=self.settings.get("is_private", True))
+        self.use_streaming = ttk.BooleanVar(value=self.settings.get("use_streaming", False)) # ストリーミングモードを使用するかどうかの変数
         self.show_response_in_new_window = ttk.BooleanVar(value=self.settings.get("show_response_in_new_window", True)) # デフォルト値を設定ファイルから読み込む
         self.response_display_duration = ttk.IntVar(value=self.settings.get("response_display_duration", 10000))  # デフォルト値を設定ファイルから読み込む
         self.tts_engine = ttk.StringVar(value=self.settings.get("tts_engine", "voicevox"))  # TTSエンジン設定
         self.session = gemini.GeminiSession(self.custom_instruction)
+        # GeminiSessionの初期化でmem0がDBファイルを作成した後でMemoryManagerを初期化する
+        self.memory_manager = MemoryManager()
 
         self.create_widgets()
 
@@ -183,6 +297,7 @@ class GameAssistantApp:
         self.settings["window"] = self.selected_window_title.get()
         self.settings["use_image"] = self.use_image.get()
         self.settings["is_private"] = self.is_private.get()
+        self.settings["use_streaming"] = self.use_streaming.get() # ストリーミング設定を保存
         self.settings["show_response_in_new_window"] = self.show_response_in_new_window.get() # 設定を保存
         self.settings["response_display_duration"] = self.response_display_duration.get()  # 設定を保存
         self.settings["tts_engine"] = self.tts_engine.get() # TTSエンジン設定を保存
@@ -246,9 +361,13 @@ class GameAssistantApp:
         # ウィンドウリスト更新ボタン (アイコン風)
         refresh_button = ttk.Button(combo_button_frame, text="🔄", command=self.refresh_window_list, style="info.TButton", width=2)
         refresh_button.pack(side=LEFT, padx=(5, 0))
-
+ 
         self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230) # 折り返しを設定
         self.selected_window_label.pack(fill=X)
+
+        # メモリー管理ボタン
+        memory_button = ttk.Button(left_frame, text="メモリー管理", command=self.open_memory_window, style="info.TButton")
+        memory_button.pack(fill=X, pady=(15, 0))
 
         # --- 右カラム ---
         # Geminiレスポンス表示エリア
@@ -292,6 +411,15 @@ class GameAssistantApp:
             command=self.save_settings
         )
         self.is_private_check.pack(fill=X, pady=5)
+
+        self.use_streaming_check = ttk.Checkbutton(
+            config_frame,
+            text="ストリーミングモードを使用する",
+            variable=self.use_streaming,
+            style="success-square-toggle",
+            command=self.save_settings
+        )
+        self.use_streaming_check.pack(fill=X, pady=5)
 
         self.show_response_in_new_window_check = ttk.Checkbutton(
             config_frame,
@@ -432,16 +560,28 @@ class GameAssistantApp:
 
     def stop_recording(self):
         """録音を停止する"""
+        if not self.recording:
+            return
+
         self.recording = False
         self.record_button.config(text="処理中...", style="success.TButton", state="disabled")
         self.record_wait_button.config(state="disabled")
 
-        # ウィンドウをキャプチャする
-        if self.selected_window:
-            self.capture_window()
+        if not self.use_streaming.get():
+            # 録音スレッドの終了を待つ
+            if hasattr(self, 'recording_thread') and self.recording_thread.is_alive():
+                self.stop_event.set()
+                self.recording_thread.join()
         else:
-            print("ウィンドウが選択されていません")
-            return
+            # ストリーミングモードの場合はすぐに完了とみなす
+            self.recording_complete = True
+
+        # ウィンドウをキャプチャする
+        if self.use_image.get():
+            if self.selected_window:
+                self.capture_window()
+            else:
+                print("ウィンドウが選択されていません")
         
         # ランダムな相槌を打つ
         self.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
@@ -452,7 +592,15 @@ class GameAssistantApp:
             thread = threading.Thread(target=self.process_audio_and_generate_response)
             thread.start()
         else:
-            print("録音が停止されていません")
+            # ストリーミングでない場合は、スレッドが完了するのを待つ必要がある
+            print("録音完了待機中...")
+            def check_completion():
+                if self.recording_complete:
+                    thread = threading.Thread(target=self.process_audio_and_generate_response)
+                    thread.start()
+                else:
+                    self.root.after(100, check_completion)
+            self.root.after(100, check_completion)
         
     def start_record_waiting(self):
         """録音待機を開始する"""
@@ -590,17 +738,22 @@ class GameAssistantApp:
         if self.device_index is None:
             print("マイクが選択されていません。")
             return
+            
+        self.stop_event.clear()
         
-        record.record_audio(
-            device_index=self.device_index,
-            update_callback=self.update_level_meter,
-            audio_file_path=self.audio_file_path,
-            stop_event=self.stop_event
-        )
-        print("録音完了")
-        self.recording_complete = True
-        if self.recording: # ユーザーが手動で停止した場合のみ後処理を行う
-            self.root.after(0, self.stop_recording)
+        # ストリーミングモードでない場合のみファイルに録音
+        if not self.use_streaming.get():
+            record.record_audio(
+                device_index=self.device_index,
+                update_callback=self.update_level_meter,
+                audio_file_path=self.audio_file_path,
+                stop_event=self.stop_event
+            )
+            print("録音完了")
+            self.recording_complete = True
+            # stop_recordingがすでに呼び出されているはずなので、ここでの呼び出しは不要
+            # if self.recording:
+            #     self.root.after(0, self.stop_recording)
     
     def wait_for_keyword_thread(self):
         """キーワード検出で録音を待機するスレッド"""
@@ -665,7 +818,21 @@ class GameAssistantApp:
         """音声をテキストに変換する"""
         print("音声認識を開始します...")
         try:
-            text = whisper.recognize_speech(self.audio_file_path)
+            if self.use_streaming.get():
+                print("ストリーミングモードで音声認識を実行します。")
+                audio_stream = record.stream_audio(
+                    device_index=self.device_index,
+                    update_callback=self.update_level_meter,
+                    stop_event=self.stop_event
+                )
+                text = whisper.recognize_speech_from_stream(audio_stream)
+            else:
+                print("ファイルモードで音声認識を実行します。")
+                if not os.path.exists(self.audio_file_path):
+                    print(f"エラー: 音声ファイルが見つかりません: {self.audio_file_path}")
+                    return None
+                text = whisper.recognize_speech(self.audio_file_path)
+
             if text:
                 print(f"*** 認識されたテキスト: '{text}' ***")
             else:
@@ -682,6 +849,10 @@ class GameAssistantApp:
             response = self.session.generate_content(self.prompt, image_path, self.is_private.get())
             return response
         return "プロンプトがありません。"
+
+    def open_memory_window(self):
+        """メモリー管理ウィンドウを開く"""
+        MemoryWindow(self.root, self.memory_manager)
 
 def on_closing():
     print("アプリケーションを終了します...")
