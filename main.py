@@ -147,6 +147,7 @@ class GameAssistantApp:
         self.is_private = ttk.BooleanVar(value=self.settings.get("is_private", True))
         self.show_response_in_new_window = ttk.BooleanVar(value=self.settings.get("show_response_in_new_window", True)) # デフォルト値を設定ファイルから読み込む
         self.response_display_duration = ttk.IntVar(value=self.settings.get("response_display_duration", 10000))  # デフォルト値を設定ファイルから読み込む
+        self.tts_engine = ttk.StringVar(value=self.settings.get("tts_engine", "voicevox"))  # TTSエンジン設定
         self.session = gemini.GeminiSession(self.custom_instruction)
 
         self.create_widgets()
@@ -184,6 +185,7 @@ class GameAssistantApp:
         self.settings["is_private"] = self.is_private.get()
         self.settings["show_response_in_new_window"] = self.show_response_in_new_window.get() # 設定を保存
         self.settings["response_display_duration"] = self.response_display_duration.get()  # 設定を保存
+        self.settings["tts_engine"] = self.tts_engine.get() # TTSエンジン設定を保存
 
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
@@ -298,6 +300,15 @@ class GameAssistantApp:
         self.response_duration_entry = ttk.Entry(duration_frame, textvariable=self.response_display_duration, width=8)
         self.response_duration_entry.pack(side=LEFT)
         self.response_duration_entry.bind("<FocusOut>", lambda e: self.save_settings())
+
+        # TTSエンジン設定
+        tts_frame = ttk.Frame(config_frame)
+        tts_frame.pack(fill=X, pady=5)
+        ttk.Label(tts_frame, text="TTSエンジン:").pack(side=LEFT)
+        voicevox_radio = ttk.Radiobutton(tts_frame, text="VOICEVOX", variable=self.tts_engine, value="voicevox", command=self.save_settings)
+        voicevox_radio.pack(side=LEFT, padx=5)
+        gemini_radio = ttk.Radiobutton(tts_frame, text="Gemini", variable=self.tts_engine, value="gemini", command=self.save_settings)
+        gemini_radio.pack(side=LEFT, padx=5)
 
         # 画像表示エリア
         self.image_frame = ttk.Frame(right_frame, height=300)
