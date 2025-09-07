@@ -39,6 +39,7 @@ class GeminiSession:
             "embedder": {"provider": "gemini", "config": {"model": "models/embedding-001"}},
             "vector_store": vector_store_config,
         }
+        # この設定でMemoryインスタンスを確実に作成
         self.m = Memory.from_config(mem0_config)
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True):
