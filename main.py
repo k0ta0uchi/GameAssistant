@@ -196,10 +196,12 @@ class GameAssistantApp:
         # メインフレームの作成
         main_frame = ttk.Frame(self.root, padding=20)
         main_frame.pack(fill=BOTH, expand=True)
+        main_frame.pack_propagate(False) # ウィジェットのサイズに合わせてフレームがリサイズされないようにする
 
         # 左カラムの作成
-        left_frame = ttk.Frame(main_frame)
+        left_frame = ttk.Frame(main_frame, width=250) # 固定幅を設定
         left_frame.pack(side=LEFT, fill=Y, padx=(0, 20))
+        left_frame.pack_propagate(False) # ウィジェットのサイズに合わせてフレームがリサイズされないようにする
 
         # 右カラムの作成
         right_frame = ttk.Frame(main_frame)
@@ -215,10 +217,11 @@ class GameAssistantApp:
             textvariable=self.selected_device,
             values=self.audio_devices,
             state=READONLY,
+            width=30, # 固定幅を設定
         )
         self.audio_dropdown.pack(fill=X, pady=(0, 5))
         self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
-        self.device_index_label = ttk.Label(master=device_frame, text="Device index: ")
+        self.device_index_label = ttk.Label(master=device_frame, text="Device index: ", wraplength=230) # 折り返しを設定
         self.device_index_label.pack(fill=X)
 
         # ウィンドウ設定
@@ -230,10 +233,11 @@ class GameAssistantApp:
             textvariable=self.selected_window_title,
             values=self.windows,
             state=READONLY,
+            width=30, # 固定幅を設定
         )
         self.window_dropdown.pack(fill=X, pady=(0, 5))
         self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
-        self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ")
+        self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230) # 折り返しを設定
         self.selected_window_label.pack(fill=X)
 
         # --- 右カラム ---
@@ -295,8 +299,13 @@ class GameAssistantApp:
         self.response_duration_entry.pack(side=LEFT)
         self.response_duration_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
+        # 画像表示エリア
+        self.image_frame = ttk.Frame(right_frame, height=300)
+        self.image_frame.pack(fill=X, pady=10)
+        self.image_frame.pack_propagate(False)
+
         # 画像を表示するラベル
-        self.image_label = ttk.Label(right_frame)
+        self.image_label = ttk.Label(self.image_frame)
         self.image_label.pack(pady=10)
 
         # ログ表示コンテナ
@@ -304,7 +313,7 @@ class GameAssistantApp:
         self.text_container.pack(fill=BOTH, expand=True)
 
         # テキストボックスとスクロールバーの追加
-        self.output_textbox = ttk.Text(master=self.text_container, height=10, width=50, wrap=WORD)
+        self.output_textbox = ttk.Text(master=self.text_container, height=5, width=50, wrap=WORD)
         self.output_textbox.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5), pady=(0, 10))
 
         self.scrollbar = ttk.Scrollbar(self.text_container, orient=VERTICAL, command=self.output_textbox.yview)
@@ -313,15 +322,15 @@ class GameAssistantApp:
         self.output_textbox['yscrollcommand'] = self.scrollbar.set
 
         self.record_container = ttk.Frame(right_frame)
-        self.record_container.pack(fill=X)
+        self.record_container.pack(fill=X, padx=10, pady=10)
 
         # 録音ボタン
         self.record_button = ttk.Button(self.record_container, text="録音開始", style="success.TButton", command=self.toggle_recording)
-        self.record_button.pack(side=LEFT, pady=10)
+        self.record_button.pack(side=LEFT, padx=5)
 
         # 録音ボタン
         self.record_wait_button = ttk.Button(self.record_container, text="録音待機", style="success.TButton", command=self.toggle_record_waiting)
-        self.record_wait_button.pack(side=LEFT, pady=10)
+        self.record_wait_button.pack(side=LEFT, padx=5)
 
         # デフォルトでデバイスインデックスを取得
         if self.audio_devices:
@@ -645,6 +654,7 @@ def on_closing():
 
 if __name__ == "__main__":
     root = ttk.Window(themename="superhero")
+    root.geometry("800x600") # 初期サイズを設定
     app = GameAssistantApp(root)
     root.protocol("WM_DELETE_WINDOW", on_closing)
     root.mainloop()
