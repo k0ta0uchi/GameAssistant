@@ -1,6 +1,6 @@
 python-dotenv
 aiohttp
-mem0ai
+llama-cpp-python
 faster-whisper==1.1.1
 pillow==11.1.0
 PyAudio==0.2.14

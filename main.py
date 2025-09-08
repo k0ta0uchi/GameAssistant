@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 import keyboard  # keyboardライブラリをインポート
 import json  # JSONライブラリをインポート
 import asyncio  # asyncioを追加
+from scripts.memory import MemoryManager # MemoryManagerをインポート
 
 
 import scripts.capture as capture
@@ -87,6 +88,116 @@ class GeminiResponseWindow(ttk.Toplevel):
         """ラベルのテキストを消去"""
         if self.label:
             self.label.configure(text="")
+
+class MemoryWindow(ttk.Toplevel):
+    def __init__(self, parent, memory_manager):
+        super().__init__(parent)
+        self.parent = parent
+        self.memory_manager = memory_manager
+        self.title("メモリー管理")
+        self.geometry("500x400")
+
+        self.create_widgets()
+        self.load_memories_to_listbox()
+
+    def create_widgets(self):
+        # フレーム
+        main_frame = ttk.Frame(self, padding=10)
+        main_frame.pack(fill=BOTH, expand=True)
+
+        # 左側（リストボックス）
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
+
+        self.memory_listbox = ttk.Treeview(left_frame, columns=("key", "value"), show="headings")
+        self.memory_listbox.heading("key", text="キー")
+        self.memory_listbox.heading("value", text="値")
+        self.memory_listbox.pack(fill=BOTH, expand=True)
+        self.memory_listbox.bind("<<TreeviewSelect>>", self.on_memory_select)
+
+        # 右側（編集エリア）
+        right_frame = ttk.Frame(main_frame, width=200)
+        right_frame.pack(side=RIGHT, fill=Y)
+        right_frame.pack_propagate(False)
+
+        key_label = ttk.Label(right_frame, text="キー:")
+        key_label.pack(fill=X, pady=(0, 5))
+        self.key_entry = ttk.Entry(right_frame)
+        self.key_entry.pack(fill=X, pady=(0, 10))
+
+        value_label = ttk.Label(right_frame, text="値:")
+        value_label.pack(fill=X, pady=(0, 5))
+        self.value_text = ttk.Text(right_frame, height=5)
+        self.value_text.pack(fill=BOTH, expand=True, pady=(0, 10))
+
+        # ボタン
+        button_frame = ttk.Frame(right_frame)
+        button_frame.pack(fill=X)
+
+        save_button = ttk.Button(button_frame, text="保存", command=self.save_memory, style="success.TButton")
+        save_button.pack(side=LEFT, expand=True, fill=X, padx=(0, 5))
+
+        delete_button = ttk.Button(button_frame, text="削除", command=self.delete_memory, style="danger.TButton")
+        delete_button.pack(side=LEFT, expand=True, fill=X)
+
+    def load_memories_to_listbox(self):
+        """メモリーをリストボックスに読み込む"""
+        # 既存のアイテムをクリア
+        for item in self.memory_listbox.get_children():
+            self.memory_listbox.delete(item)
+        # メモリーを読み込んで追加
+        memories = self.memory_manager.get_all_memories()
+        for key, value in memories.items():
+            self.memory_listbox.insert("", "end", values=(key, value))
+
+    def on_memory_select(self, event):
+        """リストボックスでメモリーが選択されたときの処理"""
+        selected_items = self.memory_listbox.selection()
+        if not selected_items:
+            return
+
+        selected_item = selected_items[0]
+        item = self.memory_listbox.item(selected_item)
+        key, value = item['values']
+
+        self.key_entry.delete(0, END)
+        self.key_entry.insert(0, key)
+        self.value_text.delete("1.0", END)
+        self.value_text.insert("1.0", value)
+
+    def save_memory(self):
+        """メモリーを保存する"""
+        key = self.key_entry.get()
+        value = self.value_text.get("1.0", END).strip()
+        if not key:
+            # ttkbootstrap.dialogs.Messagebox.show_error("キーは必須です。", title="エラー")
+            print("キーは必須です。")
+            return
+
+        self.memory_manager.add_or_update_memory(key, value)
+        self.load_memories_to_listbox()
+        self.clear_entries()
+
+    def delete_memory(self):
+        """メモリーを削除する"""
+        key = self.key_entry.get()
+        if not key:
+            # ttkbootstrap.dialogs.Messagebox.show_error("削除するキーを指定してください。", title="エラー")
+            print("削除するキーを指定してください。")
+            return
+
+        if self.memory_manager.delete_memory(key):
+            self.load_memories_to_listbox()
+            self.clear_entries()
+        else:
+            # ttkbootstrap.dialogs.Messagebox.show_error("指定されたキーのメモリーが見つかりません。", title="エラー")
+            print("指定されたキーのメモリーが見つかりません。")
+
+    def clear_entries(self):
+        """入力フィールドをクリアする"""
+        self.key_entry.delete(0, END)
+        self.value_text.delete("1.0", END)
+        self.memory_listbox.selection_remove(self.memory_listbox.selection())
 
 class GameAssistantApp:
     def __init__(self, root):
@@ -175,6 +286,7 @@ class GameAssistantApp:
         self.twitch_auth_status = ttk.StringVar(value="未認証") # 認証ステータス
 
         self.session = gemini.GeminiSession(self.custom_instruction)
+        self.memory_manager = MemoryManager()
         self.twitch_bot = None
         self.twitch_thread = None
         self.twitch_bot_loop = None
@@ -262,6 +374,10 @@ class GameAssistantApp:
  
         self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230)
         self.selected_window_label.pack(fill=X)
+
+        # メモリー管理ボタン
+        memory_button = ttk.Button(left_frame, text="メモリー管理", command=self.open_memory_window, style="info.TButton")
+        memory_button.pack(fill=X, pady=(15, 0))
 
         self.response_frame = ttk.Frame(right_frame, padding=(0, 0, 0, 10))
         self.response_frame.pack(fill=X)
@@ -654,6 +770,10 @@ class GameAssistantApp:
             response = self.session.generate_content(self.prompt, image_path, self.is_private.get())
             return response
         return "プロンプトがありません。"
+
+    def open_memory_window(self):
+        """メモリー管理ウィンドウを開く"""
+        MemoryWindow(self.root, self.memory_manager)
 
     def authenticate_twitch(self):
         """Twitch認証を非同期で実行する"""

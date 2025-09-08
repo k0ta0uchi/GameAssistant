@@ -26,7 +26,7 @@ _chroma_client: Optional[Any] = None
 _gemini_client = None
 
 def _get_chroma_settings() -> Settings:
-    persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
+    persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "chromadb")
     return Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_dir)
 
 def get_chroma_client() -> Any:
@@ -37,7 +37,7 @@ def get_chroma_client() -> Any:
     """
     global _chroma_client
     if _chroma_client is None:
-        persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
+        persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "chromadb")
 
         # 1) まず PersistentClient を使ってローカル永続化を試す（一般的で簡単）
         try:
