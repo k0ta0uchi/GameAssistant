@@ -1,15 +1,14 @@
 {
     "audio_device": "Voicemeeter Out B1 (VB-Audio Vo",
-    "window": "ゲームアシスタント",
+    "window": "Android Device",
     "use_image": true,
     "is_private": false,
     "show_response_in_new_window": false,
     "response_display_duration": 5000,
     "tts_engine": "voicevox",
-    "twitch_bot_username": "",
-    "twitch_channel": "",
-    "twitch_oauth_token": "",
-    "twitch_client_id": "",
-    "twitch_client_secret": "",
-    "twitch_bot_id": ""
+    "twitch_bot_username": "bot_guri",
+    "twitch_channel": "k0ta0uchi",
+    "twitch_client_id": "4nbw43ty6haeijxzecl1n0g7lz9c0z",
+    "twitch_client_secret": "y5hivzbum4fsc4n5ik59alr4ucoyhq",
+    "twitch_bot_id": "1364314190"
 }

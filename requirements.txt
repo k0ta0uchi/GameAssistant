@@ -1,11 +1,12 @@
-dotenv==0.9.9
+python-dotenv
+aiohttp
+mem0ai
 faster-whisper==1.1.1
 pillow==11.1.0
 PyAudio==0.2.14
 PyGetWindow==0.0.9
 ttkbootstrap==1.10.1
 keyboard==0.13.5
-mem0ai==0.1.79
 vecs==0.4.5
 soundfile==0.13.1
 pywin32
@@ -18,3 +19,4 @@ playwright
 google.generativeai
 sounddevice
 twitchio
+pvporcupine

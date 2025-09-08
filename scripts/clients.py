@@ -31,14 +31,31 @@ def _get_chroma_settings() -> Settings:
 
 def get_chroma_client() -> Any:
     """
-    シングルトンで chromadb.Client を返す。Pylance と型の齟齬があるため
-    呼び出しは # type: ignore[call-arg] を入れている（実行時は問題なし）。
+    新しい Chroma の永続クライアントを使う（PersistentClient）。
+    - 既存の古いデータがある場合は chroma-migrate が必要（下記参照）。
+    - PersistentClient のシグネチャが環境により変わるため type ignore を付ける。
     """
     global _chroma_client
     if _chroma_client is None:
-        settings = _get_chroma_settings()
-        # chromadb.Client のシグネチャと型スタブが噛み合わない場合があるため ignore
-        _chroma_client = chromadb.Client(settings=settings)  # type: ignore[call-arg]
+        persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "./chroma_db")
+
+        # 1) まず PersistentClient を使ってローカル永続化を試す（一般的で簡単）
+        try:
+            # ここは chromadb.PersistentClient(path=...) の形式が安定してる例が多い
+            _chroma_client = chromadb.PersistentClient(path=persist_dir)  # type: ignore[call-arg]
+            logger.info("Using chromadb.PersistentClient (path=%s)", persist_dir)
+            return _chroma_client
+        except Exception as e:
+            logger.warning("PersistentClient construction failed: %s", e)
+
+        # 2) fallback: 簡易 client（in-memory / ephemeral）
+        try:
+            _chroma_client = chromadb.Client()  # type: ignore[call-arg]
+            logger.info("Using ephemeral chromadb.Client() as fallback")
+            return _chroma_client
+        except Exception as e:
+            logger.exception("Failed to construct chromadb client fallback: %s", e)
+            raise
     return _chroma_client
 
 # optional encryption helpers using Fernet

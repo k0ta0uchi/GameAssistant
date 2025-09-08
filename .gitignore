@@ -19,3 +19,9 @@ temp_*
 .serena/
 
 .vscode/
+
+wheels/
+
+test/
+
+.twitch_tokens.json
