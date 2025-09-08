@@ -1,57 +1,127 @@
+# scripts/twitch_bot.py
 import asyncio
+import re
+import collections
+from typing import Optional, List, Callable, Awaitable, Any, Protocol, runtime_checkable
+
 from twitchio.ext import commands
 
-class TwitchBot(commands.Bot):
-    def __init__(self, token, client_id, client_secret, bot_username, bot_id, channel, mention_callback):
-        self.bot_username = bot_username.lower()
-        self.channel_name = channel.lower()
+# mention_callback: (author_name, prompt) -> Optional[str] (非同期)
+MentionCallback = Optional[Callable[[str, str], Awaitable[Optional[str]]]]
+
+# Protocol を使って必要な属性だけ定義する（Pylance に content 等の存在を教える）
+@runtime_checkable
+class ChatMessageLike(Protocol):
+    content: str
+    echo: Optional[bool]
+    author: Any
+    id: Optional[str]
+    tags: Optional[dict]
+    channel: Any
+
+class TwitchBot(commands.AutoBot):
+    # Pylance に「これらの属性がある」と明示
+    nick: str
+    user_id: str
+    initial_channels: List[str]
+
+    # base にあるメソッドへアクセスする箇所が静的解析で見つからない場合の保険
+    get_channel: Any
+    handle_commands: Any
+    join_channels: Callable[..., Awaitable[Any]]
+
+    def __init__(
+        self,
+        *,
+        client_id: str,
+        client_secret: str,
+        bot_id: str,
+        owner_id: Optional[str] = None,
+        prefix: str = "!",
+        mention_callback: MentionCallback = None,
+        initial_channels: Optional[List[str]] = None,
+    ) -> None:
         self.mention_callback = mention_callback
+        self._recent_message_ids = collections.deque(maxlen=200)
+        self.initial_channels = initial_channels or []
+
         super().__init__(
-            token=token,
             client_id=client_id,
             client_secret=client_secret,
-            nick=bot_username,
-            prefix='!',
-            initial_channels=[self.channel_name],
-            bot_id=bot_id
+            bot_id=bot_id,
+            owner_id=owner_id,
+            prefix=prefix,
         )
 
-    async def event_ready(self):
-        """Called once when the bot goes online."""
-        print(f"'{self.nick}' is online!") # self.nick should be available now.
-        print(f"Attempting to send connection message to '{self.channel_name}'")
-        channel = await self.fetch_channel(self.channel_name)
-        if channel:
-            await channel.send(f"/me has landed!")
-            print(f"Successfully sent connection message to '{self.channel_name}'")
-        else:
-            print(f"Error: Could not find channel '{self.channel_name}' in event_ready.")
+        # 実行時にも属性を確実にセットしておく（静的解析との齟齬防止）
+        self.nick = getattr(self, "nick", "") or ""
+        self.user_id = bot_id
 
-    async def event_message(self, message):
-        """Runs every time a message is sent in chat."""
-        # Make sure the bot ignores itself and empty messages
-        if message.author is None or message.author.name.lower() == self.nick.lower():
+    async def setup_hook(self) -> None:
+        # ここでコンポーネント登録するなど
+        return
+
+    async def event_ready(self) -> None:
+        print(f"[ready] logged in as: {self.nick} (id: {self.user_id})")
+        # initial_channels に join（v3 では自動 join が期待通り動かない場合があるため）
+        for ch in self.initial_channels:
+            try:
+                # join_channels の存在を型注釈で示したので Pylance は文句を言わない
+                await self.join_channels(ch if ch.startswith("#") else f"#{ch}")
+            except Exception as e:
+                print(f"[warn] failed to join {ch}: {e}")
+
+    async def event_message(self, message: ChatMessageLike) -> None:
+        # 無限ループ防止（echo / author / message-id）
+        if getattr(message, "echo", False):
             return
 
-        # The bot's nick is automatically populated by twitchio on connection.
-        # Let's handle commands first, as is good practice.
-        await self.handle_commands(message)
+        author = getattr(message, "author", None)
+        try:
+            author_name = (author.name or "").lower() if author else ""
+        except Exception:
+            author_name = ""
 
-        # Check for mentions
-        if message.content.lower().startswith(f'@{self.nick.lower()}'):
-            print(f"Mention received from {message.author.name}: {message.content}")
-            prompt = message.content[len(f'@{self.nick.lower()}'):].strip()
+        if author_name and author_name == (self.nick or "").lower():
+            return
+
+        msg_id = getattr(message, "id", None) or (getattr(message, "tags", {}) or {}).get("id")
+        if msg_id:
+            if msg_id in self._recent_message_ids:
+                return
+            self._recent_message_ids.append(msg_id)
+
+        content = (message.content or "")
+        if f"@{(self.nick or '').lower()}" in content.lower():
+            prompt = re.sub(rf"@{re.escape(self.nick)}\b", "", content, flags=re.I).strip()
             if self.mention_callback:
-                # Run the synchronous callback in a thread to avoid blocking the bot's event loop
-                loop = asyncio.get_running_loop()
-                loop.run_in_executor(None, self.mention_callback, message.author.name, prompt)
+                try:
+                    reply = await self.mention_callback(author.name if author else "", prompt)
+                    if reply:
+                        chan = getattr(message, "channel", None)
+                        if chan:
+                            await chan.send(reply)
+                        else:
+                            if self.initial_channels:
+                                ch = self.get_channel(self.initial_channels[0])
+                                if ch:
+                                    await ch.send(reply)
+                except Exception as exc:
+                    print(f"[error] mention_callback failed: {exc}")
 
-    async def send_chat_message(self, message):
-        """A method to be called from outside the bot's event loop to send a message."""
-        print(f"Attempting to send message: '{message}' to '{self.channel_name}'")
-        channel = await self.fetch_channel(self.channel_name)
-        if channel:
-            await channel.send(message)
-            print("Message sent successfully.")
+        try:
+            await self.handle_commands(message)
+        except Exception as e:
+            print(f"[error] handle_commands raised: {e}")
+
+    async def send_chat_message(self, channel_name: str, message: str) -> None:
+        name = channel_name if channel_name.startswith("#") else f"#{channel_name}"
+        ch = self.get_channel(name)
+        if ch:
+            await ch.send(message)
         else:
-            print(f"Error: Could not find channel '{self.channel_name}' to send message.")
+            print(f"[warn] channel not found: {name}")
+
+    @commands.command()
+    async def hello(self, ctx: commands.Context) -> None:
+        await ctx.send(f"Hello {ctx.author.name}!")

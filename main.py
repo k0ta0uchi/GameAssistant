@@ -103,9 +103,6 @@ class GameAssistantApp:
         self.selected_device = ttk.StringVar(value=default_audio_device)
         self.device_index = None  # デバイスインデックスを保存する変数
         
-        # self.loopback_devices = self.audio_devices # 同じリストを共有
-        # default_loopback_device = self.settings.get("loopback_device", self.loopback_devices[0] if self.loopback_devices else "")
-        # self.selected_loopback_device = ttk.StringVar(value=default_loopback_device)
         self.loopback_device_index = None # 無効化のためNoneに設定
         self.recording = False
         self.recording_complete = False  # 録音完了フラグ
@@ -192,20 +189,18 @@ class GameAssistantApp:
     def save_settings(self):
         """設定を保存する"""
         self.settings["audio_device"] = self.selected_device.get()
-        # self.settings["loopback_device"] = self.selected_loopback_device.get()
         self.settings["window"] = self.selected_window_title.get()
         self.settings["use_image"] = self.use_image.get()
         self.settings["is_private"] = self.is_private.get()
-        self.settings["show_response_in_new_window"] = self.show_response_in_new_window.get() # 設定を保存
-        self.settings["response_display_duration"] = self.response_display_duration.get()  # 設定を保存
-        self.settings["tts_engine"] = self.tts_engine.get() # TTSエンジン設定を保存
+        self.settings["show_response_in_new_window"] = self.show_response_in_new_window.get()
+        self.settings["response_display_duration"] = self.response_display_duration.get()
+        self.settings["tts_engine"] = self.tts_engine.get()
         self.settings["twitch_bot_username"] = self.twitch_bot_username.get()
         self.settings["twitch_channel"] = self.twitch_channel.get()
         self.settings["twitch_oauth_token"] = self.twitch_oauth_token.get()
         self.settings["twitch_client_id"] = self.twitch_client_id.get()
         self.settings["twitch_client_secret"] = self.twitch_client_secret.get()
         self.settings["twitch_bot_id"] = self.twitch_bot_id.get()
-
 
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
@@ -218,12 +213,12 @@ class GameAssistantApp:
         # メインフレームの作成
         main_frame = ttk.Frame(self.root, padding=20)
         main_frame.pack(fill=BOTH, expand=True)
-        main_frame.pack_propagate(False) # ウィジェットのサイズに合わせてフレームがリサイズされないようにする
+        main_frame.pack_propagate(False)
 
         # 左カラムの作成
-        left_frame = ttk.Frame(main_frame, width=250) # 固定幅を設定
+        left_frame = ttk.Frame(main_frame, width=250)
         left_frame.pack(side=LEFT, fill=Y, padx=(0, 20))
-        left_frame.pack_propagate(False) # ウィジェットのサイズに合わせてフレームがリサイズされないようにする
+        left_frame.pack_propagate(False)
 
         # 右カラムの作成
         right_frame = ttk.Frame(main_frame)
@@ -239,18 +234,17 @@ class GameAssistantApp:
             textvariable=self.selected_device,
             values=self.audio_devices,
             state=READONLY,
-            width=30, # 固定幅を設定
+            width=30,
         )
         self.audio_dropdown.pack(fill=X, pady=(0, 5))
         self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
-        self.device_index_label = ttk.Label(master=device_frame, text="Device index: ", wraplength=230) # 折り返しを設定
+        self.device_index_label = ttk.Label(master=device_frame, text="Device index: ", wraplength=230)
         self.device_index_label.pack(fill=X)
 
         # ウィンドウ設定
         window_frame = ttk.Frame(left_frame)
         window_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(window_frame, text="ウィンドウ", style="inverse-primary").pack(fill=X, pady=(0, 8))
-        # ドロップダウンとボタンを横並びにするためのフレーム
         combo_button_frame = ttk.Frame(window_frame)
         combo_button_frame.pack(fill=X)
 
@@ -263,11 +257,10 @@ class GameAssistantApp:
         self.window_dropdown.pack(side=LEFT, fill=X, expand=True)
         self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
 
-        # ウィンドウリスト更新ボタン (アイコン風)
         refresh_button = ttk.Button(combo_button_frame, text="🔄", command=self.refresh_window_list, style="info.TButton", width=2)
         refresh_button.pack(side=LEFT, padx=(5, 0))
-
-        self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230) # 折り返しを設定
+ 
+        self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230)
         self.selected_window_label.pack(fill=X)
 
         # --- 右カラム ---
@@ -284,8 +277,8 @@ class GameAssistantApp:
         self.level_meter = ttk.Progressbar(
             self.meter_container,
             length=300,
-            maximum=100,  # 音量レベルの最大値
-            value=0,  # 初期値
+            maximum=100,
+            value=0,
             style="danger.Horizontal.TProgressbar",
         )
         self.level_meter.pack(pady=10)
@@ -358,6 +351,11 @@ class GameAssistantApp:
         ttk.Label(channel_frame, text="Channel:", width=12).pack(side=LEFT)
         ttk.Entry(channel_frame, textvariable=self.twitch_channel).pack(side=LEFT, fill=X, expand=True)
 
+        token_frame = ttk.Frame(twitch_frame)
+        token_frame.pack(fill=X, pady=2)
+        ttk.Label(token_frame, text="OAuth Token:", width=12).pack(side=LEFT)
+        ttk.Entry(token_frame, textvariable=self.twitch_oauth_token, show="*").pack(side=LEFT, fill=X, expand=True)
+
         client_id_frame = ttk.Frame(twitch_frame)
         client_id_frame.pack(fill=X, pady=2)
         ttk.Label(client_id_frame, text="Client ID:", width=12).pack(side=LEFT)
@@ -367,11 +365,6 @@ class GameAssistantApp:
         client_secret_frame.pack(fill=X, pady=2)
         ttk.Label(client_secret_frame, text="Client Secret:", width=12).pack(side=LEFT)
         ttk.Entry(client_secret_frame, textvariable=self.twitch_client_secret, show="*").pack(side=LEFT, fill=X, expand=True)
-
-        token_frame = ttk.Frame(twitch_frame)
-        token_frame.pack(fill=X, pady=2)
-        ttk.Label(token_frame, text="OAuth Token:", width=12).pack(side=LEFT)
-        ttk.Entry(token_frame, textvariable=self.twitch_oauth_token, show="*").pack(side=LEFT, fill=X, expand=True)
 
         self.twitch_connect_button = ttk.Button(twitch_frame, text="Connect to Twitch", command=self.toggle_twitch_connection, style="primary.TButton")
         self.twitch_connect_button.pack(fill=X, pady=5)
@@ -426,7 +419,7 @@ class GameAssistantApp:
         selected_device_name = self.selected_device.get()
         self.device_index = self.get_device_index_from_name(selected_device_name)
         self.device_index_label.config(text=f"選択されたデバイス: {self.device_index}-{selected_device_name}")
-        self.save_settings()  # 設定を保存
+        self.save_settings()
 
     def update_window(self, event=None):
         """選択されたウィンドウを更新"""
@@ -434,11 +427,11 @@ class GameAssistantApp:
         self.selected_window = capture.get_window_by_title(selected_window_title)
         if self.selected_window:
             print(f"選択されたウィンドウ: {self.selected_window.title}")
-            self.selected_window_label.config(text=f"選択されたウィンドウ: {self.selected_window.title}")  # タイトルを表示
+            self.selected_window_label.config(text=f"選択されたウィンドウ: {self.selected_window.title}")
         else:
             print("ウィンドウが見つかりませんでした")
             self.selected_window_label.config(text="選択されたウィンドウ: (見つかりません)")
-        self.save_settings()  # 設定を保存
+        self.save_settings()
         self.update_record_buttons_state()
 
     def refresh_window_list(self):
@@ -518,7 +511,7 @@ class GameAssistantApp:
         self.record_waiting = True
         self.recording_complete = False
         self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-        self.stop_event.clear()  # イベントをクリア
+        self.stop_event.clear()
 
         # 録音をバックグラウンドスレッドで実行
         self.record_waiting_thread = threading.Thread(target=self.wait_for_keyword_thread)
@@ -550,7 +543,7 @@ class GameAssistantApp:
         """録音待機を停止する"""
         self.record_waiting = False
         self.record_wait_button.config(text="録音待機", style="success.TButton")
-        self.stop_event.set()  # スレッド停止イベントをセット
+        self.stop_event.set()
 
     def update_record_buttons_state(self, event=None):
         """録音ボタンの状態を更新する"""
@@ -584,7 +577,7 @@ class GameAssistantApp:
             # asyncioのイベントループを管理
             try:
                 loop = asyncio.get_running_loop()
-            except RuntimeError:  # 'RuntimeError: There is no current event loop...'
+            except RuntimeError:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
@@ -640,7 +633,6 @@ class GameAssistantApp:
             GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
         else:
             self.response_label.config(text=response_text)
-            # 一定時間後にテキストを消去
             self.root.after(self.response_display_duration.get(), lambda: self.response_label.config(text=""))
 
 
@@ -658,7 +650,7 @@ class GameAssistantApp:
         )
         print("録音完了")
         self.recording_complete = True
-        if self.recording: # ユーザーが手動で停止した場合のみ後処理を行う
+        if self.recording:
             self.root.after(0, self.stop_recording)
     
     def wait_for_keyword_thread(self):
@@ -677,12 +669,12 @@ class GameAssistantApp:
         if result:
             print("録音完了")
             self.recording_complete = True
-            if not self.stop_event.is_set(): # 待機がキャンセルされなかった場合のみ後処理
+            if not self.stop_event.is_set():
                 self.root.after(0, self.stop_record_temporary)
 
     def update_level_meter(self, volume):
         """レベルメーターを更新する"""
-        level = int(volume / 100)  # ボリュームを0-100の範囲に変換
+        level = int(volume / 100)
         self.root.after(0, self.set_level_meter_value, level)
 
     def set_level_meter_value(self, level):
@@ -693,24 +685,21 @@ class GameAssistantApp:
         print("ウィンドウをキャプチャします…")
         try:
             capture.capture_screen(self.selected_window, self.screenshot_file_path)
-            self.load_and_display_image(self.screenshot_file_path)  # ここを変更
+            self.load_and_display_image(self.screenshot_file_path)
         except Exception as e:
             print(f"キャプチャできませんでした： {e}")
 
     def load_and_display_image(self, image_path):
         """画像を読み込み、別スレッドで表示する"""
-        # 画像読み込みとリサイズを別スレッドで実行
         threading.Thread(target=self.process_image, args=(image_path,)).start()
 
     def process_image(self, image_path):
         """画像処理を行う関数"""
         try:
             image = Image.open(image_path)
-            # 最大サイズに合わせてリサイズ
-            max_size = (400, 300)  # 例：幅400px、高さ300px
+            max_size = (400, 300)
             image.thumbnail(max_size)
             self.image = ImageTk.PhotoImage(image)
-            # GUIスレッドで画像を更新
             self.root.after(0, self.update_image_label)
         except Exception as e:
             print(f"画像処理エラー: {e}")
@@ -750,13 +739,14 @@ class GameAssistantApp:
 
     def connect_twitch_bot(self):
         token = self.twitch_oauth_token.get()
-        bot_username = self.twitch_bot_username.get()
+        nick = self.twitch_bot_username.get()
         channel = self.twitch_channel.get()
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
         bot_id = self.twitch_bot_id.get()
 
-        if not all([token, bot_username, channel, client_id, client_secret, bot_id]):
+
+        if not all([token, nick, channel, client_id, client_secret, bot_id]):
             print("Twitchの認証情報が不足しています。設定を確認してください。")
             return
 
@@ -766,9 +756,9 @@ class GameAssistantApp:
                 token=token,
                 client_id=client_id,
                 client_secret=client_secret,
-                bot_username=bot_username,
+                nick=nick,
                 bot_id=bot_id,
-                channel=channel,
+                initial_channels=[channel],
                 mention_callback=self.handle_twitch_mention
             )
 
@@ -784,14 +774,14 @@ class GameAssistantApp:
     def run_bot(self):
         self.twitch_bot_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.twitch_bot_loop)
-        self.twitch_bot_loop.run_until_complete(self.twitch_bot.start())
+        self.twitch_bot_loop.run_until_complete(self.twitch_bot.run())
 
     def disconnect_twitch_bot(self):
         print("Twitchボットから切断しています...")
         if self.twitch_bot and self.twitch_bot_loop:
             future = asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
             try:
-                future.result(timeout=5)  # Wait for the coroutine to finish
+                future.result(timeout=5)
             except Exception as e:
                 print(f"Error closing bot: {e}")
 
@@ -804,25 +794,18 @@ class GameAssistantApp:
         self.twitch_connect_button.config(text="Connect to Twitch", style="primary.TButton")
         print("Twitchボットから切断しました。")
 
-    def handle_twitch_mention(self, author, prompt):
+    async def handle_twitch_mention(self, author, prompt):
         """Twitchでのメンションを処理するコールバック"""
         print(f"Twitchのメンションを処理中: {author} - {prompt}")
 
         # Geminiで応答を生成
         response = self.session.generate_content(prompt, image_path=None, is_private=False)
 
-        if response and self.twitch_bot and self.twitch_bot_loop:
+        if response and self.twitch_bot:
             # メッセージの先頭にメンションを追加して返信
             reply_message = f"@{author} {response}"
-            future = asyncio.run_coroutine_threadsafe(
-                self.twitch_bot.send_chat_message(reply_message),
-                self.twitch_bot_loop
-            )
-            try:
-                future.result(timeout=10)
-                print(f"Twitchに応答を送信しました: {reply_message}")
-            except Exception as e:
-                print(f"Twitchへの応答送信に失敗しました: {e}")
+            await self.twitch_bot.send_chat_message(self.twitch_channel.get(), reply_message)
+
 
 def on_closing(app_instance):
     print("アプリケーションを終了します...")
@@ -834,7 +817,7 @@ def on_closing(app_instance):
 
 if __name__ == "__main__":
     root = ttk.Window(themename="superhero")
-    root.geometry("800x600") # 初期サイズを設定
+    root.geometry("800x600")
     app = GameAssistantApp(root)
     root.protocol("WM_DELETE_WINDOW", lambda: on_closing(app))
     root.mainloop()
