@@ -17,3 +17,4 @@ kokoro
 playwright
 google.generativeai
 sounddevice
+twitchio

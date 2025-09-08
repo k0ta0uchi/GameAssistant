@@ -7,6 +7,7 @@ import scripts.whisper as whisper
 import scripts.gemini as gemini
 import scripts.voice as voice
 from scripts.search import ai_search  # ai_searchをインポート
+from scripts.twitch_bot import TwitchBot
 import threading
 import sys
 import os
@@ -148,7 +149,16 @@ class GameAssistantApp:
         self.show_response_in_new_window = ttk.BooleanVar(value=self.settings.get("show_response_in_new_window", True)) # デフォルト値を設定ファイルから読み込む
         self.response_display_duration = ttk.IntVar(value=self.settings.get("response_display_duration", 10000))  # デフォルト値を設定ファイルから読み込む
         self.tts_engine = ttk.StringVar(value=self.settings.get("tts_engine", "voicevox"))  # TTSエンジン設定
+
+        # Twitch設定
+        self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
+        self.twitch_channel = ttk.StringVar(value=self.settings.get("twitch_channel", ""))
+        self.twitch_oauth_token = ttk.StringVar(value=self.settings.get("twitch_oauth_token", ""))
+
         self.session = gemini.GeminiSession(self.custom_instruction)
+        self.twitch_bot = None
+        self.twitch_thread = None
+        self.twitch_bot_loop = None
 
         self.create_widgets()
 
@@ -186,6 +196,9 @@ class GameAssistantApp:
         self.settings["show_response_in_new_window"] = self.show_response_in_new_window.get() # 設定を保存
         self.settings["response_display_duration"] = self.response_display_duration.get()  # 設定を保存
         self.settings["tts_engine"] = self.tts_engine.get() # TTSエンジン設定を保存
+        self.settings["twitch_bot_username"] = self.twitch_bot_username.get()
+        self.settings["twitch_channel"] = self.twitch_channel.get()
+        self.settings["twitch_oauth_token"] = self.twitch_oauth_token.get()
 
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
@@ -317,6 +330,30 @@ class GameAssistantApp:
         voicevox_radio.pack(side=LEFT, padx=5)
         gemini_radio = ttk.Radiobutton(tts_frame, text="Gemini", variable=self.tts_engine, value="gemini", command=self.save_settings)
         gemini_radio.pack(side=LEFT, padx=5)
+
+        # Twitch設定
+        twitch_frame = ttk.Frame(left_frame)
+        twitch_frame.pack(fill=X, pady=(0, 15))
+        ttk.Label(twitch_frame, text="Twitch Bot", style="inverse-primary").pack(fill=X, pady=(0, 8))
+
+        bot_username_frame = ttk.Frame(twitch_frame)
+        bot_username_frame.pack(fill=X, pady=2)
+        ttk.Label(bot_username_frame, text="Bot Username:", width=12).pack(side=LEFT)
+        ttk.Entry(bot_username_frame, textvariable=self.twitch_bot_username).pack(side=LEFT, fill=X, expand=True)
+
+        channel_frame = ttk.Frame(twitch_frame)
+        channel_frame.pack(fill=X, pady=2)
+        ttk.Label(channel_frame, text="Channel:", width=12).pack(side=LEFT)
+        ttk.Entry(channel_frame, textvariable=self.twitch_channel).pack(side=LEFT, fill=X, expand=True)
+
+        token_frame = ttk.Frame(twitch_frame)
+        token_frame.pack(fill=X, pady=2)
+        ttk.Label(token_frame, text="OAuth Token:", width=12).pack(side=LEFT)
+        ttk.Entry(token_frame, textvariable=self.twitch_oauth_token, show="*").pack(side=LEFT, fill=X, expand=True)
+
+        self.twitch_connect_button = ttk.Button(twitch_frame, text="Connect to Twitch", command=self.toggle_twitch_connection, style="primary.TButton")
+        self.twitch_connect_button.pack(fill=X, pady=5)
+
 
         # 画像表示エリア
         self.image_frame = ttk.Frame(right_frame, height=300)
@@ -683,15 +720,93 @@ class GameAssistantApp:
             return response
         return "プロンプトがありません。"
 
-def on_closing():
+    def toggle_twitch_connection(self):
+        if self.twitch_bot and self.twitch_bot.ws and self.twitch_bot.ws.is_alive:
+            self.disconnect_twitch_bot()
+        else:
+            self.connect_twitch_bot()
+
+    def connect_twitch_bot(self):
+        token = self.twitch_oauth_token.get()
+        bot_username = self.twitch_bot_username.get()
+        channel = self.twitch_channel.get()
+
+        if not all([token, bot_username, channel]):
+            print("Twitchの認証情報が不足しています。設定を確認してください。")
+            return
+
+        print("Twitchボットに接続しています...")
+        try:
+            self.twitch_bot = TwitchBot(
+                token=token,
+                bot_username=bot_username,
+                channel=channel,
+                mention_callback=self.handle_twitch_mention
+            )
+
+            self.twitch_thread = threading.Thread(target=self.run_bot, daemon=True)
+            self.twitch_thread.start()
+
+            self.twitch_connect_button.config(text="Disconnect from Twitch", style="danger.TButton")
+        except Exception as e:
+            print(f"Twitchへの接続に失敗しました: {e}")
+            self.twitch_bot = None
+
+
+    def run_bot(self):
+        self.twitch_bot_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.twitch_bot_loop)
+        self.twitch_bot_loop.run_until_complete(self.twitch_bot.start())
+
+    def disconnect_twitch_bot(self):
+        print("Twitchボットから切断しています...")
+        if self.twitch_bot and self.twitch_bot_loop:
+            future = asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
+            try:
+                future.result(timeout=5)  # Wait for the coroutine to finish
+            except Exception as e:
+                print(f"Error closing bot: {e}")
+
+        if self.twitch_thread and self.twitch_thread.is_alive():
+            self.twitch_thread.join(timeout=5)
+
+        self.twitch_bot = None
+        self.twitch_thread = None
+        self.twitch_bot_loop = None
+        self.twitch_connect_button.config(text="Connect to Twitch", style="primary.TButton")
+        print("Twitchボットから切断しました。")
+
+    def handle_twitch_mention(self, author, prompt):
+        """Twitchでのメンションを処理するコールバック"""
+        print(f"Twitchのメンションを処理中: {author} - {prompt}")
+
+        # Geminiで応答を生成
+        response = self.session.generate_content(prompt, image_path=None, is_private=False)
+
+        if response and self.twitch_bot and self.twitch_bot_loop:
+            # メッセージの先頭にメンションを追加して返信
+            reply_message = f"@{author} {response}"
+            future = asyncio.run_coroutine_threadsafe(
+                self.twitch_bot.send_chat_message(reply_message),
+                self.twitch_bot_loop
+            )
+            try:
+                future.result(timeout=10)
+                print(f"Twitchに応答を送信しました: {reply_message}")
+            except Exception as e:
+                print(f"Twitchへの応答送信に失敗しました: {e}")
+
+def on_closing(app_instance):
     print("アプリケーションを終了します...")
+    if app_instance.twitch_bot:
+        app_instance.disconnect_twitch_bot()
     if record.p:
         record.p.terminate()
-    root.destroy()
+    app_instance.root.destroy()
 
 if __name__ == "__main__":
     root = ttk.Window(themename="superhero")
     root.geometry("800x600") # 初期サイズを設定
     app = GameAssistantApp(root)
-    root.protocol("WM_DELETE_WINDOW", on_closing)
+    root.protocol("WM_DELETE_WINDOW", lambda: on_closing(app))
     root.mainloop()
