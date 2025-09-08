@@ -1,320 +1,153 @@
-import os
-import json
-import time
-import webbrowser
 import asyncio
-from pathlib import Path
+import time
 from typing import Optional, Dict, Any
 
-from aiohttp import web
 import aiohttp
+import chromadb
 
 # --- 定数 ---
-TOKEN_FILE = Path(__file__).parent.parent / ".twitch_tokens.json"
-REDIRECT_URI = "http://localhost:8081/callback"
-SCOPES = "chat:read chat:edit moderator:read:followers"  # AutoBotがConduitを管理するためにスコープを追加 # Botに必要なスコープを定義
+# 重要: このリダイレクトURIは、Twitch開発者コンソールに登録されているものと
+#       完全に一致している必要があります。
+#       auth.htmlをホスティングするURL（例: GitHub PagesのURL）に変更してください。
+REDIRECT_URI = "http://localhost:8080/auth.html" # 例: ローカルテスト用
+SCOPES = "chat:read chat:edit moderator:read:followers"
 
-# --- トークン管理 ---
+# --- ChromaDBクライアントの初期化 ---
+chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
+token_collection = chroma_client.get_or_create_collection(name="user_tokens")
 
-class TokenManager:
-    """TwitchのOAuthトークンを管理するクラス"""
+# --- トークン管理 (ChromaDB) ---
 
-    def __init__(self, client_id: str, client_secret: str):
-        self.client_id = client_id
-        self.client_secret = client_secret
-        self.tokens: Dict[str, Any] = self._load_tokens()
+async def save_token_to_db(user_id: str, token_data: Dict[str, Any]):
+    """トークン情報をChromaDBに保存/更新する"""
+    expires_at = time.time() + token_data.get("expires_in", 3600) - 60
+    refresh_token = token_data.get("refresh_token") or ""
+    token_collection.upsert(
+        ids=[user_id],
+        metadatas=[{
+            "token": token_data["access_token"],
+            "refresh": refresh_token,
+            "expires_at": expires_at
+        }],
+        documents=[f"auth_token_for_{user_id}"]
+    )
+    print(f"[info] ユーザーID {user_id} のトークンをDBに保存しました。")
 
-    def _load_tokens(self) -> Dict[str, Any]:
-        """トークンをファイルから読み込む"""
-        if not TOKEN_FILE.exists():
-            return {}
-        try:
-            with open(TOKEN_FILE, "r") as f:
-                data = json.load(f)
-                # ファイルが空、または不正な形式の場合
-                if not isinstance(data, dict):
-                    return {}
-                return data
-        except (json.JSONDecodeError, IOError):
-            return {}
-
-    def _save_tokens(self) -> None:
-        """現在のトークンをファイルに保存する"""
-        try:
-            with open(TOKEN_FILE, "w") as f:
-                json.dump(self.tokens, f, indent=4)
-        except IOError as e:
-            print(f"[error] Failed to save tokens: {e}")
-
-    def get_access_token(self) -> Optional[str]:
-        """有効なアクセストークンを取得する"""
-        return self.tokens.get("access_token")
-
-    async def fetch_user_id(self, username: str) -> Optional[str]:
-        """ユーザー名からユーザーIDを取得する"""
-        access_token = self.get_access_token()
-        if not access_token:
-            return None
-        
-        url = f"https://api.twitch.tv/helix/users?login={username}"
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {access_token}"
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data"):
-                            return data["data"][0]["id"]
-                    return None
-        except aiohttp.ClientError:
-            return None
-
-
-    async def get_or_create_conduit(self) -> Optional[str]:
-        """Conduitを取得、なければ作成する"""
-        app_access_token = await self._get_app_access_token()
-        if not app_access_token:
-            return None
-
-        headers = {
-            "Client-ID": self.client_id,
-            "Authorization": f"Bearer {app_access_token}" # アプリケーションアクセストークンを使用
-        }
-
-        # 1. Conduit のリストを取得
-        try:
-            async with aiohttp.ClientSession() as session:
-                get_url = "https://api.twitch.tv/helix/eventsub/conduits"
-                async with session.get(get_url, headers=headers) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data"):
-                            return data["data"][0]["id"] # 既存のものを利用
-
-                # 2. 既存がなければ作成
-                create_url = "https://api.twitch.tv/helix/eventsub/conduits"
-                body = {"shard_count": 1}
-                async with session.post(create_url, headers=headers, json=body) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("data"):
-                            print(f"[info] Created new conduit with id: {data['data'][0]['id']}")
-                            return data["data"][0]["id"]
-                    else:
-                        print(f"[error] Failed to create conduit: {await resp.text()}")
-                        return None
-        except aiohttp.ClientError as e:
-            print(f"[error] Conduit operation failed: {e}")
-            return None
-        return None
-
-    async def _get_app_access_token(self) -> Optional[str]:
-        """アプリケーションアクセストークンを取得する"""
-        url = f"https://id.twitch.tv/oauth2/token?client_id={self.client_id}&client_secret={self.client_secret}&grant_type=client_credentials"
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("access_token")
-                    else:
-                        print(f"[error] Failed to get app access token: {await resp.text()}")
-                        return None
-        except aiohttp.ClientError as e:
-            print(f"[error] App access token request failed: {e}")
-            return None
-
-    def is_token_valid(self) -> bool:
-        """トークンが有効期限内かチェックする"""
-        if not self.tokens:
-            return False
-        # 有効期限 (expires_at) が現在時刻より未来か
-        expires_at = self.tokens.get("expires_at", 0)
-        return time.time() < expires_at
-
-    async def refresh_tokens(self) -> bool:
-        """リフレッシュトークンを使ってトークンを更新する"""
-        refresh_token = self.tokens.get("refresh_token")
-        if not refresh_token:
-            return False
-
-        url = "https://id.twitch.tv/oauth2/token"
-        params = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=params) as resp:
-                    if resp.status == 200:
-                        new_tokens = await resp.json()
-                        self.update_tokens(new_tokens)
-                        print("[info] Tokens refreshed successfully.")
-                        return True
-                    else:
-                        print(f"[error] Failed to refresh tokens. Status: {resp.status}, Body: {await resp.text()}")
-                        return False
-        except aiohttp.ClientError as e:
-            print(f"[error] Network error during token refresh: {e}")
-            return False
-
-    def update_tokens(self, new_token_data: Dict[str, Any]) -> None:
-        """新しいトークンデータでインスタンスを更新し、保存する"""
-        self.tokens["access_token"] = new_token_data["access_token"]
-        self.tokens["refresh_token"] = new_token_data.get("refresh_token", self.tokens.get("refresh_token"))
-        # expires_in (秒) をもとに有効期限のタイムスタンプを計算
-        expires_in = new_token_data.get("expires_in", 3600)
-        self.tokens["expires_at"] = time.time() + expires_in - 60  # 60秒のマージン
-        self._save_tokens()
-
-
-# --- 認証Webサーバー ---
-
-async def get_new_tokens_via_server(client_id: str, client_secret: str) -> Optional[Dict[str, Any]]:
-    """
-    認証用のWebサーバーを起動し、ユーザー認証を経て新しいトークンを取得する
-    """
-    app_key = "shutdown_event"
-
-    async def handle_login(request: web.Request) -> web.Response:
-        """ユーザーをTwitchの認証ページにリダイレクトする"""
-        auth_url = (
-            f"https://id.twitch.tv/oauth2/authorize"
-            f"?client_id={client_id}"
-            f"&redirect_uri={REDIRECT_URI}"
-            f"&response_type=code"
-            f"&scope={SCOPES}"
-        )
-        raise web.HTTPFound(auth_url)
-
-    async def handle_callback(request: web.Request) -> web.Response:
-        """Twitchからのコールバックを処理し、認証コードをトークンに交換する"""
-        code = request.query.get("code")
-        if not code:
-            return web.Response(text="Authentication failed: No code provided.", status=400)
-
-        # 認証コードをトークンに交換
-        token_url = "https://id.twitch.tv/oauth2/token"
-        params = {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "code": code,
-            "grant_type": "authorization_code",
-            "redirect_uri": REDIRECT_URI,
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(token_url, data=params) as resp:
-                    if resp.status == 200:
-                        token_data = await resp.json()
-                        # 取得したトークンをアプリに保存
-                        token_manager = TokenManager(client_id, client_secret)
-                        token_manager.update_tokens(token_data)
-                        
-                        # サーバーシャットダウンをトリガー
-                        request.app[app_key].set()
-                        
-                        return web.Response(text="Authentication successful! You can close this window now.", content_type="text/html")
-                    else:
-                        error_text = await resp.text()
-                        return web.Response(text=f"Failed to get token: {error_text}", status=resp.status)
-        except aiohttp.ClientError as e:
-            return web.Response(text=f"Network error: {e}", status=500)
-
-    app = web.Application()
-    app.add_routes([
-        web.get('/login', handle_login),
-        web.get('/callback', handle_callback),
-    ])
-    app[app_key] = asyncio.Event()
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, 'localhost', 8081)
-    
-    try:
-        await site.start()
-        print("\n--- Twitch Authentication Required ---")
-        login_url = "http://localhost:8081/login"
-        print(f"Please open this URL in your browser to log in: {login_url}")
-        try:
-            webbrowser.open(login_url)
-        except Exception:
-            print("Could not automatically open browser. Please copy the URL manually.")
-        
-        print("Waiting for authentication to complete...")
-        await app[app_key].wait() # 認証完了まで待機
-        
-        # 認証後のトークンを返す
-        return TokenManager(client_id, client_secret)._load_tokens()
-
-    finally:
-        await runner.cleanup()
-        print("Authentication server has been shut down.")
-
-
-async def ensure_valid_token(client_id: str, client_secret: str, bot_username: str) -> Optional[Dict[str, str]]:
-    """
-    有効なトークンとIDを保証する。
-    戻り値: {"access_token": ..., "bot_id": ...} or None
-    """
-    if not all([client_id, client_secret, bot_username]):
-        raise ValueError("client_id, client_secret, and bot_username must be provided")
-
-    token_manager = TokenManager(client_id, client_secret)
-
-    async def _get_ids_and_tokens() -> Optional[Dict[str, str]]:
-        access_token = token_manager.get_access_token()
-        user_id = await token_manager.fetch_user_id(bot_username)
-        if access_token and user_id:
-            return {"access_token": access_token, "bot_id": user_id}
-        return None
-
-    if token_manager.is_token_valid():
-        print("[info] Existing token is valid.")
-        return await _get_ids_and_tokens()
-    
-    if token_manager.tokens:
-        print("[info] Token has expired. Attempting to refresh...")
-        if await token_manager.refresh_tokens():
-            return await _get_ids_and_tokens()
-
-    print("[info] No valid token found. Starting authentication process...")
-    new_tokens = await get_new_tokens_via_server(client_id, client_secret)
-    if new_tokens:
-        return await _get_ids_and_tokens()
-    
+async def get_token_from_db(user_id: str) -> Optional[Dict[str, Any]]:
+    """ユーザーIDを使ってChromaDBからトークン情報を取得する"""
+    result = token_collection.get(ids=[user_id])
+    metadatas = result.get('metadatas')
+    if metadatas and len(metadatas) > 0:
+        metadata = metadatas[0]
+        if metadata:
+            return dict(metadata)
     return None
 
+async def fetch_user_id_from_token(client_id: str, access_token: str) -> Optional[str]:
+    """アクセストークンを使ってユーザーIDを検証・取得する"""
+    url = "https://id.twitch.tv/oauth2/validate"
+    headers = {"Authorization": f"OAuth {access_token}"}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("client_id") == client_id:
+                        return data.get("user_id")
+    except aiohttp.ClientError as e:
+        print(f"[error] トークン検証中にエラー: {e}")
+    return None
 
-if __name__ == '__main__':
-    # テスト用: このファイル単体で実行すると認証フローが開始される
-    from dotenv import load_dotenv
-    load_dotenv()
+async def refresh_token_for_user(client_id: str, client_secret: str, user_id: str) -> Optional[str]:
+    """指定されたユーザーのトークンをリフレッシュする"""
+    token_info = await get_token_from_db(user_id)
+    if not token_info or 'refresh' not in token_info or not token_info['refresh']:
+        print(f"[warning] ユーザーID {user_id} のリフレッシュトークンが見つかりません。")
+        return None
+
+    url = "https://id.twitch.tv/oauth2/token"
+    params = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "refresh_token",
+        "refresh_token": token_info['refresh'],
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=params) as resp:
+                if resp.status == 200:
+                    new_token_data = await resp.json()
+                    await save_token_to_db(user_id, new_token_data)
+                    print(f"[info] ユーザーID {user_id} のトークンを正常にリフレッシュしました。")
+                    return new_token_data['access_token']
+                else:
+                    print(f"[error] トークンのリフレッシュに失敗しました: {await resp.text()}")
+                    return None
+    except aiohttp.ClientError as e:
+        print(f"[error] トークンリフレッシュ中にネットワークエラー: {e}")
+        return None
+
+# --- 認証関連ヘルパー ---
+
+def generate_auth_url(client_id: str) -> str:
+    """Twitch認証用のURLを生成する"""
+    auth_url = (
+        f"https://id.twitch.tv/oauth2/authorize"
+        f"?client_id={client_id}"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&response_type=code"
+        f"&scope={SCOPES}"
+    )
+    return auth_url
+
+async def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Optional[Dict[str, Any]]:
+    """認証コードをアクセストークンに交換し、DBに保存する"""
+    token_url = "https://id.twitch.tv/oauth2/token"
+    params = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": REDIRECT_URI,
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(token_url, data=params) as resp:
+                if resp.status == 200:
+                    token_data = await resp.json()
+                    user_id = await fetch_user_id_from_token(client_id, token_data['access_token'])
+                    if user_id:
+                        await save_token_to_db(user_id, token_data)
+                        return {"user_id": user_id, "token_data": token_data}
+                    else:
+                        print("[error] トークンからユーザーIDの取得に失敗しました。")
+                        return None
+                else:
+                    print(f"[error] トークン交換に失敗しました: {await resp.text()}")
+                    return None
+    except aiohttp.ClientError as e:
+        print(f"[error] トークン交換中にネットワークエラー: {e}")
+        return None
+
+async def ensure_bot_token_valid(client_id: str, client_secret: str, bot_id: str) -> bool:
+    """
+    指定されたBot IDのトークンが有効か確認し、無効ならリフレッシュを試みる。
+    """
+    if not bot_id:
+        print("[warning] Bot IDが未設定のため、トークン検証をスキップします。")
+        return False
+
+    token_info = await get_token_from_db(bot_id)
     
-    cid = os.getenv("TWITCH_CLIENT_ID")
-    csecret = os.getenv("TWITCH_CLIENT_SECRET")
-    buser = os.getenv("TWITCH_BOT_USERNAME")
+    if token_info and time.time() < token_info.get("expires_at", 0):
+        print("[info] ボットの既存トークンは有効です。")
+        return True
+    
+    if token_info:
+        print("[info] ボットのトークンが期限切れです。リフレッシュを試みます...")
+        refreshed_token = await refresh_token_for_user(client_id, client_secret, bot_id)
+        if refreshed_token:
+            return True
 
-    async def main():
-        if not all([cid, csecret, buser]):
-            print("Please set TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, and TWITCH_BOT_USERNAME in your .env file")
-            return
-        
-        # 型チェックをパスするために、Noneでないことを確認
-        assert cid is not None
-        assert csecret is not None
-        assert buser is not None
-
-        token_info = await ensure_valid_token(cid, csecret, buser)
-        if token_info:
-            print(f"\nSuccessfully obtained token for user {token_info['bot_id']}: {token_info['access_token'][:10]}...")
-        else:
-            print("\nFailed to obtain token or user ID.")
-
-    asyncio.run(main())
+    print("[warning] ボットの有効なトークンが見つかりません。ボットオーナーの認証コードを登録してください。")
+    return False

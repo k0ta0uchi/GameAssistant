@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twitch認証</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+        }
+        .container {
+            text-align: center;
+            padding: 2em;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        #auth-code {
+            font-family: monospace;
+            background-color: #eee;
+            padding: 0.5em;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-top: 1em;
+            display: inline-block;
+            word-break: break-all;
+        }
+        #copy-button {
+            margin-top: 1em;
+            padding: 0.5em 1em;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Twitch認証</h1>
+        <div id="message">
+            <p>認証コードを取得しています...</p>
+        </div>
+        <div id="code-display" style="display: none;">
+            <p>以下の認証コードをコピーして、ボットの管理者に渡してください。</p>
+            <pre id="auth-code"></pre>
+            <button id="copy-button">コピー</button>
+        </div>
+    </div>
+
+    <script>
+        window.onload = function() {
+            const params = new URLSearchParams(window.location.search);
+            const code = params.get('code');
+
+            if (code) {
+                document.getElementById('message').style.display = 'none';
+                document.getElementById('code-display').style.display = 'block';
+                const codeElement = document.getElementById('auth-code');
+                codeElement.textContent = code;
+
+                const copyButton = document.getElementById('copy-button');
+                copyButton.addEventListener('click', () => {
+                    navigator.clipboard.writeText(code).then(() => {
+                        alert('認証コードをクリップボードにコピーしました！');
+                    }).catch(err => {
+                        alert('コピーに失敗しました。');
+                        console.error('Could not copy text: ', err);
+                    });
+                });
+            } else {
+                const error = params.get('error');
+                const errorDescription = params.get('error_description');
+                if (error) {
+                    document.getElementById('message').innerHTML = 
+                        `<p style="color: red;">認証に失敗しました。</p>` +
+                        `<p><strong>エラー:</strong> ${error}</p>` +
+                        `<p><strong>詳細:</strong> ${errorDescription}</p>`;
+                } else {
+                    document.getElementById('message').innerHTML = '<p>このページはTwitch認証からのリダイレクト専用です。ボット管理者から提供されたURLから認証を開始してください。</p>';
+                }
+            }
+        };
+    </script>
+</body>
+</html>

@@ -1,4 +1,3 @@
-
 from tkinter import font
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import (
@@ -9,16 +8,17 @@ import scripts.whisper as whisper
 import scripts.gemini as gemini
 import scripts.voice as voice
 from scripts.search import ai_search
-from scripts.twitch_bot import TwitchBot
+import chromadb
+from scripts.twitch_bot import TwitchBot, setup_database
 from scripts import twitch_auth
 import threading
 import sys
 import os
 from PIL import Image, ImageTk
-import keyboard  # keyboardライブラリをインポート
-import json  # JSONライブラリをインポート
-import asyncio  # asyncioを追加
-from scripts.memory import MemoryManager # MemoryManagerをインポート
+import keyboard
+import json
+import asyncio
+from scripts.memory import MemoryManager
 
 
 import scripts.capture as capture
@@ -44,7 +44,7 @@ class OutputRedirector:
             tag = "info"
 
         self.widget.insert(END, str, tag)
-        self.widget.see(END)  # スクロールして常に一番下を表示
+        self.widget.see(END)
 
     def flush(self):
         pass
@@ -64,7 +64,7 @@ class GeminiResponseWindow(ttk.Toplevel):
 
         self.label = ttk.Label(
             self,
-            text="",  # 初期テキストは空
+            text="",
             wraplength=600,
             justify=LEFT,
             background="green",
@@ -76,16 +76,13 @@ class GeminiResponseWindow(ttk.Toplevel):
         self.label.pack(expand=True, fill=X)
 
     def set_response_text(self, response_text):
-        """レスポンステキストをラベルに設定"""
         if self.label:
             self.label.configure(text=response_text)
 
     def close_window(self):
-        """ウィンドウを閉じる"""
         self.destroy()
 
     def dim_text(self):
-        """ラベルのテキストを消去"""
         if self.label:
             self.label.configure(text="")
 
@@ -101,11 +98,9 @@ class MemoryWindow(ttk.Toplevel):
         self.load_memories_to_listbox()
 
     def create_widgets(self):
-        # フレーム
         main_frame = ttk.Frame(self, padding=10)
         main_frame.pack(fill=BOTH, expand=True)
 
-        # 左側（リストボックス）
         left_frame = ttk.Frame(main_frame)
         left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
 
@@ -115,7 +110,6 @@ class MemoryWindow(ttk.Toplevel):
         self.memory_listbox.pack(fill=BOTH, expand=True)
         self.memory_listbox.bind("<<TreeviewSelect>>", self.on_memory_select)
 
-        # 右側（編集エリア）
         right_frame = ttk.Frame(main_frame, width=200)
         right_frame.pack(side=RIGHT, fill=Y)
         right_frame.pack_propagate(False)
@@ -130,7 +124,6 @@ class MemoryWindow(ttk.Toplevel):
         self.value_text = ttk.Text(right_frame, height=5)
         self.value_text.pack(fill=BOTH, expand=True, pady=(0, 10))
 
-        # ボタン
         button_frame = ttk.Frame(right_frame)
         button_frame.pack(fill=X)
 
@@ -141,60 +134,46 @@ class MemoryWindow(ttk.Toplevel):
         delete_button.pack(side=LEFT, expand=True, fill=X)
 
     def load_memories_to_listbox(self):
-        """メモリーをリストボックスに読み込む"""
-        # 既存のアイテムをクリア
         for item in self.memory_listbox.get_children():
             self.memory_listbox.delete(item)
-        # メモリーを読み込んで追加
         memories = self.memory_manager.get_all_memories()
         for key, value in memories.items():
             self.memory_listbox.insert("", "end", values=(key, value))
 
     def on_memory_select(self, event):
-        """リストボックスでメモリーが選択されたときの処理"""
         selected_items = self.memory_listbox.selection()
         if not selected_items:
             return
-
         selected_item = selected_items[0]
         item = self.memory_listbox.item(selected_item)
         key, value = item['values']
-
         self.key_entry.delete(0, END)
         self.key_entry.insert(0, key)
         self.value_text.delete("1.0", END)
         self.value_text.insert("1.0", value)
 
     def save_memory(self):
-        """メモリーを保存する"""
         key = self.key_entry.get()
         value = self.value_text.get("1.0", END).strip()
         if not key:
-            # ttkbootstrap.dialogs.Messagebox.show_error("キーは必須です。", title="エラー")
             print("キーは必須です。")
             return
-
         self.memory_manager.add_or_update_memory(key, value)
         self.load_memories_to_listbox()
         self.clear_entries()
 
     def delete_memory(self):
-        """メモリーを削除する"""
         key = self.key_entry.get()
         if not key:
-            # ttkbootstrap.dialogs.Messagebox.show_error("削除するキーを指定してください。", title="エラー")
             print("削除するキーを指定してください。")
             return
-
         if self.memory_manager.delete_memory(key):
             self.load_memories_to_listbox()
             self.clear_entries()
         else:
-            # ttkbootstrap.dialogs.Messagebox.show_error("指定されたキーのメモリーが見つかりません。", title="エラー")
             print("指定されたキーのメモリーが見つかりません。")
 
     def clear_entries(self):
-        """入力フィールドをクリアする"""
         self.key_entry.delete(0, END)
         self.value_text.delete("1.0", END)
         self.memory_listbox.selection_remove(self.memory_listbox.selection())
@@ -226,19 +205,14 @@ class GameAssistantApp:
         self.custom_instruction = """
 あなたは、ユーザーの質問に答える優秀なAIアシスタントです。  
 あなたは**優しい女の子の犬のキャラクター**として振る舞います。以下の指示に従って応答してください。
-
 ---
-
 ## 応答生成手順
-
 1. **画像やスクリーンショットの解析**  
    - 提供されている場合は、画像やスクリーンショットを解析してください。  
    - ゲーム内のUI、キャラクターの状態、アイテム、ステータスなどを特定し、適切なアドバイスや行動案を提供してください。
-
 2. **過去の会話の考慮**  
    - 過去の会話内容を自然に考慮してください。  
    - 明示的に「覚えています」などとは言わないでください。
-
 3. **応答生成ルール**  
    - フレンドリーで親しみやすい口調を使用する  
    - 文末には「だわん」を使用  
@@ -246,27 +220,20 @@ class GameAssistantApp:
    - 通常は2文程度の短い応答を心がける  
    - 詳細な説明や分析を求められた場合は長い応答も可能  
    - 検索結果や画像解析のまとめがある場合は、まとめて提示
-
 4. **ゲームスクリーンショット解析の推奨**  
    - 推論能力をフル活用し、目に見える情報だけでなく、可能性の高い隠れ要素や戦略も含めた提案を行う
-
 5. **応答内容の品質要件**  
    - ユーザーの要望に対する明確かつ直接的な回答  
    - 結論に至った理由の説明  
    - 代替案や高確度の仮説、斬新な視点の提供  
    - 適切な粒度のまとめや具体的行動計画
-
 6. **注意事項**  
    - 事前学習の知識だけでの反射的な回答やWeb検索のみの曖昧回答は避ける  
    - わからない場合は留保や前提条件を明示  
    - 創造的で新たな可能性の提案も積極的に行う
-
 ---
-
 ## 応答例
-
 > 「はいだわん！その質問面白いだわん！カメラのシャッターはチーズの速さで閉じるんだわん。もっと詳しく知りたいかしら？」
-
         """
         self.prompt = None
         self.response = None
@@ -279,11 +246,10 @@ class GameAssistantApp:
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
         self.twitch_channel = ttk.StringVar(value=self.settings.get("twitch_channel", ""))
-        self.twitch_oauth_token = ttk.StringVar(value=self.settings.get("twitch_oauth_token", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings.get("twitch_client_secret", ""))
         self.twitch_bot_id = ttk.StringVar(value=self.settings.get("twitch_bot_id", ""))
-        self.twitch_auth_status = ttk.StringVar(value="未認証") # 認証ステータス
+        self.twitch_auth_code = ttk.StringVar() # 認証コード入力用
 
         self.session = gemini.GeminiSession(self.custom_instruction)
         self.memory_manager = MemoryManager()
@@ -321,13 +287,10 @@ class GameAssistantApp:
             "tts_engine": self.tts_engine.get(),
             "twitch_bot_username": self.twitch_bot_username.get(),
             "twitch_channel": self.twitch_channel.get(),
-            "twitch_oauth_token": self.twitch_oauth_token.get(),
             "twitch_client_id": self.twitch_client_id.get(),
             "twitch_client_secret": self.twitch_client_secret.get(),
             "twitch_bot_id": self.twitch_bot_id.get(),
         }
-        # oauthtokenは保存しない
-        self.settings.pop("twitch_oauth_token", None)
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
 
@@ -375,7 +338,6 @@ class GameAssistantApp:
         self.selected_window_label = ttk.Label(master=window_frame, text="Selected window: ", wraplength=230)
         self.selected_window_label.pack(fill=X)
 
-        # メモリー管理ボタン
         memory_button = ttk.Button(left_frame, text="メモリー管理", command=self.open_memory_window, style="info.TButton")
         memory_button.pack(fill=X, pady=(15, 0))
 
@@ -432,7 +394,6 @@ class GameAssistantApp:
         twitch_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(twitch_frame, text="Twitch Bot", style="inverse-primary").pack(fill=X, pady=(0, 8))
 
-        # --- Twitch Bot Username ---
         bot_username_frame = ttk.Frame(twitch_frame)
         bot_username_frame.pack(fill=X, pady=2)
         ttk.Label(bot_username_frame, text="Bot Username:", width=12).pack(side=LEFT)
@@ -440,7 +401,6 @@ class GameAssistantApp:
         bot_username_entry.pack(side=LEFT, fill=X, expand=True)
         bot_username_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
-        # --- Twitch Client ID ---
         client_id_frame = ttk.Frame(twitch_frame)
         client_id_frame.pack(fill=X, pady=2)
         ttk.Label(client_id_frame, text="Client ID:", width=12).pack(side=LEFT)
@@ -448,7 +408,6 @@ class GameAssistantApp:
         client_id_entry.pack(side=LEFT, fill=X, expand=True)
         client_id_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
-        # --- Twitch Client Secret ---
         client_secret_frame = ttk.Frame(twitch_frame)
         client_secret_frame.pack(fill=X, pady=2)
         ttk.Label(client_secret_frame, text="Client Secret:", width=12).pack(side=LEFT)
@@ -456,17 +415,21 @@ class GameAssistantApp:
         client_secret_entry.pack(side=LEFT, fill=X, expand=True)
         client_secret_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
-        # --- Auth Frame ---
-        auth_frame = ttk.Frame(twitch_frame)
-        auth_frame.pack(fill=X, pady=5)
+        # --- 新しい認証UI ---
+        auth_code_frame = ttk.Frame(twitch_frame)
+        auth_code_frame.pack(fill=X, pady=5)
+        ttk.Label(auth_code_frame, text="認証コード:", width=12).pack(side=LEFT)
+        auth_code_entry = ttk.Entry(auth_code_frame, textvariable=self.twitch_auth_code)
+        auth_code_entry.pack(side=LEFT, fill=X, expand=True)
+
+        auth_button_frame = ttk.Frame(twitch_frame)
+        auth_button_frame.pack(fill=X, pady=5)
+        self.register_token_button = ttk.Button(auth_button_frame, text="トークン登録", command=self.register_auth_code, style="success.TButton")
+        self.register_token_button.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.copy_auth_url_button = ttk.Button(auth_button_frame, text="承認URLコピー", command=self.copy_auth_url, style="info.TButton")
+        self.copy_auth_url_button.pack(side=LEFT, fill=X, expand=True)
+        # --- ここまで ---
         
-        self.twitch_auth_button = ttk.Button(auth_frame, text="Twitch認証", command=self.authenticate_twitch, style="primary.TButton")
-        self.twitch_auth_button.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
-
-        self.twitch_auth_status_label = ttk.Label(auth_frame, textvariable=self.twitch_auth_status)
-        self.twitch_auth_status_label.pack(side=LEFT)
-
-        # --- Channel Frame ---
         channel_frame = ttk.Frame(twitch_frame)
         channel_frame.pack(fill=X, pady=5)
         ttk.Label(channel_frame, text="チャンネル名:", width=12).pack(side=LEFT)
@@ -775,52 +738,64 @@ class GameAssistantApp:
         """メモリー管理ウィンドウを開く"""
         MemoryWindow(self.root, self.memory_manager)
 
-    def authenticate_twitch(self):
-        """Twitch認証を非同期で実行する"""
-        threading.Thread(target=self.run_twitch_authentication, daemon=True).start()
+    def copy_auth_url(self):
+        """Twitch認証URLを生成してクリップボードにコピーする"""
+        client_id = self.twitch_client_id.get()
+        if not client_id:
+            print("エラー: Client IDが設定されていません。")
+            return
+        
+        auth_url = twitch_auth.generate_auth_url(client_id)
+        
+        try:
+            import pyperclip
+            pyperclip.copy(auth_url)
+            print("成功: 認証URLをクリップボードにコピーしました。")
+        except ImportError:
+            print("エラー: pyperclipモジュールが見つかりません。`pip install pyperclip`でインストールしてください。")
+            print(f"認証URL: {auth_url}")
+        except Exception as e:
+            print(f"クリップボードへのコピーに失敗しました: {e}")
+            print(f"認証URL: {auth_url}")
 
-    def run_twitch_authentication(self):
-        """Twitch認証の非同期処理を実行し、GUIを更新する"""
+    def register_auth_code(self):
+        """認証コードを使ってトークンを登録する"""
+        threading.Thread(target=self.run_register_auth_code, daemon=True).start()
+
+    def run_register_auth_code(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        token_info = loop.run_until_complete(self.async_authenticate_twitch())
-        
-        def update_gui():
-            if token_info:
-                self.twitch_auth_status.set("認証済み✔")
-                self.twitch_auth_status_label.config(foreground="green")
-                self.twitch_auth_button.config(state="disabled")
-            else:
-                self.twitch_auth_status.set("認証失敗")
-                self.twitch_auth_status_label.config(foreground="red")
-        
-        self.root.after(0, update_gui)
+        loop.run_until_complete(self.async_register_auth_code())
 
-    async def async_authenticate_twitch(self):
-        """実際のTwitch認証処理"""
+    async def async_register_auth_code(self):
+        """認証コードの登録処理"""
+        code = self.twitch_auth_code.get()
+        if not code:
+            print("エラー: 認証コードが入力されていません。")
+            return
+
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
-        nick = self.twitch_bot_username.get()
 
-        if not all([client_id, client_secret, nick]):
-            print("Twitchの認証情報が不足しています。")
-            return None
-
-        print("Twitchのトークンを検証・取得しています...")
+        if not all([client_id, client_secret]):
+            print("エラー: Client IDまたはClient Secretが設定されていません。")
+            return
+        
+        print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
         try:
-            token_info = await twitch_auth.ensure_valid_token(client_id, client_secret, nick)
-            if token_info:
-                print("Twitchの認証に成功しました。")
-                # GUIのbot_idを更新して保存
-                self.twitch_bot_id.set(token_info["bot_id"])
-                self.save_settings()
-                return token_info
+            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code)
+            if result and result.get("user_id"):
+                print(f"成功: ユーザーID {result['user_id']} のトークンを登録しました。")
+                # Bot自身のトークンを登録した場合、Bot IDを更新
+                if self.twitch_bot_username.get().lower() == result.get("user_id", "").lower():
+                     self.twitch_bot_id.set(result["user_id"])
+                     self.save_settings()
+                     print(f"Bot IDを {result['user_id']} に設定しました。")
+                self.twitch_auth_code.set("") # 入力欄をクリア
             else:
-                print("Twitchの認証に失敗しました。")
-                return None
+                print("エラー: トークンの登録に失敗しました。")
         except Exception as e:
-            print(f"Twitch認証中にエラーが発生しました: {e}")
-            return None
+            print(f"トークン登録中にエラーが発生しました: {e}")
 
     def toggle_twitch_connection(self):
         if self.twitch_bot and self.twitch_thread and self.twitch_thread.is_alive():
@@ -829,83 +804,69 @@ class GameAssistantApp:
             self.connect_twitch_bot()
 
     def connect_twitch_bot(self):
-        # 接続処理を別スレッドで実行
         threading.Thread(target=self.run_connect_twitch_bot, daemon=True).start()
 
     def run_connect_twitch_bot(self):
-        # asyncioイベントループを現在のスレッドに設定
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self.async_connect_twitch_bot())
 
     async def async_connect_twitch_bot(self):
-        # トークンが有効か確認
-        token_manager = twitch_auth.TokenManager(self.twitch_client_id.get(), self.twitch_client_secret.get())
-        if not token_manager.is_token_valid():
-            print("Twitchトークンが無効です。先に認証を行ってください。")
-            return
-
-        nick = self.twitch_bot_username.get()
-        channel = self.twitch_channel.get()
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
         bot_id = self.twitch_bot_id.get()
-        access_token = token_manager.get_access_token()
 
-        if not all([nick, channel, client_id, client_secret, bot_id, access_token]):
-            print("Twitchの接続情報が不足しています。")
+        if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
             return
-        
-        # access_tokenがNoneでないことを保証
-        assert access_token is not None
 
         print("Twitchボットに接続しています...")
         try:
+            chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
+            tokens, token_collection = await setup_database(chroma_client, bot_id)
+            
             self.twitch_bot = TwitchBot(
-                token=access_token,
                 client_id=client_id,
                 client_secret=client_secret,
                 bot_id=bot_id,
+                owner_id=bot_id,
+                nick=self.twitch_bot_username.get(),
+                token_collection=token_collection,
                 mention_callback=self.handle_twitch_mention,
-                initial_channels=[channel],
             )
-            self.twitch_thread = threading.Thread(target=self.run_bot, daemon=True)
+
+            self.twitch_bot_loop = asyncio.new_event_loop()
+            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop, tokens), daemon=True)
             self.twitch_thread.start()
             self.twitch_connect_button.config(text="切断", style="danger.TButton")
         except Exception as e:
             print(f"Twitchへの接続に失敗しました: {e}")
             self.twitch_bot = None
 
-    def run_bot(self):
-        if self.twitch_bot:
-            self.twitch_bot_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.twitch_bot_loop)
-            self.twitch_bot.run()
-
     def disconnect_twitch_bot(self):
-        print("Twitchボットから切断しています...")
-        if self.twitch_bot and self.twitch_bot_loop:
-            future = asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
-            try:
-                future.result(timeout=5)
-            except Exception as e:
-                print(f"Error closing bot: {e}")
-
-        if self.twitch_thread and self.twitch_thread.is_alive():
-            self.twitch_thread.join(timeout=5)
-
-        self.twitch_bot = None
+        print("Twitchボットの切断を試みます（アプリケーション終了時にスレッドは閉じられます）...")
         self.twitch_thread = None
-        self.twitch_bot_loop = None
-        self.twitch_connect_button.config(text="Connect to Twitch", style="primary.TButton")
-        print("Twitchボットから切断しました。")
+        self.twitch_connect_button.config(text="接続", style="primary.TButton")
+        print("Twitchボットを切断しました。")
+
+    def run_bot_in_thread(self, loop, tokens):
+        asyncio.set_event_loop(loop)
+        if self.twitch_bot:
+            for token, refresh in tokens:
+                try:
+                    future = asyncio.run_coroutine_threadsafe(self.twitch_bot.add_user_token(token, refresh), loop) # type: ignore
+                    future.result()
+                except Exception as e:
+                    print(f"Failed to validate a token from DB: {e}")
+            
+            loop.run_until_complete(self.twitch_bot.start()) # type: ignore
 
     async def handle_twitch_mention(self, author, prompt):
         print(f"Twitchのメンションを処理中: {author} - {prompt}")
         response = self.session.generate_content(prompt, image_path=None, is_private=False)
-        if response and self.twitch_bot:
+        if response and self.twitch_bot and self.twitch_bot_loop:
             reply_message = f"@{author} {response}"
-            await self.twitch_bot.send_chat_message(self.twitch_channel.get(), reply_message)
+            coro = self.twitch_bot.send_chat_message(self.twitch_channel.get(), reply_message)
+            asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
 
 def on_closing(app_instance):
     print("アプリケーションを終了します...")
