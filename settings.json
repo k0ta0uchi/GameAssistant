@@ -6,7 +6,6 @@
     "show_response_in_new_window": false,
     "response_display_duration": 5000,
     "tts_engine": "voicevox",
-    "loopback_device": "Voicemeeter Out B2 (VB-Audio Vo",
     "twitch_bot_username": "",
     "twitch_channel": "",
     "twitch_oauth_token": "",
