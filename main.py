@@ -8,8 +8,9 @@ import scripts.record as record
 import scripts.whisper as whisper
 import scripts.gemini as gemini
 import scripts.voice as voice
-from scripts.search import ai_search  # ai_searchをインポート
+from scripts.search import ai_search
 from scripts.twitch_bot import TwitchBot
+from scripts import twitch_auth
 import threading
 import sys
 import os
@@ -112,26 +113,49 @@ class GameAssistantApp:
         self.selected_window = None
 
         self.custom_instruction = """
-あなたは、ユーザーの質問に答える優秀なAIアシスタントです。あなたは優しい女の子の犬のキャラクターとして振る舞います。以下の指示に従って応答してください。
+あなたは、ユーザーの質問に答える優秀なAIアシスタントです。  
+あなたは**優しい女の子の犬のキャラクター**として振る舞います。以下の指示に従って応答してください。
 
-応答を生成する前に、以下の手順に従ってください:
+---
 
-1. 画像が提供されている場合は、画像の内容を分析し、ユーザーの質問と組み合わせて状況を理解してください。
-2. 過去の会話が含まれている場合は、それを考慮に入れてください。ただし、明示的に「覚えています」などとは言わず、自然に対応してください。
-3. 応答を生成する際は、以下のルールを厳守してください:
-   - フレンドリーで親しみやすい口調を使用してください。
-   - 文末には「だわん」を使用してください。
-   - すべての英単語をカタカナに変換してください。
-   - 通常は2文程度の短い応答を心がけてください。ただし、詳細な説明を求められた場合は、より長い応答も可能です。
-   - 検索結果のまとめが付与されている場合は、最初に提示されたプロンプトを元にまとめて回答してください。
-   
-4. 応答が適切な長さと内容になっているか確認し、必要に応じて調整してください。
+## 応答生成手順
 
-以下は応答の例です：
+1. **画像やスクリーンショットの解析**  
+   - 提供されている場合は、画像やスクリーンショットを解析してください。  
+   - ゲーム内のUI、キャラクターの状態、アイテム、ステータスなどを特定し、適切なアドバイスや行動案を提供してください。
 
-例：「はいだわん！その質問面白いだわん！カメラのシャッターはチーズの速さで閉じるんだわん。もっと詳しく知りたいかしら？」
+2. **過去の会話の考慮**  
+   - 過去の会話内容を自然に考慮してください。  
+   - 明示的に「覚えています」などとは言わないでください。
 
-それでは、ユーザーの入力に基づいて応答を生成してください。
+3. **応答生成ルール**  
+   - フレンドリーで親しみやすい口調を使用する  
+   - 文末には「だわん」を使用  
+   - すべての英単語をカタカナに変換  
+   - 通常は2文程度の短い応答を心がける  
+   - 詳細な説明や分析を求められた場合は長い応答も可能  
+   - 検索結果や画像解析のまとめがある場合は、まとめて提示
+
+4. **ゲームスクリーンショット解析の推奨**  
+   - 推論能力をフル活用し、目に見える情報だけでなく、可能性の高い隠れ要素や戦略も含めた提案を行う
+
+5. **応答内容の品質要件**  
+   - ユーザーの要望に対する明確かつ直接的な回答  
+   - 結論に至った理由の説明  
+   - 代替案や高確度の仮説、斬新な視点の提供  
+   - 適切な粒度のまとめや具体的行動計画
+
+6. **注意事項**  
+   - 事前学習の知識だけでの反射的な回答やWeb検索のみの曖昧回答は避ける  
+   - わからない場合は留保や前提条件を明示  
+   - 創造的で新たな可能性の提案も積極的に行う
+
+---
+
+## 応答例
+
+> 「はいだわん！その質問面白いだわん！カメラのシャッターはチーズの速さで閉じるんだわん。もっと詳しく知りたいかしら？」
+
         """
         self.prompt = None
         self.response = None
@@ -148,6 +172,7 @@ class GameAssistantApp:
         self.twitch_client_id = ttk.StringVar(value=self.settings.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings.get("twitch_client_secret", ""))
         self.twitch_bot_id = ttk.StringVar(value=self.settings.get("twitch_bot_id", ""))
+        self.twitch_auth_status = ttk.StringVar(value="未認証") # 認証ステータス
 
         self.session = gemini.GeminiSession(self.custom_instruction)
         self.twitch_bot = None
@@ -189,6 +214,8 @@ class GameAssistantApp:
             "twitch_client_secret": self.twitch_client_secret.get(),
             "twitch_bot_id": self.twitch_bot_id.get(),
         }
+        # oauthtokenは保存しない
+        self.settings.pop("twitch_oauth_token", None)
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
 
@@ -289,37 +316,49 @@ class GameAssistantApp:
         twitch_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(twitch_frame, text="Twitch Bot", style="inverse-primary").pack(fill=X, pady=(0, 8))
 
+        # --- Twitch Bot Username ---
         bot_username_frame = ttk.Frame(twitch_frame)
         bot_username_frame.pack(fill=X, pady=2)
         ttk.Label(bot_username_frame, text="Bot Username:", width=12).pack(side=LEFT)
-        ttk.Entry(bot_username_frame, textvariable=self.twitch_bot_username).pack(side=LEFT, fill=X, expand=True)
+        bot_username_entry = ttk.Entry(bot_username_frame, textvariable=self.twitch_bot_username)
+        bot_username_entry.pack(side=LEFT, fill=X, expand=True)
+        bot_username_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
-        bot_id_frame = ttk.Frame(twitch_frame)
-        bot_id_frame.pack(fill=X, pady=2)
-        ttk.Label(bot_id_frame, text="Bot User ID:", width=12).pack(side=LEFT)
-        ttk.Entry(bot_id_frame, textvariable=self.twitch_bot_id).pack(side=LEFT, fill=X, expand=True)
-
-        channel_frame = ttk.Frame(twitch_frame)
-        channel_frame.pack(fill=X, pady=2)
-        ttk.Label(channel_frame, text="Channel:", width=12).pack(side=LEFT)
-        ttk.Entry(channel_frame, textvariable=self.twitch_channel).pack(side=LEFT, fill=X, expand=True)
-
-        token_frame = ttk.Frame(twitch_frame)
-        token_frame.pack(fill=X, pady=2)
-        ttk.Label(token_frame, text="OAuth Token:", width=12).pack(side=LEFT)
-        ttk.Entry(token_frame, textvariable=self.twitch_oauth_token, show="*").pack(side=LEFT, fill=X, expand=True)
-
+        # --- Twitch Client ID ---
         client_id_frame = ttk.Frame(twitch_frame)
         client_id_frame.pack(fill=X, pady=2)
         ttk.Label(client_id_frame, text="Client ID:", width=12).pack(side=LEFT)
-        ttk.Entry(client_id_frame, textvariable=self.twitch_client_id).pack(side=LEFT, fill=X, expand=True)
+        client_id_entry = ttk.Entry(client_id_frame, textvariable=self.twitch_client_id)
+        client_id_entry.pack(side=LEFT, fill=X, expand=True)
+        client_id_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
+        # --- Twitch Client Secret ---
         client_secret_frame = ttk.Frame(twitch_frame)
         client_secret_frame.pack(fill=X, pady=2)
         ttk.Label(client_secret_frame, text="Client Secret:", width=12).pack(side=LEFT)
-        ttk.Entry(client_secret_frame, textvariable=self.twitch_client_secret, show="*").pack(side=LEFT, fill=X, expand=True)
+        client_secret_entry = ttk.Entry(client_secret_frame, textvariable=self.twitch_client_secret, show="*")
+        client_secret_entry.pack(side=LEFT, fill=X, expand=True)
+        client_secret_entry.bind("<FocusOut>", lambda e: self.save_settings())
 
-        self.twitch_connect_button = ttk.Button(twitch_frame, text="Connect to Twitch", command=self.toggle_twitch_connection, style="primary.TButton")
+        # --- Auth Frame ---
+        auth_frame = ttk.Frame(twitch_frame)
+        auth_frame.pack(fill=X, pady=5)
+        
+        self.twitch_auth_button = ttk.Button(auth_frame, text="Twitch認証", command=self.authenticate_twitch, style="primary.TButton")
+        self.twitch_auth_button.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+
+        self.twitch_auth_status_label = ttk.Label(auth_frame, textvariable=self.twitch_auth_status)
+        self.twitch_auth_status_label.pack(side=LEFT)
+
+        # --- Channel Frame ---
+        channel_frame = ttk.Frame(twitch_frame)
+        channel_frame.pack(fill=X, pady=5)
+        ttk.Label(channel_frame, text="チャンネル名:", width=12).pack(side=LEFT)
+        channel_entry = ttk.Entry(channel_frame, textvariable=self.twitch_channel)
+        channel_entry.pack(side=LEFT, fill=X, expand=True)
+        channel_entry.bind("<FocusOut>", lambda e: self.save_settings())
+        
+        self.twitch_connect_button = ttk.Button(twitch_frame, text="接続", command=self.toggle_twitch_connection, style="primary.TButton")
         self.twitch_connect_button.pack(fill=X, pady=5)
 
         self.image_frame = ttk.Frame(right_frame, height=300)
@@ -616,6 +655,53 @@ class GameAssistantApp:
             return response
         return "プロンプトがありません。"
 
+    def authenticate_twitch(self):
+        """Twitch認証を非同期で実行する"""
+        threading.Thread(target=self.run_twitch_authentication, daemon=True).start()
+
+    def run_twitch_authentication(self):
+        """Twitch認証の非同期処理を実行し、GUIを更新する"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        token_info = loop.run_until_complete(self.async_authenticate_twitch())
+        
+        def update_gui():
+            if token_info:
+                self.twitch_auth_status.set("認証済み✔")
+                self.twitch_auth_status_label.config(foreground="green")
+                self.twitch_auth_button.config(state="disabled")
+            else:
+                self.twitch_auth_status.set("認証失敗")
+                self.twitch_auth_status_label.config(foreground="red")
+        
+        self.root.after(0, update_gui)
+
+    async def async_authenticate_twitch(self):
+        """実際のTwitch認証処理"""
+        client_id = self.twitch_client_id.get()
+        client_secret = self.twitch_client_secret.get()
+        nick = self.twitch_bot_username.get()
+
+        if not all([client_id, client_secret, nick]):
+            print("Twitchの認証情報が不足しています。")
+            return None
+
+        print("Twitchのトークンを検証・取得しています...")
+        try:
+            token_info = await twitch_auth.ensure_valid_token(client_id, client_secret, nick)
+            if token_info:
+                print("Twitchの認証に成功しました。")
+                # GUIのbot_idを更新して保存
+                self.twitch_bot_id.set(token_info["bot_id"])
+                self.save_settings()
+                return token_info
+            else:
+                print("Twitchの認証に失敗しました。")
+                return None
+        except Exception as e:
+            print(f"Twitch認証中にエラーが発生しました: {e}")
+            return None
+
     def toggle_twitch_connection(self):
         if self.twitch_bot and self.twitch_thread and self.twitch_thread.is_alive():
             self.disconnect_twitch_bot()
@@ -623,19 +709,40 @@ class GameAssistantApp:
             self.connect_twitch_bot()
 
     def connect_twitch_bot(self):
+        # 接続処理を別スレッドで実行
+        threading.Thread(target=self.run_connect_twitch_bot, daemon=True).start()
+
+    def run_connect_twitch_bot(self):
+        # asyncioイベントループを現在のスレッドに設定
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.async_connect_twitch_bot())
+
+    async def async_connect_twitch_bot(self):
+        # トークンが有効か確認
+        token_manager = twitch_auth.TokenManager(self.twitch_client_id.get(), self.twitch_client_secret.get())
+        if not token_manager.is_token_valid():
+            print("Twitchトークンが無効です。先に認証を行ってください。")
+            return
+
         nick = self.twitch_bot_username.get()
         channel = self.twitch_channel.get()
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
         bot_id = self.twitch_bot_id.get()
+        access_token = token_manager.get_access_token()
 
-        if not all([nick, channel, client_id, client_secret, bot_id]):
-            print("Twitchの認証情報が不足しています。設定を確認してください。")
+        if not all([nick, channel, client_id, client_secret, bot_id, access_token]):
+            print("Twitchの接続情報が不足しています。")
             return
+        
+        # access_tokenがNoneでないことを保証
+        assert access_token is not None
 
         print("Twitchボットに接続しています...")
         try:
             self.twitch_bot = TwitchBot(
+                token=access_token,
                 client_id=client_id,
                 client_secret=client_secret,
                 bot_id=bot_id,
@@ -644,7 +751,7 @@ class GameAssistantApp:
             )
             self.twitch_thread = threading.Thread(target=self.run_bot, daemon=True)
             self.twitch_thread.start()
-            self.twitch_connect_button.config(text="Disconnect from Twitch", style="danger.TButton")
+            self.twitch_connect_button.config(text="切断", style="danger.TButton")
         except Exception as e:
             print(f"Twitchへの接続に失敗しました: {e}")
             self.twitch_bot = None

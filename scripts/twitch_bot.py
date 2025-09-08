@@ -1,7 +1,10 @@
-from twitchio.ext import commands
+# scripts/twitch_bot.py
+import asyncio
 import re
 import collections
-from typing import Optional, List, Callable, Awaitable, Any, Protocol, runtime_checkable
+from typing import Optional, List, Callable, Awaitable, Any, Protocol, runtime_checkable, Coroutine
+
+from twitchio.ext import commands
 
 # mention_callback: (author_name, prompt) -> Optional[str] (非同期)
 MentionCallback = Optional[Callable[[str, str], Awaitable[Optional[str]]]]
@@ -16,23 +19,26 @@ class ChatMessageLike(Protocol):
     tags: Optional[dict]
     channel: Any
 
-class TwitchBot(commands.AutoBot):
+class TwitchBot(commands.Bot):
     # Pylance に「これらの属性がある」と明示
     nick: str
     user_id: str
-    
+    initial_channels: List[str]
+
     # base にあるメソッドへアクセスする箇所が静的解析で見つからない場合の保険
     get_channel: Any
     handle_commands: Any
     join_channels: Callable[..., Awaitable[Any]]
+    run: Callable[..., None]
+    close: Callable[..., Coroutine[Any, Any, None]]
 
     def __init__(
         self,
         *,
+        token: str,
         client_id: str,
         client_secret: str,
         bot_id: str,
-        owner_id: Optional[str] = None,
         prefix: str = "!",
         mention_callback: MentionCallback = None,
         initial_channels: Optional[List[str]] = None,
@@ -41,33 +47,13 @@ class TwitchBot(commands.AutoBot):
         self._recent_message_ids = collections.deque(maxlen=200)
         self.initial_channels = initial_channels or []
 
-        super().__init__(
-            client_id=client_id,
-            client_secret=client_secret,
-            bot_id=bot_id,
-            owner_id=owner_id,
-            prefix=prefix,
-        )
-
-        # 実行時にも属性を確実にセットしておく（静的解析との齟齬防止）
-        self.nick = getattr(self, "nick", "") or ""
-        self.user_id = bot_id
-
-    async def setup_hook(self) -> None:
-        # ここでコンポーネント登録するなど
-        return
+        super().__init__(token=token, client_id=client_id, client_secret=client_secret, bot_id=bot_id, prefix=prefix)
 
     async def event_ready(self) -> None:
-        print(f"[ready] logged in as: {self.nick} (id: {self.user_id})")
-        # AutoBot は initial_channels に基づいて自動 join するので明示的に join_channels は不要
-        # ここでは通知だけにしておく
-        # conduit を取得して join_channels する
-        if self.conduits:
-            conduit = self.conduits[0]
-            await conduit.join_channels(self.initial_channels)
-            print(f"[ready] joined channels: {self.initial_channels}")
-        else:
-            print("[warn] no conduit available, cannot join channels")
+        print(f"[ready] logged in as: (id: {self.bot_id})")
+        if not self.initial_channels:
+            print("[info] no initial_channels configured")
+            return
 
     async def event_message(self, message: ChatMessageLike) -> None:
         # 無限ループ防止（echo / author / message-id）
@@ -113,12 +99,18 @@ class TwitchBot(commands.AutoBot):
             print(f"[error] handle_commands raised: {e}")
 
     async def send_chat_message(self, channel_name: str, message: str) -> None:
-        name = channel_name if channel_name.startswith("#") else f"#{channel_name}"
-        ch = self.get_channel(name)
-        if ch:
-            await ch.send(message)
-        else:
-            print(f"[warn] channel not found: {name}")
+        try:
+            # チャンネルオブジェクトを取得
+            channel = self.connected_channels[0]
+
+            if channel:
+                await channel.send(message)
+                print(f"[info] sent message to {channel_name}")
+            else:
+                print(f"[warn] could not resolve channel {channel_name}")
+
+        except Exception as e:
+            print(f"[error] failed to send message to {channel_name}: {e}")
 
     @commands.command()
     async def hello(self, ctx: commands.Context) -> None:
