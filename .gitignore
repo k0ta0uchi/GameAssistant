@@ -14,4 +14,14 @@ run.ps1
 chromadb/
 output.mp3
 temp_*
+
 *.gguf
+.serena/
+
+.vscode/
+
+wheels/
+
+test/
+
+.twitch_tokens.json
