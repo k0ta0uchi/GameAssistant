@@ -5,7 +5,7 @@ PyAudio==0.2.14
 PyGetWindow==0.0.9
 ttkbootstrap==1.10.1
 keyboard==0.13.5
-llama-cpp-python
+mem0ai==0.1.79
 vecs==0.4.5
 soundfile==0.13.1
 pywin32

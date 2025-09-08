@@ -2,13 +2,10 @@
 import os
 from dotenv import load_dotenv
 from PIL import Image
-import wave
-from .clients import get_gemini_client, get_chroma_client
-from . import local_summarizer
-import uuid
+from mem0 import Memory
 from google.genai import types
-import google.generativeai as genai
-import threading
+import wave
+from .clients import get_gemini_client
 
 # --- Environment Setup ---
 load_dotenv()
@@ -31,44 +28,26 @@ class GeminiSession:
             history.append({'role': 'model', 'parts': [{'text': 'はい、承知いたしましただわん。'}]})
         
         self.chat = self.client.chats.create(model=GEMINI_MODEL, history=history)
-        self.embedding_model = "models/embedding-001"
 
-        # --- ChromaDB and Summarizer Initialization ---
-        self.chroma_client = get_chroma_client()
-        self.collection = self.chroma_client.get_or_create_collection(name="memories")
-        local_summarizer.initialize_llm()
+        # --- Mem0 Configuration ---
+        vector_store_config = {
+            "provider": "chroma",
+            "config": {"path": "chromadb", "collection_name": "memories"},
+        }
+        mem0_config = {
+            "llm": {"provider": "gemini", "config": {"model": "gemini-1.5-flash-latest", "temperature": 0.2, "max_tokens": 2000}},
+            "embedder": {"provider": "gemini", "config": {"model": "models/embedding-001"}},
+            "vector_store": vector_store_config,
+        }
+        self.m = Memory.from_config(mem0_config)
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True):
         user_id = USER_ID_PRIVATE if is_private else USER_ID_PUBLIC
         if not user_id:
             raise ValueError("User ID is not set for the selected privacy level.")
 
-        # メモリ保存処理をバックグラウンドで実行
-        thread = threading.Thread(target=self._add_memory_in_background, args=(prompt, user_id))
-        thread.start()
-
-        # クエリのEmbeddingを生成
-        query_embedding_response = self.client.models.embed_content(
-            model=self.embedding_model,
-            contents=[prompt],
-            config=types.EmbedContentConfig(task_type="retrieval_query")
-        )
-        query_embedding = query_embedding_response.embeddings[0].values
-        
-        # 関連性の高い会話を検索
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=5,
-            where={"user_id": user_id}
-        )
-        
-        # 検索結果を要約
-        documents = results.get('documents') if results else None
-        if documents and documents[0]:
-            memory_text = "\n".join([doc for doc in documents[0] if doc is not None])
-        else:
-            memory_text = ""
-        memory = local_summarizer.summarize(memory_text) if memory_text else ""
+        self.m.add(prompt, user_id=user_id)
+        memory = self.m.search(query=prompt, user_id=user_id)
 
         contents = []
         if image_path:
@@ -89,33 +68,6 @@ class GeminiSession:
         except Exception as e:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
-
-    def _add_memory_in_background(self, prompt: str, user_id: str):
-        """（バックグラウンド処理）メモリへの追加を行う"""
-        try:
-            # 疑問形でない場合のみメモリに保存
-            if not prompt.endswith(('?', '？')) and not any(q in prompt for q in ['何', 'どこ', 'いつ', '誰', 'なぜ']):
-                # プロンプトを要約
-                summary = local_summarizer.summarize(prompt)
-                if summary and "要約できませんでした" not in summary and "エラーが発生しました" not in summary:
-                    # Embeddingを生成
-                    embedding_response = self.client.models.embed_content(
-                        model=self.embedding_model,
-                        contents=[summary],
-                        config=types.EmbedContentConfig(task_type="retrieval_document")
-                    )
-                    embedding = embedding_response.embeddings[0].values
-
-                    # 要約した会話をベクトルDBに追加
-                    self.collection.add(
-                        ids=[str(uuid.uuid4())],
-                        embeddings=[embedding],
-                        documents=[summary],
-                        metadatas=[{"user_id": user_id}]
-                    )
-                    print(f"バックグラウンドでメモリを追加しました: {summary}")
-        except Exception as e:
-            print(f"バックグラウンドでのメモリ追加中にエラーが発生しました: {e}")
 
     def generate_speech(self, text: str, voice_name: str = 'Laomedeia'):
         """

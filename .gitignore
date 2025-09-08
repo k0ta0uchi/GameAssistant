@@ -14,4 +14,3 @@ run.ps1
 chromadb/
 output.mp3
 temp_*
-*.gguf
