@@ -2,19 +2,18 @@ import asyncio
 from twitchio.ext import commands
 
 class TwitchBot(commands.Bot):
-    def __init__(self, token, client_id, client_secret, bot_username, channel, mention_callback):
+    def __init__(self, token, client_id, client_secret, bot_username, bot_id, channel, mention_callback):
         self.bot_username = bot_username.lower()
         self.channel_name = channel.lower()
         self.mention_callback = mention_callback
-        # The error mentions bot_id, but twitchio uses nick for the bot's username and gets the ID itself.
-        # The critical missing parts were client_id and client_secret.
         super().__init__(
             token=token,
             client_id=client_id,
             client_secret=client_secret,
             nick=bot_username,
-            prefix='!', # Let's keep a prefix for potential future command handling
-            initial_channels=[self.channel_name]
+            prefix='!',
+            initial_channels=[self.channel_name],
+            bot_id=bot_id
         )
 
     async def event_ready(self):
