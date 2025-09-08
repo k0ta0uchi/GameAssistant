@@ -42,7 +42,7 @@ def get_chroma_client() -> Any:
     return _chroma_client
 
 # optional encryption helpers using Fernet
-def _get_fernet() -> Optional[Fernet]:
+def _get_fernet() -> Optional['Fernet']:
     key = os.environ.get("CHROMA_ENCRYPT_KEY")
     if not key:
         return None

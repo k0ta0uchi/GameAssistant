@@ -1,10 +1,7 @@
-# scripts/twitch_bot.py
-import asyncio
+from twitchio.ext import commands
 import re
 import collections
 from typing import Optional, List, Callable, Awaitable, Any, Protocol, runtime_checkable
-
-from twitchio.ext import commands
 
 # mention_callback: (author_name, prompt) -> Optional[str] (非同期)
 MentionCallback = Optional[Callable[[str, str], Awaitable[Optional[str]]]]
@@ -23,8 +20,7 @@ class TwitchBot(commands.AutoBot):
     # Pylance に「これらの属性がある」と明示
     nick: str
     user_id: str
-    initial_channels: List[str]
-
+    
     # base にあるメソッドへアクセスする箇所が静的解析で見つからない場合の保険
     get_channel: Any
     handle_commands: Any
@@ -63,13 +59,15 @@ class TwitchBot(commands.AutoBot):
 
     async def event_ready(self) -> None:
         print(f"[ready] logged in as: {self.nick} (id: {self.user_id})")
-        # initial_channels に join（v3 では自動 join が期待通り動かない場合があるため）
-        for ch in self.initial_channels:
-            try:
-                # join_channels の存在を型注釈で示したので Pylance は文句を言わない
-                await self.join_channels(ch if ch.startswith("#") else f"#{ch}")
-            except Exception as e:
-                print(f"[warn] failed to join {ch}: {e}")
+        # AutoBot は initial_channels に基づいて自動 join するので明示的に join_channels は不要
+        # ここでは通知だけにしておく
+        # conduit を取得して join_channels する
+        if self.conduits:
+            conduit = self.conduits[0]
+            await conduit.join_channels(self.initial_channels)
+            print(f"[ready] joined channels: {self.initial_channels}")
+        else:
+            print("[warn] no conduit available, cannot join channels")
 
     async def event_message(self, message: ChatMessageLike) -> None:
         # 無限ループ防止（echo / author / message-id）

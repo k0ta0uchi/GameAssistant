@@ -16,3 +16,6 @@ output.mp3
 temp_*
 
 *.gguf
+.serena/
+
+.vscode/
