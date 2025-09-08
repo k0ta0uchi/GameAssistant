@@ -19,8 +19,9 @@ class TwitchBot(commands.Bot):
     async def event_ready(self):
         """Called once when the bot goes online."""
         print(f'{self.bot_username} is online!')
-        ws = self.ws  # this is the websocket
-        await ws.send_privmsg(self.channel_name, f"/me has landed!")
+        channel = self.get_channel(self.channel_name)
+        if channel:
+            await channel.send("/me has landed!")
 
     async def event_message(self, message):
         """Runs every time a message is sent in chat."""
