@@ -2,19 +2,18 @@ import asyncio
 from twitchio.ext import commands
 
 class TwitchBot(commands.Bot):
-    def __init__(self, token, client_id, client_secret, bot_username, channel, mention_callback):
+    def __init__(self, token, client_id, client_secret, bot_username, bot_id, channel, mention_callback):
         self.bot_username = bot_username.lower()
         self.channel_name = channel.lower()
         self.mention_callback = mention_callback
-        # Per documentation and errors, the modern twitchio Bot requires token and client_id/secret.
-        # We will not use bot_id as it seems to be a red herring. The library can derive it.
-        # The channel to join is passed in initial_channels.
         super().__init__(
             token=token,
             client_id=client_id,
             client_secret=client_secret,
-            prefix='!', # A prefix is required, but we don't use commands.
-            initial_channels=[self.channel_name]
+            nick=bot_username,
+            prefix='!',
+            initial_channels=[self.channel_name],
+            bot_id=bot_id
         )
 
     async def event_ready(self):
