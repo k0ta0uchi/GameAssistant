@@ -156,7 +156,6 @@ class GameAssistantApp:
         self.twitch_oauth_token = ttk.StringVar(value=self.settings.get("twitch_oauth_token", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings.get("twitch_client_secret", ""))
-        self.twitch_bot_id = ttk.StringVar(value=self.settings.get("twitch_bot_id", ""))
 
         self.session = gemini.GeminiSession(self.custom_instruction)
         self.twitch_bot = None
@@ -204,7 +203,6 @@ class GameAssistantApp:
         self.settings["twitch_oauth_token"] = self.twitch_oauth_token.get()
         self.settings["twitch_client_id"] = self.twitch_client_id.get()
         self.settings["twitch_client_secret"] = self.twitch_client_secret.get()
-        self.settings["twitch_bot_id"] = self.twitch_bot_id.get()
 
         with open(self.settings_file, "w", encoding="utf-8") as f:
             json.dump(self.settings, f, ensure_ascii=False, indent=4)
@@ -346,11 +344,6 @@ class GameAssistantApp:
         bot_username_frame.pack(fill=X, pady=2)
         ttk.Label(bot_username_frame, text="Bot Username:", width=12).pack(side=LEFT)
         ttk.Entry(bot_username_frame, textvariable=self.twitch_bot_username).pack(side=LEFT, fill=X, expand=True)
-
-        bot_id_frame = ttk.Frame(twitch_frame)
-        bot_id_frame.pack(fill=X, pady=2)
-        ttk.Label(bot_id_frame, text="Bot User ID:", width=12).pack(side=LEFT)
-        ttk.Entry(bot_id_frame, textvariable=self.twitch_bot_id).pack(side=LEFT, fill=X, expand=True)
 
         channel_frame = ttk.Frame(twitch_frame)
         channel_frame.pack(fill=X, pady=2)
@@ -753,9 +746,8 @@ class GameAssistantApp:
         channel = self.twitch_channel.get()
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
-        bot_id = self.twitch_bot_id.get()
 
-        if not all([token, bot_username, channel, client_id, client_secret, bot_id]):
+        if not all([token, bot_username, channel, client_id, client_secret]):
             print("Twitchの認証情報が不足しています。設定を確認してください。")
             return
 
@@ -766,7 +758,6 @@ class GameAssistantApp:
                 client_id=client_id,
                 client_secret=client_secret,
                 bot_username=bot_username,
-                bot_id=bot_id,
                 channel=channel,
                 mention_callback=self.handle_twitch_mention
             )
