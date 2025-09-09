@@ -33,6 +33,7 @@ except Exception as e:
     PIPE = None
 
 def recognize_speech(audio_file_path: str) -> str:
+    print(f"[DEBUG] whisper.py: Starting recognition for {audio_file_path}")
     """ 録音した音声をテキストに変換する """
     if PIPE is None:
         error_message = "音声認識パイプラインが初期化されていません。"

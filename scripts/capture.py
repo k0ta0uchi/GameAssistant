@@ -7,6 +7,9 @@ from PIL import Image
 user32,gdi32 = windll.user32,windll.gdi32
 PW_RENDERFULLCONTENT = 2
 
+import threading
+from PIL import Image, ImageTk
+
 def getWindowBMAP(hwnd,returnImage=False):
     # get Window size and crop pos/size
     L,T,R,B = win32gui.GetWindowRect(hwnd); W,H = R-L,B-T
@@ -74,6 +77,36 @@ def get_window_by_title(title):
         return window
     except IndexError:
         return None  # ウィンドウが見つからない場合
+
+
+class CaptureService:
+    def __init__(self, app_logic):
+        self.app = app_logic
+
+    def capture_window(self):
+        print("ウィンドウをキャプチャします…")
+        try:
+            capture_screen(self.app.selected_window, self.app.screenshot_file_path)
+            self.load_and_display_image(self.app.screenshot_file_path)
+        except Exception as e:
+            print(f"キャプチャできませんでした： {e}")
+
+    def load_and_display_image(self, image_path):
+        threading.Thread(target=self.process_image, args=(image_path,)).start()
+
+    def process_image(self, image_path):
+        try:
+            image = Image.open(image_path)
+            max_size = (400, 300)
+            image.thumbnail(max_size)
+            self.app.image = ImageTk.PhotoImage(image)
+            self.app.root.after(0, self.update_image_label)
+        except Exception as e:
+            print(f"画像処理エラー: {e}")
+
+    def update_image_label(self):
+        if self.app.image:
+            self.app.image_label.config(image=self.app.image)
 
 if __name__ == "__main__":
     # ウィンドウの一覧を表示し、ユーザーに選択させる

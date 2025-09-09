@@ -27,6 +27,10 @@ KEYWORD_FILE_PATH = 'porcupine/ねえぐり_ja_windows_v3_0_0.ppn'
 MODEL_FILE_PATH = 'porcupine/porcupine_params_ja.pv'
 
 # --- 音声処理関数 ---
+import threading
+
+import scripts.voice as voice
+
 def get_audio_level(audio_data, channels):
     """ 音声データの音量レベルを取得（マルチチャンネル対応） """
     samples = np.frombuffer(audio_data, dtype=np.int16)
@@ -225,3 +229,116 @@ def get_device_index_from_name(device_name):
         if device_info.get('name') == device_name:
             return i
     return None
+
+
+class AudioService:
+    def __init__(self, app_logic):
+        self.app = app_logic
+        self.recording = False
+        self.record_waiting = False
+        self.recording_complete = False
+        self.stop_event = threading.Event()
+        self.recording_thread = None
+        self.record_waiting_thread = None
+
+    def toggle_recording(self):
+        if self.app.device_index is None:
+            print("デバイスが選択されていません")
+            return
+        if not self.recording:
+            self.start_recording()
+        else:
+            self.stop_recording()
+
+    def toggle_record_waiting(self):
+        if self.app.device_index is None:
+            print("デバイスが選択されていません")
+            return
+        if not self.record_waiting:
+            self.start_record_waiting()
+        else:
+            self.stop_record_waiting()
+
+    def start_recording(self):
+        self.recording = True
+        self.recording_complete = False
+        self.app.record_button.config(text="録音停止", style="danger.TButton")
+        self.recording_thread = threading.Thread(target=self.record_audio_thread)
+        self.recording_thread.start()
+
+    def stop_recording(self):
+        self.recording = False
+        self.app.record_button.config(text="処理中...", style="success.TButton", state="disabled")
+        self.app.record_wait_button.config(state="disabled")
+        if self.app.selected_window:
+            self.app.capture_service.capture_window()
+        else:
+            print("ウィンドウが選択されていません")
+            return
+        self.app.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
+        self.app.play_random_nod_thread.start()
+        if self.recording_complete:
+            thread = threading.Thread(target=self.app.process_and_respond)
+            thread.start()
+        else:
+            print("録音が停止されていません")
+
+    def start_record_waiting(self):
+        self.record_waiting = True
+        self.recording_complete = False
+        self.app.record_wait_button.config(text="録音待機中", style="danger.TButton")
+        self.stop_event.clear()
+        self.record_waiting_thread = threading.Thread(target=self.wait_for_keyword_thread)
+        self.record_waiting_thread.start()
+
+    def stop_record_temporary(self):
+        self.app.record_wait_button.config(text="処理中...", style="danger.TButton", state="disabled")
+        self.app.record_button.config(state="disabled")
+        if self.app.selected_window:
+            self.app.capture_service.capture_window()
+        else:
+            print("ウィンドウが選択されていません")
+            return
+        self.app.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
+        self.app.play_random_nod_thread.start()
+        if self.recording_complete:
+            thread = threading.Thread(target=self.app.process_and_respond, args=(True,))
+            thread.start()
+        else:
+            print("録音が停止されていません")
+
+    def stop_record_waiting(self):
+        self.record_waiting = False
+        self.app.record_wait_button.config(text="録音待機", style="success.TButton")
+        self.stop_event.set()
+
+    def record_audio_thread(self):
+        if self.app.device_index is None:
+            print("マイクが選択されていません。")
+            return
+        record_audio(
+            device_index=self.app.device_index,
+            update_callback=self.app.update_level_meter,
+            audio_file_path=self.app.audio_file_path,
+            stop_event=self.stop_event
+        )
+        print("録音完了")
+        self.recording_complete = True
+        if self.recording:
+            self.app.root.after(0, self.stop_recording)
+
+    def wait_for_keyword_thread(self):
+        if self.app.device_index is None:
+            print("マイクが選択されていません。")
+            return
+        result = wait_for_keyword(
+            device_index=self.app.device_index,
+            update_callback=self.app.update_level_meter,
+            audio_file_path=self.app.audio_file_path,
+            stop_event=self.stop_event
+        )
+        if result:
+            print("録音完了")
+            self.recording_complete = True
+            if not self.stop_event.is_set():
+                self.app.root.after(0, self.stop_record_temporary)

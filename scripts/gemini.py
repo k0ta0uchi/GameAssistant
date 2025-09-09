@@ -17,6 +17,8 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
 USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
+import asyncio
+
 class GeminiSession:
     def __init__(self, custom_instruction: str | None = None):
         if not GEMINI_MODEL:
@@ -38,14 +40,13 @@ class GeminiSession:
         self.collection = self.chroma_client.get_or_create_collection(name="memories")
         local_summarizer.initialize_llm()
 
-    def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True):
+    async def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True):
         user_id = USER_ID_PRIVATE if is_private else USER_ID_PUBLIC
         if not user_id:
             raise ValueError("User ID is not set for the selected privacy level.")
 
-        # メモリ保存処理をバックグラウンドで実行
-        thread = threading.Thread(target=self._add_memory_in_background, args=(prompt, user_id))
-        thread.start()
+        # メモリ保存処理を非同期タスクとして実行
+        asyncio.create_task(self._add_memory_in_background(prompt, user_id))
 
         # クエリのEmbeddingを生成
         query_embedding_response = self.client.models.embed_content(
@@ -56,6 +57,7 @@ class GeminiSession:
         query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
         # 関連性の高い会話を検索
+
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=5,
@@ -90,7 +92,9 @@ class GeminiSession:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
 
-    def _add_memory_in_background(self, prompt: str, user_id: str):
+
+
+    async def _add_memory_in_background(self, prompt: str, user_id: str):
         """（バックグラウンド処理）メモリへの追加を行う"""
         try:
             # 疑問形でない場合のみメモリに保存
@@ -168,6 +172,16 @@ class GeminiSession:
                         if hasattr(part, 'text'):
                             history_texts.append(f'role - {message.role}: {part.text}')
         return history_texts
+
+
+class GeminiService:
+    def __init__(self, custom_instruction):
+        self.session = GeminiSession(custom_instruction)
+
+    def ask(self, prompt, image_path=None, is_private=True):
+        if not prompt:
+            return "プロンプトがありません。"
+        return self.session.generate_content(prompt, image_path, is_private)
 
 if __name__ == "__main__":
     image_file_path = "screenshot.png"

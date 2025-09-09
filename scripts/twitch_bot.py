@@ -15,6 +15,12 @@ LOGGER = logging.getLogger(__name__)
 # mention_callbackの型定義
 MentionCallback = Optional[Callable[[str, str, twitchio.PartialUser], Awaitable[Optional[str]]]]
 
+import asyncio
+import threading
+import time
+import chromadb
+from . import twitch_auth
+
 async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[str, str]], Any]:
     """
     ChromaDBをセットアップします。
@@ -160,4 +166,162 @@ class TwitchBot(commands.Bot):
                 LOGGER.error(f"Failed to send message to {channel.name}: {e}")
         else:
             LOGGER.warning(f"Could not find channel {channel_name} to send message.")
+
+
+class TwitchService:
+    def __init__(self, app_logic):
+        self.app = app_logic
+        self.twitch_bot = None
+        self.twitch_thread = None
+        self.twitch_bot_loop = None
+
+    def copy_auth_url(self):
+        client_id = self.app.twitch_client_id.get()
+        if not client_id:
+            print("エラー: Client IDが設定されていません。")
+            return
+        
+        auth_url = twitch_auth.generate_auth_url(client_id)
+        
+        try:
+            import pyperclip
+            pyperclip.copy(auth_url)
+            print("成功: 認証URLをクリップボードにコピーしました。")
+        except ImportError:
+            print("エラー: pyperclipモジュールが見つかりません。`pip install pyperclip`でインストールしてください。")
+            print(f"認証URL: {auth_url}")
+        except Exception as e:
+            print(f"クリップボードへのコピーに失敗しました: {e}")
+            print(f"認証URL: {auth_url}")
+
+    def register_auth_code(self):
+        threading.Thread(target=self.run_register_auth_code, daemon=True).start()
+
+    def run_register_auth_code(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.async_register_auth_code())
+
+    async def async_register_auth_code(self):
+        code = self.app.twitch_auth_code.get()
+        if not code:
+            print("エラー: 認証コードが入力されていません。")
+            return
+
+        client_id = self.app.twitch_client_id.get()
+        client_secret = self.app.twitch_client_secret.get()
+
+        if not all([client_id, client_secret]):
+            print("エラー: Client IDまたはClient Secretが設定されていません。")
+            return
+        
+        print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
+        try:
+            is_bot = self.app.twitch_is_bot_auth.get()
+            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code, is_bot_auth=is_bot)
+            if result and result.get("user_id"):
+                user_id = result["user_id"]
+                print(f"成功: ユーザーID {user_id} のトークンを登録しました。")
+                
+                if is_bot:
+                    self.app.twitch_bot_id.set(user_id)
+                    self.app.settings_manager.set('twitch_bot_id', user_id)
+                    self.app.settings_manager.save(self.app.settings_manager.settings)
+                    print(f"Bot IDを {user_id} に設定し、保存しました。")
+
+                self.app.twitch_auth_code.set("") 
+                self.app.twitch_is_bot_auth.set(False)
+            else:
+                print("エラー: トークンの登録に失敗しました。")
+        except Exception as e:
+            print(f"トークン登録中にエラーが発生しました: {e}")
+
+    def toggle_twitch_connection(self):
+        if self.twitch_bot and self.twitch_thread and self.twitch_thread.is_alive():
+            self.disconnect_twitch_bot()
+        else:
+            self.connect_twitch_bot()
+
+    def connect_twitch_bot(self):
+        threading.Thread(target=self.run_connect_twitch_bot, daemon=True).start()
+
+    def run_connect_twitch_bot(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.async_connect_twitch_bot())
+
+    async def async_connect_twitch_bot(self):
+        client_id = self.app.twitch_client_id.get()
+        client_secret = self.app.twitch_client_secret.get()
+        
+        bot_id = await twitch_auth.get_bot_id_from_db()
+        if not bot_id:
+            bot_id = self.app.twitch_bot_id.get()
+            if bot_id:
+                print(f"DBにbot_idがなかったため、設定ファイルのID: {bot_id} を使用します。")
+            else:
+                print("エラー: ボットのIDがDBにも設定ファイルにも見つかりません。認証コードでボットのトークンを登録してください。")
+                return
+        else:
+            print(f"DBからボットID: {bot_id} を取得しました。")
+            self.app.twitch_bot_id.set(bot_id)
+
+        if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
+            return
+
+        print("Twitchボットに接続しています...")
+        try:
+            token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
+            
+            self.twitch_bot = TwitchBot(
+                client_id=client_id,
+                client_secret=client_secret,
+                bot_id=bot_id,
+                owner_id=bot_id,
+                nick=self.app.twitch_bot_username.get(),
+                token_collection=token_collection,
+                mention_callback=self.handle_twitch_mention,
+            )
+
+            self.twitch_bot_loop = asyncio.new_event_loop()
+            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
+            self.twitch_thread.start()
+            self.app.twitch_connect_button.config(text="切断", style="danger.TButton")
+        except Exception as e:
+            print(f"Twitchへの接続に失敗しました: {e}")
+            self.twitch_bot = None
+
+    def disconnect_twitch_bot(self):
+        print("Twitchボットの切断を試みます（アプリケーション終了時にスレッドは閉じられます）...")
+        self.twitch_thread = None
+        self.app.twitch_connect_button.config(text="接続", style="primary.TButton")
+        print("Twitchボットを切断しました。")
+
+    def run_bot_in_thread(self, loop):
+        asyncio.set_event_loop(loop)
+        if self.twitch_bot:
+            loop.run_until_complete(self.twitch_bot.start())
+
+    async def handle_twitch_mention(self, author, prompt, channel):
+        print(f"Twitchのメンションを処理中: {author} in {channel.name} - {prompt}")
+
+        current_time = time.time()
+        last_mention_time = self.app.twitch_last_mention_time.get(author, 0)
+        if current_time - last_mention_time < self.app.twitch_mention_cooldown:
+            cooldown_remaining = round(self.app.twitch_mention_cooldown - (current_time - last_mention_time))
+            reply_message = f"@{author} ちょっと待ってだわん！ あと{cooldown_remaining}秒待ってから話しかけてほしいわん。"
+            if self.twitch_bot and self.twitch_bot_loop:
+                coro = self.twitch_bot.send_chat_message(channel, reply_message)
+                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
+            return
+
+        self.app.twitch_last_mention_time[author] = current_time
+
+        response = await self.app.gemini_service.ask(prompt, image_path=None, is_private=False)
+        
+        if response:
+            if self.twitch_bot and self.twitch_bot_loop:
+                reply_message = f"@{author} {response}"
+                coro = self.twitch_bot.send_chat_message(channel, reply_message)
+                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
 
