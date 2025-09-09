@@ -101,12 +101,23 @@ class TwitchBot(commands.Bot):
         resp: ValidateTokenPayload = await self.add_token(payload.access_token, payload.refresh_token) # type: ignore
         user_id = resp.user_id
 
+        doc_id = user_id
+        metadata = {
+            'token': payload.access_token,
+            'refresh': payload.refresh_token,
+        }
+        
+        # ボット自身のトークンを 'bot' というIDでChromaDBに保存し、実際のユーザーIDをメタデータに含める
+        if user_id and user_id == self.bot_id_str:
+            doc_id = 'bot'
+            metadata['original_user_id'] = user_id # ボットの実際のTwitchユーザーIDをメタデータに保存
+
         self.token_collection.upsert(
-            ids=[user_id], # type: ignore
-            metadatas=[{'token': payload.access_token, 'refresh': payload.refresh_token}],
-            documents=["auth_token"]
+            ids=[doc_id], # type: ignore
+            metadatas=[metadata],
+            documents=[f"auth_token_for_{doc_id}"] # ドキュメントの例
         )
-        LOGGER.info(f"データベース(ChromaDB)にユーザーID {user_id} のトークンを追加/更新しました")
+        LOGGER.info(f"データベース(ChromaDB)にID '{doc_id}' (元のユーザーID: {user_id}) のトークンを追加/更新しました。")
 
         if user_id != self.bot_id_str:
             try:
