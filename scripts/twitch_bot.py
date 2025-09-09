@@ -2,6 +2,7 @@ import logging
 import re
 from typing import Optional, List, Callable, Awaitable, Any, cast
 
+import twitchio
 from twitchio.ext import commands
 from twitchio import eventsub
 from twitchio.authentication import UserTokenPayload, ValidateTokenPayload
@@ -47,7 +48,6 @@ class TwitchBot(commands.Bot):
             owner_id=owner_id,
             bot_id=bot_id,
             scopes=cast(Any, SCOPES.split()),
-            web_server=False,
         )
 
     async def setup_hook(self) -> None:
@@ -120,12 +120,12 @@ class TwitchBot(commands.Bot):
             except Exception as e:
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
 
-    async def event_message(self, message: Any) -> None:
-        await self.handle_commands(message) # type: ignore
-        if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.content.lower(): # type: ignore
-            prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.content, flags=re.I).strip() # type: ignore
-            author_name = message.author.name if message.author else ""
-            channel_name = message.channel.name if message.channel else ""
+    async def event_message(self, message: twitchio.ChatMessage) -> None:
+        await super().event_message(message) # type: ignore
+        if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.text.lower(): # type: ignore
+            prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.text, flags=re.I).strip() # type: ignore
+            author_name = message.chatter.display_name if message.chatter else ""
+            channel_name = message.chatter.name if message.chatter.name else ""
             try:
                 # チャンネル名を渡すように変更
                 await self.mention_callback(author_name, prompt, channel_name)
