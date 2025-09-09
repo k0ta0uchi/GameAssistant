@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 import keyboard
 import json
 import asyncio
+import time
 from scripts.memory import MemoryManager
 
 
@@ -256,6 +257,8 @@ class GameAssistantApp:
         self.twitch_bot = None
         self.twitch_thread = None
         self.twitch_bot_loop = None
+        self.twitch_last_mention_time = {}
+        self.twitch_mention_cooldown = 30 # クールダウンタイム（秒）
 
         self.create_widgets()
 
@@ -869,13 +872,34 @@ class GameAssistantApp:
             # トークンのロードはTwitchBotのsetup_hookに任せる
             loop.run_until_complete(self.twitch_bot.start()) # type: ignore
 
-    async def handle_twitch_mention(self, author, prompt, channel_name):
-        print(f"Twitchのメンションを処理中: {author} in {channel_name} - {prompt}")
+    async def handle_twitch_mention(self, author, prompt, channel):
+        print(f"Twitchのメンションを処理中: {author} in {channel.name} - {prompt}")
+
+        # クールダウン処理
+        current_time = time.time()
+        last_mention_time = self.twitch_last_mention_time.get(author, 0)
+        if current_time - last_mention_time < self.twitch_mention_cooldown:
+            cooldown_remaining = round(self.twitch_mention_cooldown - (current_time - last_mention_time))
+            reply_message = f"@{author} ちょっと待ってだわん！ あと{cooldown_remaining}秒待ってから話しかけてほしいわん。"
+            if self.twitch_bot and self.twitch_bot_loop:
+                coro = self.twitch_bot.send_chat_message(channel, reply_message)
+                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
+            return
+
+        self.twitch_last_mention_time[author] = current_time
+
+        # Geminiに応答を生成させる
         response = self.session.generate_content(prompt, image_path=None, is_private=False)
-        if response and self.twitch_bot and self.twitch_bot_loop:
-            reply_message = f"@{author} {response}"
-            coro = self.twitch_bot.send_chat_message(channel_name, reply_message)
-            asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
+        
+        if response:
+            # # TTSで読み上げ
+            # voice.text_to_speech(response)
+            
+            # Twitchに応答を送信
+            if self.twitch_bot and self.twitch_bot_loop:
+                reply_message = f"@{author} {response}"
+                coro = self.twitch_bot.send_chat_message(channel, reply_message)
+                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
 
 def on_closing(app_instance):
     print("アプリケーションを終了します...")

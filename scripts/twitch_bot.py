@@ -13,7 +13,7 @@ from scripts.twitch_auth import SCOPES
 LOGGER = logging.getLogger(__name__)
 
 # mention_callbackの型定義
-MentionCallback = Optional[Callable[[str, str, str], Awaitable[Optional[str]]]]
+MentionCallback = Optional[Callable[[str, str, twitchio.PartialUser], Awaitable[Optional[str]]]]
 
 async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[str, str]], Any]:
     """
@@ -124,11 +124,11 @@ class TwitchBot(commands.Bot):
         await super().event_message(message) # type: ignore
         if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.text.lower(): # type: ignore
             prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.text, flags=re.I).strip() # type: ignore
-            author_name = message.chatter.display_name if message.chatter else ""
-            channel_name = message.chatter.name if message.chatter.name else ""
+            author_name = message.chatter.name if message.chatter.name else ""
+            channel = message.broadcaster
             try:
                 # チャンネル名を渡すように変更
-                await self.mention_callback(author_name, prompt, channel_name)
+                await self.mention_callback(author_name, prompt, channel) 
             except Exception as exc:
                 LOGGER.error(f"mention_callback failed: {exc}")
 
@@ -137,12 +137,15 @@ class TwitchBot(commands.Bot):
         if ctx.author:
             await ctx.reply(f"Hello {ctx.author.name}!")
             
-    async def send_chat_message(self, channel_name: str, message: str) -> None:
-        """指定されたチャンネルにチャットメッセージを送信します。"""
-        channel = self.get_channel(channel_name) # type: ignore
+    async def send_chat_message(self, channel: twitchio.PartialUser, message: str) -> None:
+        """指定されたチャンネルにチャットメッセージを送信します。"""# type: ignore
+        print(channel)
         if channel:
-            await channel.send(message)
-            LOGGER.info(f"Sent message to {channel_name}: {message}")
+            try:
+                await channel.send_message(message, self.bot_id)
+                LOGGER.info(f"Sent message to {channel.name}: {message}")
+            except Exception as e:
+                LOGGER.error(f"Failed to send message to {channel.name}: {e}")
         else:
             LOGGER.warning(f"Could not find channel {channel_name} to send message.")
 

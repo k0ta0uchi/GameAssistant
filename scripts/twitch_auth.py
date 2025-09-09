@@ -10,7 +10,7 @@ import chromadb
 #       完全に一致している必要があります。
 #       auth.htmlをホスティングするURL（例: GitHub PagesのURL）に変更してください。
 REDIRECT_URI = "https://k0ta0uchi.github.io/GameAssistant/auth.html"
-SCOPES = "chat:read chat:edit moderator:read:followers user:read:chat user:write:chat"
+SCOPES = "chat:read chat:edit moderator:read:followers user:read:chat user:write:chat user:bot channel:bot"
 
 # --- ChromaDBクライアントの初期化 ---
 chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")

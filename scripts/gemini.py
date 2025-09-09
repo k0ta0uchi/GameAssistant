@@ -53,7 +53,7 @@ class GeminiSession:
             contents=[prompt],
             config=types.EmbedContentConfig(task_type="retrieval_query")
         )
-        query_embedding = query_embedding_response.embeddings[0].values
+        query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
         # 関連性の高い会話を検索
         results = self.collection.query(
@@ -104,7 +104,7 @@ class GeminiSession:
                         contents=[summary],
                         config=types.EmbedContentConfig(task_type="retrieval_document")
                     )
-                    embedding = embedding_response.embeddings[0].values
+                    embedding = embedding_response.embeddings[0].values # type: ignore
 
                     # 要約した会話をベクトルDBに追加
                     self.collection.add(
