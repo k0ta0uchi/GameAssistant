@@ -821,8 +821,8 @@ class GameAssistantApp:
 
         print("Twitchボットに接続しています...")
         try:
-            chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
-            tokens, token_collection = await setup_database(chroma_client, bot_id)
+            # token_collectionはTwitchBotの初期化に渡すだけで良い
+            token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
             
             self.twitch_bot = TwitchBot(
                 client_id=client_id,
@@ -835,7 +835,8 @@ class GameAssistantApp:
             )
 
             self.twitch_bot_loop = asyncio.new_event_loop()
-            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop, tokens), daemon=True)
+            # run_bot_in_threadにtokensを渡す必要はなくなる
+            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
             self.twitch_thread.start()
             self.twitch_connect_button.config(text="切断", style="danger.TButton")
         except Exception as e:
@@ -848,16 +849,10 @@ class GameAssistantApp:
         self.twitch_connect_button.config(text="接続", style="primary.TButton")
         print("Twitchボットを切断しました。")
 
-    def run_bot_in_thread(self, loop, tokens):
+    def run_bot_in_thread(self, loop):
         asyncio.set_event_loop(loop)
         if self.twitch_bot:
-            for token, refresh in tokens:
-                try:
-                    future = asyncio.run_coroutine_threadsafe(self.twitch_bot.add_user_token(token, refresh), loop) # type: ignore
-                    future.result()
-                except Exception as e:
-                    print(f"Failed to validate a token from DB: {e}")
-            
+            # トークンのロードはTwitchBotのsetup_hookに任せる
             loop.run_until_complete(self.twitch_bot.start()) # type: ignore
 
     async def handle_twitch_mention(self, author, prompt):

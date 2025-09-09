@@ -64,7 +64,7 @@ class TwitchBot(commands.Bot):
                 if token and refresh:
                     try:
                         # トークンを追加
-                        await self.add_user_token(token, refresh) # type: ignore
+                        await self.add_token(token, refresh) # type: ignore
                         # ボット自身のチャンネルを除き、チャットメッセージイベントを購読
                         if user_id_str != self.bot_id_str:
                             initial_subs.append(eventsub.ChatMessageSubscription(broadcaster_user_id=user_id_str, user_id=self.bot_id_str))
@@ -72,10 +72,13 @@ class TwitchBot(commands.Bot):
                         LOGGER.warning(f"Failed to add token or create subscription for {user_id_str}: {e}")
         
         if initial_subs:
-            try:
-                await self.multi_subscribe(initial_subs) # type: ignore
-            except Exception as e:
-                LOGGER.error(f"Failed to subscribe to initial events: {e}")
+            for sub in initial_subs:
+                try:
+                    # sub は既に eventsub.ChatMessageSubscription インスタンスなので、そのまま payload として渡す
+                    await self.subscribe_websocket(payload=sub)
+                    LOGGER.info(f"Subscribed to channel.chat.message for broadcaster {sub.broadcaster_user_id}")
+                except Exception as e:
+                     LOGGER.error(f"Failed to subscribe to initial events for {getattr(sub, 'broadcaster_user_id', 'N/A')}: {e}")
 
         LOGGER.info("Setup complete!")
 
@@ -87,7 +90,7 @@ class TwitchBot(commands.Bot):
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:
         """OAuth認証が成功したときに呼び出されます。"""
-        resp: ValidateTokenPayload = await self.add_user_token(payload.access_token, payload.refresh_token) # type: ignore
+        resp: ValidateTokenPayload = await self.add_token(payload.access_token, payload.refresh_token) # type: ignore
         user_id = resp.user_id
 
         self.token_collection.upsert(
@@ -98,9 +101,15 @@ class TwitchBot(commands.Bot):
         LOGGER.info(f"データベース(ChromaDB)にユーザーID {user_id} のトークンを追加/更新しました")
 
         if user_id != self.bot_id_str:
-            new_subs = [eventsub.ChatMessageSubscription(broadcaster_user_id=user_id, user_id=self.bot_id_str)]
             try:
-                await self.multi_subscribe(new_subs) # type: ignore
+                # 新しいユーザーに対してチャットメッセージのサブスクリプションを登録
+                # eventsub.ChatMessageSubscription インスタンスを payload として作成
+                new_subscription_payload = eventsub.ChatMessageSubscription(
+                    broadcaster_user_id=user_id,
+                    user_id=self.bot_id_str
+                )
+                await self.subscribe_websocket(payload=new_subscription_payload)
+                LOGGER.info(f"Subscribed to channel.chat.message for new user {user_id}")
             except Exception as e:
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
 

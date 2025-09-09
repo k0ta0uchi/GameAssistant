@@ -26,3 +26,5 @@ test/
 
 .twitch_tokens.json
 chroma_tokens_data/
+
+settings.json

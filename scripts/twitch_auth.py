@@ -9,7 +9,7 @@ import chromadb
 # 重要: このリダイレクトURIは、Twitch開発者コンソールに登録されているものと
 #       完全に一致している必要があります。
 #       auth.htmlをホスティングするURL（例: GitHub PagesのURL）に変更してください。
-REDIRECT_URI = "http://localhost:8080/auth.html" # 例: ローカルテスト用
+REDIRECT_URI = "https://k0ta0uchi.github.io/GameAssistant/auth.html"
 SCOPES = "chat:read chat:edit moderator:read:followers"
 
 # --- ChromaDBクライアントの初期化 ---
