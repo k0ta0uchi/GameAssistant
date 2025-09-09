@@ -10,7 +10,7 @@ import chromadb
 #       完全に一致している必要があります。
 #       auth.htmlをホスティングするURL（例: GitHub PagesのURL）に変更してください。
 REDIRECT_URI = "https://k0ta0uchi.github.io/GameAssistant/auth.html"
-SCOPES = "chat:read chat:edit moderator:read:followers"
+SCOPES = "chat:read chat:edit moderator:read:followers user:read:chat user:write:chat"
 
 # --- ChromaDBクライアントの初期化 ---
 chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
@@ -18,20 +18,26 @@ token_collection = chroma_client.get_or_create_collection(name="user_tokens")
 
 # --- トークン管理 (ChromaDB) ---
 
-async def save_token_to_db(user_id: str, token_data: Dict[str, Any]):
+async def save_token_to_db(user_id: str, token_data: Dict[str, Any], is_bot: bool = False):
     """トークン情報をChromaDBに保存/更新する"""
     expires_at = time.time() + token_data.get("expires_in", 3600) - 60
     refresh_token = token_data.get("refresh_token") or ""
+    
+    doc_id = "bot" if is_bot else user_id
+    metadata = {
+        "token": token_data["access_token"],
+        "refresh": refresh_token,
+        "expires_at": expires_at
+    }
+    if is_bot:
+        metadata["user_id"] = user_id
+
     token_collection.upsert(
-        ids=[user_id],
-        metadatas=[{
-            "token": token_data["access_token"],
-            "refresh": refresh_token,
-            "expires_at": expires_at
-        }],
-        documents=[f"auth_token_for_{user_id}"]
+        ids=[doc_id],
+        metadatas=[metadata],
+        documents=[f"auth_token_for_{doc_id}"]
     )
-    print(f"[info] ユーザーID {user_id} のトークンをDBに保存しました。")
+    print(f"[info] ユーザーID {user_id} のトークンをDBに保存しました。 (is_bot: {is_bot})")
 
 async def get_token_from_db(user_id: str) -> Optional[Dict[str, Any]]:
     """ユーザーIDを使ってChromaDBからトークン情報を取得する"""
@@ -41,6 +47,16 @@ async def get_token_from_db(user_id: str) -> Optional[Dict[str, Any]]:
         metadata = metadatas[0]
         if metadata:
             return dict(metadata)
+    return None
+
+async def get_bot_id_from_db() -> Optional[str]:
+    """DBからボットのユーザーIDを取得する"""
+    result = token_collection.get(ids=["bot"])
+    metadatas = result.get('metadatas')
+    if metadatas and len(metadatas) > 0:
+        metadata = metadatas[0]
+        if metadata:
+            return metadata.get("user_id") # type: ignore
     return None
 
 async def fetch_user_id_from_token(client_id: str, access_token: str) -> Optional[str]:
@@ -100,7 +116,7 @@ def generate_auth_url(client_id: str) -> str:
     )
     return auth_url
 
-async def exchange_code_for_token(client_id: str, client_secret: str, code: str) -> Optional[Dict[str, Any]]:
+async def exchange_code_for_token(client_id: str, client_secret: str, code: str, bot_id_str: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """認証コードをアクセストークンに交換し、DBに保存する"""
     token_url = "https://id.twitch.tv/oauth2/token"
     params = {
@@ -117,7 +133,8 @@ async def exchange_code_for_token(client_id: str, client_secret: str, code: str)
                     token_data = await resp.json()
                     user_id = await fetch_user_id_from_token(client_id, token_data['access_token'])
                     if user_id:
-                        await save_token_to_db(user_id, token_data)
+                        is_bot = user_id == bot_id_str if bot_id_str else False
+                        await save_token_to_db(user_id, token_data, is_bot=is_bot)
                         return {"user_id": user_id, "token_data": token_data}
                     else:
                         print("[error] トークンからユーザーIDの取得に失敗しました。")

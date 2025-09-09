@@ -1,10 +1,12 @@
 import logging
 import re
-from typing import Optional, List, Callable, Awaitable, Any
+from typing import Optional, List, Callable, Awaitable, Any, cast
 
 from twitchio.ext import commands
 from twitchio import eventsub
 from twitchio.authentication import UserTokenPayload, ValidateTokenPayload
+from scripts.twitch_auth import SCOPES
+
 
 # ロガーの設定
 LOGGER = logging.getLogger(__name__)
@@ -44,6 +46,7 @@ class TwitchBot(commands.Bot):
             prefix="!",
             owner_id=owner_id,
             bot_id=bot_id,
+            scopes=cast(Any, SCOPES.split()),
         )
 
     async def setup_hook(self) -> None:
@@ -57,6 +60,9 @@ class TwitchBot(commands.Bot):
 
         if results and results['ids']:
             for i, user_id_str in enumerate(results['ids']):
+                # "bot" というIDはボット自身のトークンなので、ここではスキップ
+                if user_id_str == 'bot':
+                    continue
                 metadata = results['metadatas'][i]
                 token = metadata.get('token')
                 refresh = metadata.get('refresh')

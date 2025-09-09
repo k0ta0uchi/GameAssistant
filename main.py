@@ -783,14 +783,23 @@ class GameAssistantApp:
         
         print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
         try:
-            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code)
+            bot_id_to_check = self.twitch_bot_id.get()
+            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code, bot_id_str=bot_id_to_check)
             if result and result.get("user_id"):
-                print(f"成功: ユーザーID {result['user_id']} のトークンを登録しました。")
-                # Bot自身のトークンを登録した場合、Bot IDを更新
-                if self.twitch_bot_username.get().lower() == result.get("user_id", "").lower():
-                     self.twitch_bot_id.set(result["user_id"])
-                     self.save_settings()
-                     print(f"Bot IDを {result['user_id']} に設定しました。")
+                user_id = result["user_id"]
+                print(f"成功: ユーザーID {user_id} のトークンを登録しました。")
+                
+                # 登録されたIDがボットのIDであれば、設定を更新
+                if bot_id_to_check and user_id == bot_id_to_check:
+                     print(f"ボットID {user_id} のトークンを更新しました。")
+                
+                # 新しくDBに保存されたbot_idを取得してUIに反映
+                new_bot_id = await twitch_auth.get_bot_id_from_db()
+                if new_bot_id:
+                    self.twitch_bot_id.set(new_bot_id)
+                    self.save_settings()
+                    print(f"設定ファイルにボットID {new_bot_id} を保存しました。")
+
                 self.twitch_auth_code.set("") # 入力欄をクリア
             else:
                 print("エラー: トークンの登録に失敗しました。")
@@ -814,12 +823,24 @@ class GameAssistantApp:
     async def async_connect_twitch_bot(self):
         client_id = self.twitch_client_id.get()
         client_secret = self.twitch_client_secret.get()
-        bot_id = self.twitch_bot_id.get()
+        
+        # DBからbot_idを取得し、なければ設定ファイルの値を使用
+        bot_id = await twitch_auth.get_bot_id_from_db()
+        if not bot_id:
+            bot_id = self.twitch_bot_id.get()
+            if bot_id:
+                print(f"DBにbot_idがなかったため、設定ファイルのID: {bot_id} を使用します。")
+            else:
+                print("エラー: ボットのIDがDBにも設定ファイルにも見つかりません。認証コードでボットのトークンを登録してください。")
+                return
+        else:
+            print(f"DBからボットID: {bot_id} を取得しました。")
+            self.twitch_bot_id.set(bot_id) # UIにも反映
 
         if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
             return
 
-        print("Twitchボットに接続しています...")
+        print("TwitchボTットに接続しています...")
         try:
             # token_collectionはTwitchBotの初期化に渡すだけで良い
             token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
