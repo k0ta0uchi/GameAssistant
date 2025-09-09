@@ -18,5 +18,5 @@ kokoro
 playwright
 google.generativeai
 sounddevice
-twitchio==2.7.0
+twitchio==3.1.0
 pvporcupine

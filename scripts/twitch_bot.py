@@ -79,6 +79,7 @@ class TwitchBot(commands.Bot):
                         LOGGER.warning(f"Failed to add token or create subscription for {user_id_str}: {e}")
         
         if initial_subs:
+            print(initial_subs)
             for sub in initial_subs:
                 try:
                     # sub は既に eventsub.ChatMessageSubscription インスタンスなので、そのまま payload として渡す

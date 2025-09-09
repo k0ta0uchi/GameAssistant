@@ -20,7 +20,8 @@ import json
 import asyncio
 import time
 from scripts.memory import MemoryManager
-
+from twitchio.utils import setup_logging
+import logging
 
 import scripts.capture as capture
 
@@ -910,6 +911,7 @@ def on_closing(app_instance):
     app_instance.root.destroy()
 
 if __name__ == "__main__":
+    setup_logging(level=logging.DEBUG)
     root = ttk.Window(themename="superhero")
     root.geometry("1280x960")
     app = GameAssistantApp(root)
