@@ -245,11 +245,11 @@ class GameAssistantApp:
         self.tts_engine = ttk.StringVar(value=self.settings.get("tts_engine", "voicevox"))
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
-        self.twitch_channel = ttk.StringVar(value=self.settings.get("twitch_channel", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings.get("twitch_client_secret", ""))
         self.twitch_bot_id = ttk.StringVar(value=self.settings.get("twitch_bot_id", ""))
         self.twitch_auth_code = ttk.StringVar() # 認証コード入力用
+        self.twitch_is_bot_auth = ttk.BooleanVar(value=False) # ボット自身の認証かどうかのフラグ
 
         self.session = gemini.GeminiSession(self.custom_instruction)
         self.memory_manager = MemoryManager()
@@ -286,7 +286,6 @@ class GameAssistantApp:
             "response_display_duration": self.response_display_duration.get(),
             "tts_engine": self.tts_engine.get(),
             "twitch_bot_username": self.twitch_bot_username.get(),
-            "twitch_channel": self.twitch_channel.get(),
             "twitch_client_id": self.twitch_client_id.get(),
             "twitch_client_secret": self.twitch_client_secret.get(),
             "twitch_bot_id": self.twitch_bot_id.get(),
@@ -421,6 +420,11 @@ class GameAssistantApp:
         ttk.Label(auth_code_frame, text="認証コード:", width=12).pack(side=LEFT)
         auth_code_entry = ttk.Entry(auth_code_frame, textvariable=self.twitch_auth_code)
         auth_code_entry.pack(side=LEFT, fill=X, expand=True)
+        
+        is_bot_auth_check = ttk.Checkbutton(
+            twitch_frame, text="ボット自身の認証として登録する", variable=self.twitch_is_bot_auth, style="success-square-toggle"
+        )
+        is_bot_auth_check.pack(fill=X, pady=5)
 
         auth_button_frame = ttk.Frame(twitch_frame)
         auth_button_frame.pack(fill=X, pady=5)
@@ -429,13 +433,6 @@ class GameAssistantApp:
         self.copy_auth_url_button = ttk.Button(auth_button_frame, text="承認URLコピー", command=self.copy_auth_url, style="info.TButton")
         self.copy_auth_url_button.pack(side=LEFT, fill=X, expand=True)
         # --- ここまで ---
-        
-        channel_frame = ttk.Frame(twitch_frame)
-        channel_frame.pack(fill=X, pady=5)
-        ttk.Label(channel_frame, text="チャンネル名:", width=12).pack(side=LEFT)
-        channel_entry = ttk.Entry(channel_frame, textvariable=self.twitch_channel)
-        channel_entry.pack(side=LEFT, fill=X, expand=True)
-        channel_entry.bind("<FocusOut>", lambda e: self.save_settings())
         
         self.twitch_connect_button = ttk.Button(twitch_frame, text="接続", command=self.toggle_twitch_connection, style="primary.TButton")
         self.twitch_connect_button.pack(fill=X, pady=5)
@@ -783,24 +780,20 @@ class GameAssistantApp:
         
         print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
         try:
-            bot_id_to_check = self.twitch_bot_id.get()
-            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code, bot_id_str=bot_id_to_check)
+            is_bot = self.twitch_is_bot_auth.get()
+            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code, is_bot_auth=is_bot)
             if result and result.get("user_id"):
                 user_id = result["user_id"]
                 print(f"成功: ユーザーID {user_id} のトークンを登録しました。")
                 
-                # 登録されたIDがボットのIDであれば、設定を更新
-                if bot_id_to_check and user_id == bot_id_to_check:
-                     print(f"ボットID {user_id} のトークンを更新しました。")
-                
-                # 新しくDBに保存されたbot_idを取得してUIに反映
-                new_bot_id = await twitch_auth.get_bot_id_from_db()
-                if new_bot_id:
-                    self.twitch_bot_id.set(new_bot_id)
+                # ボットとして登録した場合、bot_idを更新
+                if is_bot:
+                    self.twitch_bot_id.set(user_id)
                     self.save_settings()
-                    print(f"設定ファイルにボットID {new_bot_id} を保存しました。")
+                    print(f"Bot IDを {user_id} に設定し、保存しました。")
 
                 self.twitch_auth_code.set("") # 入力欄をクリア
+                self.twitch_is_bot_auth.set(False) # チェックボックスをリセット
             else:
                 print("エラー: トークンの登録に失敗しました。")
         except Exception as e:
@@ -876,12 +869,12 @@ class GameAssistantApp:
             # トークンのロードはTwitchBotのsetup_hookに任せる
             loop.run_until_complete(self.twitch_bot.start()) # type: ignore
 
-    async def handle_twitch_mention(self, author, prompt):
-        print(f"Twitchのメンションを処理中: {author} - {prompt}")
+    async def handle_twitch_mention(self, author, prompt, channel_name):
+        print(f"Twitchのメンションを処理中: {author} in {channel_name} - {prompt}")
         response = self.session.generate_content(prompt, image_path=None, is_private=False)
         if response and self.twitch_bot and self.twitch_bot_loop:
             reply_message = f"@{author} {response}"
-            coro = self.twitch_bot.send_chat_message(self.twitch_channel.get(), reply_message)
+            coro = self.twitch_bot.send_chat_message(channel_name, reply_message)
             asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
 
 def on_closing(app_instance):

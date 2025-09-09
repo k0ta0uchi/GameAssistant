@@ -12,7 +12,7 @@ from scripts.twitch_auth import SCOPES
 LOGGER = logging.getLogger(__name__)
 
 # mention_callbackの型定義
-MentionCallback = Optional[Callable[[str, str], Awaitable[Optional[str]]]]
+MentionCallback = Optional[Callable[[str, str, str], Awaitable[Optional[str]]]]
 
 async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[str, str]], Any]:
     """
@@ -47,6 +47,7 @@ class TwitchBot(commands.Bot):
             owner_id=owner_id,
             bot_id=bot_id,
             scopes=cast(Any, SCOPES.split()),
+            web_server=False,
         )
 
     async def setup_hook(self) -> None:
@@ -120,16 +121,14 @@ class TwitchBot(commands.Bot):
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
 
     async def event_message(self, message: Any) -> None:
-        if message.echo:
-            return
         await self.handle_commands(message) # type: ignore
         if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.content.lower(): # type: ignore
             prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.content, flags=re.I).strip() # type: ignore
             author_name = message.author.name if message.author else ""
+            channel_name = message.channel.name if message.channel else ""
             try:
-                reply = await self.mention_callback(author_name, prompt)
-                if reply and message.channel:
-                    await message.channel.send(reply)
+                # チャンネル名を渡すように変更
+                await self.mention_callback(author_name, prompt, channel_name)
             except Exception as exc:
                 LOGGER.error(f"mention_callback failed: {exc}")
 

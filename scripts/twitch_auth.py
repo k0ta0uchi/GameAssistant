@@ -116,7 +116,7 @@ def generate_auth_url(client_id: str) -> str:
     )
     return auth_url
 
-async def exchange_code_for_token(client_id: str, client_secret: str, code: str, bot_id_str: Optional[str] = None) -> Optional[Dict[str, Any]]:
+async def exchange_code_for_token(client_id: str, client_secret: str, code: str, is_bot_auth: bool = False) -> Optional[Dict[str, Any]]:
     """認証コードをアクセストークンに交換し、DBに保存する"""
     token_url = "https://id.twitch.tv/oauth2/token"
     params = {
@@ -133,8 +133,7 @@ async def exchange_code_for_token(client_id: str, client_secret: str, code: str,
                     token_data = await resp.json()
                     user_id = await fetch_user_id_from_token(client_id, token_data['access_token'])
                     if user_id:
-                        is_bot = user_id == bot_id_str if bot_id_str else False
-                        await save_token_to_db(user_id, token_data, is_bot=is_bot)
+                        await save_token_to_db(user_id, token_data, is_bot=is_bot_auth)
                         return {"user_id": user_id, "token_data": token_data}
                     else:
                         print("[error] トークンからユーザーIDの取得に失敗しました。")
