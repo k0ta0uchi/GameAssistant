@@ -142,8 +142,6 @@ async def ensure_bot_token_valid(client_id: str, client_secret: str, bot_id: str
         return False
 
     token_info = await get_token_from_db(bot_id)
-    
-    print(token_info)
 
     if token_info and time.time() < token_info.get("expires_at", 0):
         print("[info] ボットの既存トークンは有効です。")
