@@ -42,17 +42,18 @@ class TwitchBot(commands.Bot):
     """
     TwitchIO v3 Bot (chromadb対応)
     """
-    def __init__(self, *, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, mention_callback: MentionCallback = None) -> None:
+    def __init__(self, *, token: str, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, mention_callback: MentionCallback = None) -> None:
         self.token_collection = token_collection
         self.mention_callback = mention_callback
         self.bot_id_str = bot_id
         self.nick = nick
+        # self._bot_token = token # この行は不要
         super().__init__(
             client_id=client_id,
             client_secret=client_secret,
+            bot_id=bot_id,
             prefix="!",
             owner_id=owner_id,
-            bot_id=bot_id,
             scopes=cast(Any, SCOPES.split()),
         )
 
@@ -63,36 +64,33 @@ class TwitchBot(commands.Bot):
         LOGGER.info("Bot is setting up...")
         # DBからトークンを読み込み、EventSubを購読
         results = self.token_collection.get()
-        initial_subs = []
 
         if results and results['ids']:
             for i, user_id_str in enumerate(results['ids']):
                 # "bot" というIDはボット自身のトークンなので、ここではスキップ
-                if user_id_str == 'bot':
-                    continue
+                
                 metadata = results['metadatas'][i]
                 token = metadata.get('token')
                 refresh = metadata.get('refresh')
 
                 if token and refresh:
                     try:
-                        # トークンを追加
-                        await self.add_token(token, refresh) # type: ignore
-                        # ボット自身のチャンネルを除き、チャットメッセージイベントを購読
-                        if user_id_str != self.bot_id_str:
-                            initial_subs.append(eventsub.ChatMessageSubscription(broadcaster_user_id=user_id_str, user_id=self.bot_id_str))
+                        # 1. トークンをクライアントに追加 (これにより self._tokens に保存される)
+                        await self.add_token(token, refresh)
+
+                        # 2. サブスクリプションオブジェクトを作成
+                        sub = eventsub.ChatMessageSubscription(
+                            broadcaster_user_id=user_id_str,
+                            user_id=self.bot_id_str
+                        )
+
+                        # 3. token_for にはボットのIDを指定して購読
+                        await self.subscribe_websocket(sub, token_for=self.bot_id_str)
+
+                        LOGGER.info(f"Subscribed to channel.chat.message for broadcaster {user_id_str}")
+
                     except Exception as e:
                         LOGGER.warning(f"Failed to add token or create subscription for {user_id_str}: {e}")
-        
-        if initial_subs:
-            print(initial_subs)
-            for sub in initial_subs:
-                try:
-                    # sub は既に eventsub.ChatMessageSubscription インスタンスなので、そのまま payload として渡す
-                    await self.subscribe_websocket(payload=sub)
-                    LOGGER.info(f"Subscribed to channel.chat.message for broadcaster {sub.broadcaster_user_id}")
-                except Exception as e:
-                     LOGGER.error(f"Failed to subscribe to initial events for {getattr(sub, 'broadcaster_user_id', 'N/A')}: {e}")
 
         LOGGER.info("Setup complete!")
 
@@ -113,27 +111,22 @@ class TwitchBot(commands.Bot):
             'refresh': payload.refresh_token,
         }
         
-        # ボット自身のトークンを 'bot' というIDでChromaDBに保存し、実際のユーザーIDをメタデータに含める
-        if user_id and user_id == self.bot_id_str:
-            doc_id = 'bot'
-            metadata['original_user_id'] = user_id # ボットの実際のTwitchユーザーIDをメタデータに保存
-
         self.token_collection.upsert(
-            ids=[doc_id], # type: ignore
+            ids=[user_id], # type: ignore
             metadatas=[metadata],
-            documents=[f"auth_token_for_{doc_id}"] # ドキュメントの例
+            documents=[f"auth_token_for_{user_id}"] # ドキュメントの例
         )
-        LOGGER.info(f"データベース(ChromaDB)にID '{doc_id}' (元のユーザーID: {user_id}) のトークンを追加/更新しました。")
+        LOGGER.info(f"データベース(ChromaDB)にID '{user_id}' のトークンを追加/更新しました。")
 
         if user_id != self.bot_id_str:
             try:
                 # 新しいユーザーに対してチャットメッセージのサブスクリプションを登録
-                # eventsub.ChatMessageSubscription インスタンスを payload として作成
                 new_subscription_payload = eventsub.ChatMessageSubscription(
                     broadcaster_user_id=user_id,
                     user_id=self.bot_id_str
                 )
-                await self.subscribe_websocket(payload=new_subscription_payload)
+                # token_for にはボットのIDを指定して購読
+                await self.subscribe_websocket(new_subscription_payload, token_for=self.bot_id_str)
                 LOGGER.info(f"Subscribed to channel.chat.message for new user {user_id}")
             except Exception as e:
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
@@ -217,20 +210,18 @@ class TwitchService:
         
         print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
         try:
-            is_bot = self.app.twitch_is_bot_auth.get()
-            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code, is_bot_auth=is_bot)
+            result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code)
             if result and result.get("user_id"):
                 user_id = result["user_id"]
                 print(f"成功: ユーザーID {user_id} のトークンを登録しました。")
                 
-                if is_bot:
-                    self.app.twitch_bot_id.set(user_id)
-                    self.app.settings_manager.set('twitch_bot_id', user_id)
-                    self.app.settings_manager.save(self.app.settings_manager.settings)
-                    print(f"Bot IDを {user_id} に設定し、保存しました。")
+                # 登録されたIDをBot IDとして設定・保存する
+                self.app.twitch_bot_id.set(user_id)
+                self.app.settings_manager.set('twitch_bot_id', user_id)
+                self.app.settings_manager.save(self.app.settings_manager.settings)
+                print(f"Bot IDを {user_id} に設定し、保存しました。")
 
-                self.app.twitch_auth_code.set("") 
-                self.app.twitch_is_bot_auth.set(False)
+                self.app.twitch_auth_code.set("")
             else:
                 print("エラー: トークンの登録に失敗しました。")
         except Exception as e:
@@ -254,26 +245,26 @@ class TwitchService:
         client_id = self.app.twitch_client_id.get()
         client_secret = self.app.twitch_client_secret.get()
         
-        bot_id = await twitch_auth.get_bot_id_from_db()
+        bot_id = self.app.twitch_bot_id.get()
         if not bot_id:
-            bot_id = self.app.twitch_bot_id.get()
-            if bot_id:
-                print(f"DBにbot_idがなかったため、設定ファイルのID: {bot_id} を使用します。")
-            else:
-                print("エラー: ボットのIDがDBにも設定ファイルにも見つかりません。認証コードでボットのトークンを登録してください。")
-                return
-        else:
-            print(f"DBからボットID: {bot_id} を取得しました。")
-            self.app.twitch_bot_id.set(bot_id)
+            print("エラー: ボットのIDが設定ファイルに見つかりません。認証コードでボットのトークンを登録してください。")
+            return
 
         if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
             return
+
+        bot_token_info = await twitch_auth.get_token_from_db(bot_id)
+        if not bot_token_info or 'token' not in bot_token_info:
+            print("エラー: DBからボットのトークンを取得できませんでした。")
+            return
+        bot_token = bot_token_info['token']
 
         print("Twitchボットに接続しています...")
         try:
             token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
             
             self.twitch_bot = TwitchBot(
+                token=bot_token,
                 client_id=client_id,
                 client_secret=client_secret,
                 bot_id=bot_id,
@@ -324,4 +315,3 @@ class TwitchService:
                 reply_message = f"@{author} {response}"
                 coro = self.twitch_bot.send_chat_message(channel, reply_message)
                 asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
-

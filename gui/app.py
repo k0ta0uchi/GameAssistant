@@ -94,8 +94,7 @@ class GameAssistantApp:
         self.twitch_client_id = ttk.StringVar(value=self.settings_manager.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings_manager.get("twitch_client_secret", ""))
         self.twitch_bot_id = ttk.StringVar(value=self.settings_manager.get("twitch_bot_id", ""))
-        self.twitch_auth_code = ttk.StringVar() 
-        self.twitch_is_bot_auth = ttk.BooleanVar(value=False)
+        self.twitch_auth_code = ttk.StringVar()
 
         self.audio_service = AudioService(self)
         self.capture_service = CaptureService(self)
@@ -226,6 +225,13 @@ class GameAssistantApp:
         bot_username_entry.pack(side=LEFT, fill=X, expand=True)
         bot_username_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('twitch_bot_username', self.twitch_bot_username.get()), self.settings_manager.save(self.settings_manager.settings)))
 
+        bot_id_frame = ttk.Frame(twitch_frame)
+        bot_id_frame.pack(fill=X, pady=2)
+        ttk.Label(bot_id_frame, text="Bot ID:", width=12).pack(side=LEFT)
+        bot_id_entry = ttk.Entry(bot_id_frame, textvariable=self.twitch_bot_id)
+        bot_id_entry.pack(side=LEFT, fill=X, expand=True)
+        bot_id_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('twitch_bot_id', self.twitch_bot_id.get()), self.settings_manager.save(self.settings_manager.settings)))
+
         client_id_frame = ttk.Frame(twitch_frame)
         client_id_frame.pack(fill=X, pady=2)
         ttk.Label(client_id_frame, text="Client ID:", width=12).pack(side=LEFT)
@@ -246,10 +252,6 @@ class GameAssistantApp:
         auth_code_entry = ttk.Entry(auth_code_frame, textvariable=self.twitch_auth_code)
         auth_code_entry.pack(side=LEFT, fill=X, expand=True)
         
-        is_bot_auth_check = ttk.Checkbutton(
-            twitch_frame, text="ボット自身の認証として登録する", variable=self.twitch_is_bot_auth, style="success-square-toggle"
-        )
-        is_bot_auth_check.pack(fill=X, pady=5)
 
         auth_button_frame = ttk.Frame(twitch_frame)
         auth_button_frame.pack(fill=X, pady=5)
@@ -363,8 +365,10 @@ class GameAssistantApp:
     async def process_and_respond_async(self, from_temporary_stop=False):
         # このメソッドは非同期で実行される
         prompt = self.transcribe_audio()
+
+        # promptがNoneまたは空文字列の場合、処理を中断
         if not prompt:
-            print("プロンプトが空です。")
+            print("プロンプトが空のため、処理を中断します。")
             def enable_buttons():
                 self.record_button.config(text="録音開始", style="success.TButton", state="normal")
                 self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
@@ -388,7 +392,8 @@ class GameAssistantApp:
 
         self.prompt = prompt
         image_path = self.screenshot_file_path if self.use_image.get() and os.path.exists(self.screenshot_file_path) else None
-        response = await self.gemini_service.ask(self.prompt, image_path, self.is_private.get())
+        
+        response = await self.gemini_service.ask(self.prompt, image_path, self.is_private.get()) # type: ignore
         self.response = response
 
         def update_gui_and_speak():
