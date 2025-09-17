@@ -28,3 +28,7 @@ test/
 chroma_tokens_data/
 
 settings.json
+
+chroma_backup_*
+
+logs/

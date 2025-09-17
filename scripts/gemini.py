@@ -4,8 +4,9 @@ from dotenv import load_dotenv
 from PIL import Image
 from google.genai import types
 import wave
-from .clients import get_gemini_client, get_chroma_client
+from .clients import get_gemini_client # get_chroma_clientはMemoryManager内で使用するため不要に
 from . import local_summarizer
+from .memory import MemoryManager
 import uuid
 import google.generativeai as genai
 import threading
@@ -35,18 +36,19 @@ class GeminiSession:
         self.chat = self.client.chats.create(model=GEMINI_MODEL, history=history)
         self.embedding_model = "models/embedding-001"
 
-        # --- ChromaDB and Summarizer Initialization ---
-        self.chroma_client = get_chroma_client()
-        self.collection = self.chroma_client.get_or_create_collection(name="memories")
+        # --- Memory Manager and Summarizer Initialization ---
+        self.memory_manager = MemoryManager(collection_name="memories")
         local_summarizer.initialize_llm()
 
-    async def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True):
-        user_id = USER_ID_PRIVATE if is_private else USER_ID_PUBLIC
-        if not user_id:
-            raise ValueError("User ID is not set for the selected privacy level.")
+    async def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = 'app', memory_user_id: str | None = None):
+        # メモリ保存用のユーザーIDを決定
+        # memory_user_idが明示的に渡された場合はそれを優先し、そうでなければ環境変数から取得
+        target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
+        if not target_user_id:
+            raise ValueError("User ID is not set for the selected privacy level or memory type.")
 
         # メモリ保存処理を非同期タスクとして実行
-        asyncio.create_task(self._add_memory_in_background(prompt, user_id))
+        asyncio.create_task(self._add_memory_in_background(prompt, target_user_id, memory_type))
 
         # クエリのEmbeddingを生成
         query_embedding_response = self.client.models.embed_content(
@@ -57,11 +59,12 @@ class GeminiSession:
         query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
         # 関連性の高い会話を検索
-
-        results = self.collection.query(
+        # 注意: ここでは target_user_id を metadatas の 'user' として扱う
+        # また、memory_type で指定されたタイプのみを検索対象とする
+        results = self.memory_manager.collection.query(
             query_embeddings=[query_embedding],
             n_results=5,
-            where={"user_id": user_id}
+            where={"$and": [{"type": memory_type}, {"user": target_user_id}]}
         )
         
         # 検索結果を要約
@@ -94,30 +97,36 @@ class GeminiSession:
 
 
 
-    async def _add_memory_in_background(self, prompt: str, user_id: str):
+    async def _add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
         """（バックグラウンド処理）メモリへの追加を行う"""
         try:
             # 疑問形でない場合のみメモリに保存
             if not prompt.endswith(('?', '？')) and not any(q in prompt for q in ['何', 'どこ', 'いつ', '誰', 'なぜ']):
                 # プロンプトを要約
-                summary = local_summarizer.summarize(prompt)
+                summary = await asyncio.to_thread(local_summarizer.summarize, prompt)
                 if summary and "要約できませんでした" not in summary and "エラーが発生しました" not in summary:
                     # Embeddingを生成
-                    embedding_response = self.client.models.embed_content(
+                    embedding_response = await asyncio.to_thread(
+                        self.client.models.embed_content,
                         model=self.embedding_model,
                         contents=[summary],
                         config=types.EmbedContentConfig(task_type="retrieval_document")
                     )
-                    embedding = embedding_response.embeddings[0].values # type: ignore
+                    if embedding_response and embedding_response.embeddings:
+                        embedding = embedding_response.embeddings[0].values
+                    else:
+                        print(f"メモリーの保存中にEmbeddingの生成に失敗しました: {prompt}")
+                        return
 
                     # 要約した会話をベクトルDBに追加
-                    self.collection.add(
-                        ids=[str(uuid.uuid4())],
-                        embeddings=[embedding],
-                        documents=[summary],
-                        metadatas=[{"user_id": user_id}]
+                    # MemoryManagerを使用し、typeとuserを指定
+                    self.memory_manager.add_or_update_memory(
+                        key=str(uuid.uuid4()), # 新しいキーを生成
+                        value=summary,
+                        type=memory_type,
+                        user=user_id
                     )
-                    print(f"バックグラウンドでメモリを追加しました: {summary}")
+                    print(f"バックグラウンドでメモリを追加しました: {summary} (type: {memory_type}, user: {user_id})")
         except Exception as e:
             print(f"バックグラウンドでのメモリ追加中にエラーが発生しました: {e}")
 
@@ -178,10 +187,10 @@ class GeminiService:
     def __init__(self, custom_instruction):
         self.session = GeminiSession(custom_instruction)
 
-    def ask(self, prompt, image_path=None, is_private=True):
+    def ask(self, prompt, image_path=None, is_private=True, memory_type='app', memory_user_id=None):
         if not prompt:
             return "プロンプトがありません。"
-        return self.session.generate_content(prompt, image_path, is_private)
+        return self.session.generate_content(prompt, image_path, is_private, memory_type, memory_user_id)
 
 if __name__ == "__main__":
     image_file_path = "screenshot.png"

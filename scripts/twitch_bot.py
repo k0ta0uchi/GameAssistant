@@ -308,7 +308,7 @@ class TwitchService:
 
         self.app.twitch_last_mention_time[author] = current_time
 
-        response = await self.app.gemini_service.ask(prompt, image_path=None, is_private=False)
+        response = await self.app.gemini_service.ask(prompt, image_path=None, is_private=False, memory_type='twitch', memory_user_id=author)
         
         if response:
             if self.twitch_bot and self.twitch_bot_loop:
