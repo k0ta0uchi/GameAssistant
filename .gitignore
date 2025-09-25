@@ -17,8 +17,10 @@ temp_*
 
 *.gguf
 .serena/
-
 .vscode/
+.gemini/
+.specify/
+specs/
 
 wheels/
 
@@ -32,3 +34,4 @@ settings.json
 chroma_backup_*
 
 logs/
+
