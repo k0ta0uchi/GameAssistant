@@ -3,6 +3,8 @@ import os
 from dotenv import load_dotenv
 from PIL import Image
 from google.genai import types
+from io import BytesIO
+import mimetypes
 import wave
 from .clients import get_gemini_client # get_chroma_clientはMemoryManager内で使用するため不要に
 from . import local_summarizer
@@ -21,19 +23,20 @@ USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 import asyncio
 
 class GeminiSession:
-    def __init__(self, custom_instruction: str | None = None):
+    def __init__(self, custom_instruction: str | None = None, settings_manager=None):
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")
 
         self.client = get_gemini_client()
+        self.settings_manager = settings_manager
+        self.disable_thinking_mode = self.settings_manager.get("disable_thinking_mode", False) if self.settings_manager else False
         
         # --- Chat Session Initialization ---
-        history = []
+        self.history = []
         if custom_instruction:
-            history.append({'role': 'user', 'parts': [{'text': custom_instruction}]})
-            history.append({'role': 'model', 'parts': [{'text': 'はい、承知いたしましただわん。'}]})
+            self.history.append(types.Content(role='user', parts=[types.Part(text=custom_instruction)]))
+            self.history.append(types.Content(role='model', parts=[types.Part(text='はい、承知いたしましただわん。')]))
         
-        self.chat = self.client.chats.create(model=GEMINI_MODEL, history=history)
         self.embedding_model = "models/embedding-001"
 
         # --- Memory Manager and Summarizer Initialization ---
@@ -86,11 +89,48 @@ class GeminiSession:
                 print(f"Warning: Failed to load image: {e}")
 
         prompt_with_memory = f"Previous conversations:\n{memory}\n\nUser: {prompt}\nAI:" if memory else f"User: {prompt}\nAI:"
-        contents.append(prompt_with_memory)
+        
+        # APIに渡すcontentsを構築
+        current_user_parts = []
+        if image_path:
+            try:
+                img = Image.open(image_path)
+                buf = BytesIO()
+                fmt = getattr(img, "format", None) or "JPEG"
+                img.save(buf, format=fmt)
+                image_bytes = buf.getvalue()
+                mime_type = mimetypes.guess_type(image_path)[0] or f"image/{fmt.lower()}"
+                current_user_parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+            except FileNotFoundError:
+                print(f"Warning: Image file not found at {image_path}")
+            except Exception as e:
+                print(f"Warning: Failed to load image: {e}")
+        
+        current_user_parts.append(types.Part(text=prompt_with_memory))
+
+        # 今回のユーザー入力を履歴に追加
+        self.history.append(types.Content(role='user', parts=current_user_parts))
 
         try:
-            response = self.chat.send_message(contents)
-            return response.text
+            thinking_budget = 0 if self.disable_thinking_mode else -1
+            config = types.GenerateContentConfig(
+                thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget)
+            )
+            response = self.client.models.generate_content(
+                model=GEMINI_MODEL, # type: ignore
+                contents=self.history,
+                config=config
+            )
+            response_text = response.text
+            
+            # モデルの応答を履歴に追加
+            if response and response.candidates:
+                self.history.append(response.candidates[0].content)
+            else:
+                # 応答がない場合でも、ダミーのモデル応答を履歴に追加しておく
+                self.history.append(types.Content(role='model', parts=[types.Part(text="（応答がありませんでした）")]))
+
+            return response_text
         except Exception as e:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
@@ -173,19 +213,16 @@ class GeminiSession:
 
     def get_history(self):
         history_texts = []
-        chat_history = self.chat.get_history()
-        if chat_history:
-            for message in chat_history:
-                if message and hasattr(message, 'parts') and message.parts:
-                    for part in message.parts:
-                        if hasattr(part, 'text'):
-                            history_texts.append(f'role - {message.role}: {part.text}')
+        if self.history:
+            for content in self.history:
+                for part in content.parts:
+                    history_texts.append(f'role - {content.role}: {part.text}')
         return history_texts
 
 
 class GeminiService:
-    def __init__(self, custom_instruction):
-        self.session = GeminiSession(custom_instruction)
+    def __init__(self, custom_instruction, settings_manager):
+        self.session = GeminiSession(custom_instruction, settings_manager)
 
     def ask(self, prompt, image_path=None, is_private=True, memory_type='app', memory_user_id=None):
         if not prompt:
@@ -197,18 +234,18 @@ if __name__ == "__main__":
     if not os.path.exists(image_file_path):
         Image.new("RGB", (100, 100), color=0).save(image_file_path)
 
-    session = GeminiSession(
-        custom_instruction="You are a helpful AI assistant."
-    )
+    # session = GeminiSession(
+    #     custom_instruction="You are a helpful AI assistant."
+    # )
 
-    prompt1 = "Describe this image."
-    response1 = session.generate_content(prompt1, image_path=image_file_path)
-    print(f"AI (1): {response1}")
+    # prompt1 = "Describe this image."
+    # response1 = session.generate_content(prompt1, image_path=image_file_path)
+    # print(f"AI (1): {response1}")
 
-    prompt2 = "Tell me more about the colors."
-    response2 = session.generate_content(prompt2)
-    print(f"AI (2): {response2}")
+    # prompt2 = "Tell me more about the colors."
+    # response2 = session.generate_content(prompt2)
+    # print(f"AI (2): {response2}")
 
-    print("\nConversation History:")
-    for entry in session.get_history():
-        print(entry)
+    # print("\nConversation History:")
+    # for entry in session.get_history():
+    #     print(entry)

@@ -89,6 +89,7 @@ class GameAssistantApp:
         self.show_response_in_new_window = ttk.BooleanVar(value=self.settings_manager.get("show_response_in_new_window", True))
         self.response_display_duration = ttk.IntVar(value=self.settings_manager.get("response_display_duration", 10000))
         self.tts_engine = ttk.StringVar(value=self.settings_manager.get("tts_engine", "voicevox"))
+        self.disable_thinking_mode = ttk.BooleanVar(value=self.settings_manager.get("disable_thinking_mode", False))
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings_manager.get("twitch_bot_username", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings_manager.get("twitch_client_id", ""))
@@ -98,7 +99,7 @@ class GameAssistantApp:
 
         self.audio_service = AudioService(self)
         self.capture_service = CaptureService(self)
-        self.gemini_service = gemini.GeminiService(self.custom_instruction)
+        self.gemini_service = gemini.GeminiService(self.custom_instruction, self.settings_manager)
         self.memory_manager = MemoryManager()
         self.twitch_service = TwitchService(self)
         self.twitch_last_mention_time = {}
@@ -213,6 +214,13 @@ class GameAssistantApp:
         voicevox_radio.pack(side=LEFT, padx=5)
         gemini_radio = ttk.Radiobutton(tts_frame, text="Gemini", variable=self.tts_engine, value="gemini", command=lambda: (self.settings_manager.set('tts_engine', self.tts_engine.get()), self.settings_manager.save(self.settings_manager.settings)))
         gemini_radio.pack(side=LEFT, padx=5)
+
+        self.disable_thinking_mode_check = ttk.Checkbutton(
+            config_frame, text="Thinkingモードをオフにする", variable=self.disable_thinking_mode,
+            style="success-square-toggle",
+            command=lambda: (self.settings_manager.set('disable_thinking_mode', self.disable_thinking_mode.get()), self.settings_manager.save(self.settings_manager.settings))
+        )
+        self.disable_thinking_mode_check.pack(fill=X, pady=5)
 
         twitch_frame = ttk.Frame(left_frame)
         twitch_frame.pack(fill=X, pady=(0, 15))
