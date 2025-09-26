@@ -20,6 +20,7 @@ class TwitchMessage:
 
 @dataclass
 class UserSpeech:
+    author: str
     content: str
     is_prompt: bool = False
     priority: int = 10
@@ -50,14 +51,18 @@ class SessionMemory:
     events: List[Union[TwitchMessage, UserSpeech, GeminiResponse]] = field(default_factory=list)
 
 class SessionManager:
-    def __init__(self, app):
+    def __init__(self, app, twitch_service):
         self.app = app
         self.session_running = False
         self.session_memory = None
-        self.twitch_service = TwitchService(app, self.handle_twitch_message)
+        self.twitch_service = twitch_service
+        self.twitch_service.message_callback = self.handle_twitch_message
         self.audio_service = AudioService(app)
         self.transcription_queue = queue.PriorityQueue()
         self._stop_event = threading.Event()
+
+    def is_session_active(self):
+        return self.session_running
 
     def start_session(self):
         print("SessionManager: セッションを開始します。")
@@ -130,7 +135,7 @@ class SessionManager:
             if isinstance(event, TwitchMessage):
                 history += f"Twitch ({event.author}): {event.content}\n"
             elif isinstance(event, UserSpeech):
-                history += f"User: {event.content}\n"
+                history += f"{event.author}: {event.content}\n"
             elif isinstance(event, GeminiResponse):
                 history += f"Assistant: {event.content}\n"
         
@@ -159,7 +164,7 @@ class SessionManager:
                 task = self.transcription_queue.get(timeout=1)
                 text = recognize_speech(task.audio_file_path)
                 if text and self.session_memory:
-                    event = UserSpeech(content=text, is_prompt=task.is_prompt)
+                    event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=task.is_prompt)
                     self.session_memory.events.append(event)
                     print(f"音声を保存しました: {event}")
                     if task.is_prompt:

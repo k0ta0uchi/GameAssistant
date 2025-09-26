@@ -91,6 +91,7 @@ class GameAssistantApp:
         self.response_display_duration = ttk.IntVar(value=self.settings_manager.get("response_display_duration", 10000))
         self.tts_engine = ttk.StringVar(value=self.settings_manager.get("tts_engine", "voicevox"))
         self.disable_thinking_mode = ttk.BooleanVar(value=self.settings_manager.get("disable_thinking_mode", False))
+        self.user_name = ttk.StringVar(value=self.settings_manager.get("user_name", "User"))
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings_manager.get("twitch_bot_username", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings_manager.get("twitch_client_id", ""))
@@ -102,8 +103,8 @@ class GameAssistantApp:
         self.capture_service = CaptureService(self)
         self.gemini_service = gemini.GeminiService(self.custom_instruction, self.settings_manager)
         self.memory_manager = MemoryManager()
-        self.twitch_service = TwitchService(self)
-        self.session_manager = SessionManager(self)
+        self.twitch_service = TwitchService(self, mention_callback=self.schedule_twitch_mention)
+        self.session_manager = SessionManager(self, self.twitch_service)
         self.twitch_last_mention_time = {}
         self.twitch_mention_cooldown = 30
 
@@ -223,6 +224,13 @@ class GameAssistantApp:
             command=lambda: (self.settings_manager.set('disable_thinking_mode', self.disable_thinking_mode.get()), self.settings_manager.save(self.settings_manager.settings))
         )
         self.disable_thinking_mode_check.pack(fill=X, pady=5)
+
+        user_name_frame = ttk.Frame(config_frame)
+        user_name_frame.pack(fill=X, pady=5)
+        ttk.Label(user_name_frame, text="ユーザー名:").pack(side=LEFT)
+        user_name_entry = ttk.Entry(user_name_frame, textvariable=self.user_name)
+        user_name_entry.pack(side=LEFT, fill=X, expand=True)
+        user_name_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('user_name', self.user_name.get()), self.settings_manager.save(self.settings_manager.settings)))
 
         twitch_frame = ttk.Frame(left_frame)
         twitch_frame.pack(fill=X, pady=(0, 15))
@@ -467,6 +475,43 @@ class GameAssistantApp:
 
     async def run_ai_search(self, query: str):
         return await ai_search(query)
+
+    def schedule_twitch_mention(self, author_name, prompt, channel):
+        """Twitchのメンション処理をスレッドセーフにスケジュールする"""
+        if self.twitch_service.twitch_bot_loop:
+            asyncio.run_coroutine_threadsafe(
+                self.handle_twitch_mention(author_name, prompt, channel),
+                self.twitch_service.twitch_bot_loop
+            )
+
+    async def handle_twitch_mention(self, author_name, prompt, channel):
+        """Twitchのメンションを処理する"""
+        try:
+            print(f"[DEBUG] handle_twitch_mention called by {author_name}: {prompt}")
+
+            session_history = None
+            if self.session_manager.is_session_active():
+                print("[DEBUG] Session is active.")
+                session_history = self.session_manager.get_session_history()
+            else:
+                print("[DEBUG] Session is not active.")
+
+            response = self.gemini_service.ask(prompt, None, self.is_private.get(), session_history=session_history)
+            print(f"[DEBUG] Gemini response: {response}")
+
+            if response:
+                if self.twitch_service.twitch_bot:
+                    print(f"[DEBUG] Sending message to Twitch channel {channel.name}")
+                    await self.twitch_service.twitch_bot.send_chat_message(channel, response)
+                    print("[DEBUG] Message sent to Twitch.")
+                else:
+                    print("[DEBUG] twitch_bot is not available.")
+            else:
+                print("[DEBUG] Gemini response is empty.")
+        except Exception as e:
+            print(f"handle_twitch_mentionでエラーが発生しました: {e}")
+            import traceback
+            traceback.print_exc()
 
     def process_prompt(self, prompt, session_history, screenshot_path=None):
         thread = threading.Thread(target=self.process_prompt_thread, args=(prompt, session_history, screenshot_path))
