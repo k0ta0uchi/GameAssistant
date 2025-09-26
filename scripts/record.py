@@ -230,6 +230,43 @@ def get_device_index_from_name(device_name):
             return i
     return None
 
+def record_audio_chunk(device_index, duration, audio_file_path, update_callback):
+    """ 指定された時間だけ音声を録音し、ファイルに保存する """
+    stream = None
+    try:
+        device_info = p.get_device_info_by_index(device_index)
+        channels = int(device_info.get('maxInputChannels', 1))
+        rate = int(device_info.get('defaultSampleRate', 44100))
+        
+        stream = p.open(format=FORMAT, channels=channels, rate=rate, input=True,
+                        frames_per_buffer=CHUNK, input_device_index=device_index)
+        
+        print(f"{duration}秒間の録音を開始します...")
+        frames = []
+        for _ in range(0, int(rate / CHUNK * duration)):
+            data = stream.read(CHUNK)
+            frames.append(data)
+            volume = get_audio_level(data, channels)
+            update_callback(volume)
+        
+        print("録音終了。")
+
+    except Exception as e:
+        print(f"!!! PyAudioストリームエラー: {e}")
+        return None
+    finally:
+        if stream:
+            stream.stop_stream()
+            stream.close()
+
+    with wave.open(audio_file_path, 'wb') as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(p.get_sample_size(FORMAT))
+        wf.setframerate(rate)
+        wf.writeframes(b''.join(frames))
+
+    return audio_file_path
+
 
 class AudioService:
     def __init__(self, app_logic):
@@ -342,3 +379,9 @@ class AudioService:
             self.recording_complete = True
             if not self.stop_event.is_set():
                 self.app.root.after(0, self.stop_record_temporary)
+
+    def record_chunk(self, duration, audio_file_path, update_callback):
+        if self.app.device_index is None:
+            print("マイクが選択されていません。")
+            return None
+        return record_audio_chunk(device_index=self.app.device_index, duration=duration, audio_file_path=audio_file_path, update_callback=update_callback)

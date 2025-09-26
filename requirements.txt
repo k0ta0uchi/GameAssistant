@@ -16,7 +16,6 @@ chromadb==0.5.4
 SpeechRecognition
 kokoro
 playwright
-google.generativeai
 sounddevice
 twitchio==3.1.0
 pvporcupine

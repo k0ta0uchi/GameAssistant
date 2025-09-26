@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from typing import Optional
 import os
 from dotenv import load_dotenv
 from PIL import Image
@@ -43,15 +44,16 @@ class GeminiSession:
         self.memory_manager = MemoryManager(collection_name="memories")
         local_summarizer.initialize_llm()
 
-    async def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = 'app', memory_user_id: str | None = None):
+    def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = 'app', memory_user_id: str | None = None):
         # メモリ保存用のユーザーIDを決定
         # memory_user_idが明示的に渡された場合はそれを優先し、そうでなければ環境変数から取得
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
         if not target_user_id:
             raise ValueError("User ID is not set for the selected privacy level or memory type.")
 
-        # メモリ保存処理を非同期タスクとして実行
-        asyncio.create_task(self._add_memory_in_background(prompt, target_user_id, memory_type))
+        # メモリ保存処理を別スレッドで実行
+        thread = threading.Thread(target=self._run_add_memory_in_background, args=(prompt, target_user_id, memory_type))
+        thread.start()
 
         # クエリのEmbeddingを生成
         query_embedding_response = self.client.models.embed_content(
@@ -135,7 +137,10 @@ class GeminiSession:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
 
-
+    def _run_add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._add_memory_in_background(prompt, user_id, memory_type))
 
     async def _add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
         """（バックグラウンド処理）メモリへの追加を行う"""
@@ -224,10 +229,26 @@ class GeminiService:
     def __init__(self, custom_instruction, settings_manager):
         self.session = GeminiSession(custom_instruction, settings_manager)
 
-    def ask(self, prompt, image_path=None, is_private=True, memory_type='app', memory_user_id=None):
+    def ask(self, prompt: str, image_path: Optional[str] = None, is_private: bool = False, memory_type: str = 'local', memory_user_id: Optional[str] = None, session_history: Optional[str] = None) -> Optional[str]:
         if not prompt:
             return "プロンプトがありません。"
-        return self.session.generate_content(prompt, image_path, is_private, memory_type, memory_user_id)
+        if session_history:
+            full_prompt = session_history + "\n\n" + prompt
+        else:
+            full_prompt = prompt
+        return self.session.generate_content(full_prompt, image_path, is_private, memory_type, memory_user_id)
+
+    def summarize_session(self, session_history: str) -> Optional[str]:
+        prompt = f"以下の会話履歴を要約し、重要な情報のみを抽出してください。\n\n{session_history}"
+        try:
+            response = self.session.client.models.generate_content(
+                model=GEMINI_MODEL, # type: ignore
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            print(f"セッションの要約中にエラーが発生しました: {e}")
+            return None
 
 if __name__ == "__main__":
     image_file_path = "screenshot.png"

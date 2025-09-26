@@ -17,8 +17,10 @@ temp_*
 
 *.gguf
 .serena/
-
 .vscode/
+.gemini/
+.specify/
+specs/
 
 wheels/
 

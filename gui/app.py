@@ -26,6 +26,7 @@ import scripts.capture as capture
 from scripts.settings import SettingsManager
 from scripts.record import AudioService
 from scripts.capture import CaptureService
+from scripts.session_manager import SessionManager, GeminiResponse
 from .components import OutputRedirector, GeminiResponseWindow, MemoryWindow
 
 
@@ -102,6 +103,7 @@ class GameAssistantApp:
         self.gemini_service = gemini.GeminiService(self.custom_instruction, self.settings_manager)
         self.memory_manager = MemoryManager()
         self.twitch_service = TwitchService(self)
+        self.session_manager = SessionManager(self)
         self.twitch_last_mention_time = {}
         self.twitch_mention_cooldown = 30
 
@@ -292,11 +294,20 @@ class GameAssistantApp:
         self.record_container = ttk.Frame(right_frame)
         self.record_container.pack(fill=X, padx=10, pady=10)
 
+        self.start_session_button = ttk.Button(self.record_container, text="セッションを開始", style="success.TButton", command=self.start_session)
+        self.start_session_button.pack(side=LEFT, padx=5)
+
+        self.stop_session_button = ttk.Button(self.record_container, text="セッションを停止", style="danger.TButton", command=self.stop_session)
+        self.stop_session_button.pack(side=LEFT, padx=5)
+        self.stop_session_button.pack_forget()
+
         self.record_button = ttk.Button(self.record_container, text="録音開始", style="success.TButton", command=self.audio_service.toggle_recording)
         self.record_button.pack(side=LEFT, padx=5)
+        self.record_button.config(state="disabled")
 
         self.record_wait_button = ttk.Button(self.record_container, text="録音待機", style="success.TButton", command=self.audio_service.toggle_record_waiting)
         self.record_wait_button.pack(side=LEFT, padx=5)
+        self.record_wait_button.config(state="disabled")
 
         if self.audio_devices:
             self.update_device_index()
@@ -305,6 +316,16 @@ class GameAssistantApp:
             self.update_window()
         
         self.update_record_buttons_state()
+
+    def start_session(self):
+        self.session_manager.start_session()
+        self.start_session_button.pack_forget()
+        self.stop_session_button.pack(side=LEFT, padx=5)
+
+    def stop_session(self):
+        self.session_manager.stop_session()
+        self.stop_session_button.pack_forget()
+        self.start_session_button.pack(side=LEFT, padx=5)
 
     def update_device_index(self, event=None):
         selected_device_name = self.selected_device.get()
@@ -446,3 +467,46 @@ class GameAssistantApp:
 
     async def run_ai_search(self, query: str):
         return await ai_search(query)
+
+    def process_prompt(self, prompt, session_history, screenshot_path=None):
+        thread = threading.Thread(target=self.process_prompt_thread, args=(prompt, session_history, screenshot_path))
+        thread.start()
+
+    def process_prompt_thread(self, prompt, session_history, screenshot_path=None):
+        if not prompt:
+            print("プロンプトが空のため、処理を中断します。")
+            return
+
+        if "検索" in prompt or "けんさく" in prompt:
+            search_keyword = prompt
+            # This is a blocking call, so it's fine in a thread
+            search_results = asyncio.run(self.run_ai_search(search_keyword))
+            if search_results:
+                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
+
+        self.prompt = prompt
+        image_path = screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None
+        
+        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history) # type: ignore
+        self.response = response
+
+        if response and self.session_manager.session_memory:
+            event = GeminiResponse(content=response)
+            self.session_manager.session_memory.events.append(event)
+            print(f"Geminiレスポンスを保存しました: {event}")
+
+        def update_gui_and_speak(response_text):
+            if self.show_response_in_new_window.get():
+                if response_text:
+                    self.show_gemini_response(response_text)
+            else:
+                if response_text:
+                    self.output_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
+                    self.output_textbox.see(END)
+            voice.text_to_speech(response_text)
+            if os.path.exists(self.audio_file_path):
+                os.remove(self.audio_file_path)
+            if os.path.exists(self.screenshot_file_path):
+                os.remove(self.screenshot_file_path)
+
+        self.root.after(0, update_gui_and_speak, response)
