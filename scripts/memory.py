@@ -15,7 +15,7 @@ class MemoryManager:
         """すべてのメモリーを取得する"""
         try:
             # metadatasも取得するように変更
-            results = self.collection.get(include=['metadatas', 'documents', 'embeddings', 'ids'])
+            results = self.collection.get()
             if not results or not results.get('ids') or not results.get('documents'):
                 return {}
              

@@ -42,9 +42,10 @@ class TwitchBot(commands.Bot):
     """
     TwitchIO v3 Bot (chromadb対応)
     """
-    def __init__(self, *, token: str, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, mention_callback: MentionCallback = None) -> None:
+    def __init__(self, *, token: str, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, mention_callback: MentionCallback = None, message_callback: Optional[Callable[[twitchio.ChatMessage], Awaitable[None]]] = None) -> None:
         self.token_collection = token_collection
         self.mention_callback = mention_callback
+        self.message_callback = message_callback
         self.bot_id_str = bot_id
         self.nick = nick
         # self._bot_token = token # この行は不要
@@ -132,6 +133,9 @@ class TwitchBot(commands.Bot):
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
 
     async def event_message(self, message: twitchio.ChatMessage) -> None:
+        print("--- TwitchBot.event_message CALLED ---")
+        if self.message_callback:
+            await self.message_callback(message)
         await super().event_message(message) # type: ignore
         if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.text.lower(): # type: ignore
             prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.text, flags=re.I).strip() # type: ignore
@@ -162,11 +166,12 @@ class TwitchBot(commands.Bot):
 
 
 class TwitchService:
-    def __init__(self, app_logic):
+    def __init__(self, app_logic, message_callback=None):
         self.app = app_logic
         self.twitch_bot = None
         self.twitch_thread = None
         self.twitch_bot_loop = None
+        self.message_callback = message_callback
 
     def copy_auth_url(self):
         client_id = self.app.twitch_client_id.get()
@@ -271,7 +276,7 @@ class TwitchService:
                 owner_id=bot_id,
                 nick=self.app.twitch_bot_username.get(),
                 token_collection=token_collection,
-                mention_callback=self.handle_twitch_mention,
+                message_callback=self.message_callback,
             )
 
             self.twitch_bot_loop = asyncio.new_event_loop()
@@ -292,26 +297,3 @@ class TwitchService:
         asyncio.set_event_loop(loop)
         if self.twitch_bot:
             loop.run_until_complete(self.twitch_bot.start())
-
-    async def handle_twitch_mention(self, author, prompt, channel):
-        print(f"Twitchのメンションを処理中: {author} in {channel.name} - {prompt}")
-
-        current_time = time.time()
-        last_mention_time = self.app.twitch_last_mention_time.get(author, 0)
-        if current_time - last_mention_time < self.app.twitch_mention_cooldown:
-            cooldown_remaining = round(self.app.twitch_mention_cooldown - (current_time - last_mention_time))
-            reply_message = f"@{author} ちょっと待ってだわん！ あと{cooldown_remaining}秒待ってから話しかけてほしいわん。"
-            if self.twitch_bot and self.twitch_bot_loop:
-                coro = self.twitch_bot.send_chat_message(channel, reply_message)
-                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
-            return
-
-        self.app.twitch_last_mention_time[author] = current_time
-
-        response = await self.app.gemini_service.ask(prompt, image_path=None, is_private=False, memory_type='twitch', memory_user_id=author)
-        
-        if response:
-            if self.twitch_bot and self.twitch_bot_loop:
-                reply_message = f"@{author} {response}"
-                coro = self.twitch_bot.send_chat_message(channel, reply_message)
-                asyncio.run_coroutine_threadsafe(coro, self.twitch_bot_loop)
