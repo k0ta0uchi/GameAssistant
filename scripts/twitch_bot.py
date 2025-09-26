@@ -137,13 +137,17 @@ class TwitchBot(commands.Bot):
         if self.message_callback:
             await self.message_callback(message)
         await super().event_message(message) # type: ignore
-        if self.mention_callback and self.nick and f"@{self.nick.lower()}" in message.text.lower(): # type: ignore
-            prompt = re.sub(rf"@{self.nick.lower()}\b", "", message.text, flags=re.I).strip() # type: ignore
+        if self.mention_callback and self.nick and (f"@{self.nick.lower()}" in message.text.lower() or "ねえぐり" in message.text):
+            prompt = message.text
+            if f"@{self.nick.lower()}" in prompt.lower():
+                prompt = re.sub(rf"@{self.nick.lower()}\b", "", prompt, flags=re.I).strip()
+            if "ねえぐり" in prompt:
+                prompt = prompt.replace("ねえぐり", "").strip()
+            
             author_name = message.chatter.name if message.chatter.name else ""
             channel = message.broadcaster
             try:
-                # チャンネル名を渡すように変更
-                self.mention_callback(author_name, prompt, channel) 
+                self.mention_callback(author_name, prompt, channel)
             except Exception as exc:
                 LOGGER.error(f"mention_callback failed: {exc}")
 
