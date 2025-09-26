@@ -143,7 +143,7 @@ class TwitchBot(commands.Bot):
             channel = message.broadcaster
             try:
                 # チャンネル名を渡すように変更
-                await self.mention_callback(author_name, prompt, channel) 
+                self.mention_callback(author_name, prompt, channel) 
             except Exception as exc:
                 LOGGER.error(f"mention_callback failed: {exc}")
 
@@ -154,24 +154,29 @@ class TwitchBot(commands.Bot):
             
     async def send_chat_message(self, channel: twitchio.PartialUser, message: str) -> None:
         """指定されたチャンネルにチャットメッセージを送信します。"""# type: ignore
-        print(channel)
+        print(f"[DEBUG] send_chat_message called for channel {getattr(channel, 'name', 'N/A')}")
         if channel:
             try:
+                print(f"[DEBUG] Attempting to send message: {message}")
                 await channel.send_message(message, self.bot_id)
                 LOGGER.info(f"Sent message to {channel.name}: {message}")
+                print("[DEBUG] channel.send_message successful.")
             except Exception as e:
                 LOGGER.error(f"Failed to send message to {channel.name}: {e}")
+                print(f"[DEBUG] Error in channel.send_message: {e}")
         else:
-            LOGGER.warning(f"Could not find channel {channel_name} to send message.")
+            LOGGER.warning(f"Could not find channel to send message.")
+            print("[DEBUG] Channel object is None.")
 
 
 class TwitchService:
-    def __init__(self, app_logic, message_callback=None):
+    def __init__(self, app_logic, message_callback=None, mention_callback=None):
         self.app = app_logic
         self.twitch_bot = None
         self.twitch_thread = None
         self.twitch_bot_loop = None
         self.message_callback = message_callback
+        self.mention_callback = mention_callback
 
     def copy_auth_url(self):
         client_id = self.app.twitch_client_id.get()
@@ -242,9 +247,14 @@ class TwitchService:
         threading.Thread(target=self.run_connect_twitch_bot, daemon=True).start()
 
     def run_connect_twitch_bot(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.async_connect_twitch_bot())
+        self.twitch_bot_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.twitch_bot_loop)
+        self.twitch_bot_loop.run_until_complete(self.async_connect_twitch_bot())
+
+        if self.twitch_bot:
+            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
+            self.twitch_thread.start()
+            self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
 
     async def async_connect_twitch_bot(self):
         client_id = self.app.twitch_client_id.get()
@@ -277,20 +287,22 @@ class TwitchService:
                 nick=self.app.twitch_bot_username.get(),
                 token_collection=token_collection,
                 message_callback=self.message_callback,
+                mention_callback=self.mention_callback,
             )
 
-            self.twitch_bot_loop = asyncio.new_event_loop()
-            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
-            self.twitch_thread.start()
-            self.app.twitch_connect_button.config(text="切断", style="danger.TButton")
         except Exception as e:
             print(f"Twitchへの接続に失敗しました: {e}")
             self.twitch_bot = None
 
     def disconnect_twitch_bot(self):
-        print("Twitchボットの切断を試みます（アプリケーション終了時にスレッドは閉じられます）...")
+        print("Twitchボットの切断を試みます...")
+        if self.twitch_bot and self.twitch_bot_loop:
+            asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
+        if self.twitch_thread and self.twitch_thread.is_alive():
+            self.twitch_thread.join(timeout=5)
         self.twitch_thread = None
-        self.app.twitch_connect_button.config(text="接続", style="primary.TButton")
+        self.twitch_bot = None
+        self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "接続", "style": "primary.TButton"})
         print("Twitchボットを切断しました。")
 
     def run_bot_in_thread(self, loop):
