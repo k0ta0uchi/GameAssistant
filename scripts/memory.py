@@ -1,3 +1,4 @@
+import json
 from .clients import get_chroma_client, get_gemini_client
 from google.genai import types
 
@@ -14,19 +15,21 @@ class MemoryManager:
     def get_all_memories(self):
         """すべてのメモリーを取得する"""
         try:
-            # metadatasも取得するように変更
-            results = self.collection.get()
-            if not results or not results.get('ids') or not results.get('documents'):
+            results = self.collection.get(include=['metadatas', 'documents'])
+            if not results or not results.get('ids'):
                 return {}
              
             memories = {}
             for i in range(len(results['ids'])):
                 id = results['ids'][i]
-                doc = results['documents'][i]
-                meta = results['metadatas'][i] if results.get('metadatas') and i < len(results['metadatas']) else None
+                doc = results['documents'][i] if results['documents'] and i < len(results['documents']) else ""
+                meta = results['metadatas'][i] if results['metadatas'] and i < len(results['metadatas']) else {}
                 
-                if doc is not None:
-                    memories[id] = {'document': doc, 'metadata': meta}
+                value_obj = {
+                    'document': doc,
+                    'metadata': meta
+                }
+                memories[id] = json.dumps(value_obj, ensure_ascii=False, indent=2)
             return memories
         except Exception as e:
             print(f"メモリーの取得中にエラーが発生しました: {e}")
@@ -36,30 +39,49 @@ class MemoryManager:
         """メモリーを追加または更新する"""
         try:
             embedding_model = "models/embedding-001"
-            embedding_response = self.gemini_client.models.embed_content(
-                model=embedding_model,
-                contents=[value],
-                config=types.EmbedContentConfig(task_type="retrieval_document")
-            )
-            if embedding_response and embedding_response.embeddings:
-                embedding = embedding_response.embeddings[0].values
-            else:
-                print(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
-                return
-
+            
+            document = ""
             metadata = {}
+
+            try:
+                data = json.loads(value)
+                document = data.get('document', '')
+                metadata = data.get('metadata', {})
+            except (json.JSONDecodeError, TypeError):
+                document = value
+
             if type:
                 metadata['type'] = type
             if user:
                 metadata['user'] = user
+
+            embedding_response = self.gemini_client.models.embed_content(
+                model=embedding_model,
+                contents=[document],
+                config=types.EmbedContentConfig(task_type="retrieval_document")
+            )
+            if not (embedding_response and embedding_response.embeddings):
+                print(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
+                return
+            embedding = embedding_response.embeddings[0].values
+
+            existing_data = self.collection.get(ids=[key], include=['metadatas'])
+            if existing_data and existing_data['metadatas'] and existing_data['metadatas'][0]:
+                existing_metadata = existing_data['metadatas'][0]
+                if 'created_at' in existing_metadata:
+                    metadata['created_at'] = existing_metadata['created_at']
+
+            if 'created_at' not in metadata:
+                import datetime
+                metadata['created_at'] = datetime.datetime.now().isoformat()
             
             self.collection.upsert(
                 ids=[key],
                 embeddings=[embedding],
-                documents=[value],
-                metadatas=[metadata] if metadata else None
+                documents=[document],
+                metadatas=[metadata]
             )
-            print(f"メモリーを保存しました: {key} (type: {type}, user: {user})")
+            print(f"メモリーを保存しました: {key}")
         except Exception as e:
             print(f"メモリーの保存中にエラーが発生しました: {e}")
 
