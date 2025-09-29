@@ -171,7 +171,7 @@ class SessionManager:
             try:
                 task = self.transcription_queue.get(timeout=1)
                 text = recognize_speech(task.audio_file_path)
-                if text and self.session_memory:
+                if text and text.strip() != "ごめん" and self.session_memory:
                     event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=task.is_prompt)
                     self.session_memory.events.append(event)
                     print(f"音声を保存しました: {event}")
