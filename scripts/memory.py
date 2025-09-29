@@ -1,6 +1,15 @@
 import json
+import logging
+import asyncio
 from .clients import get_chroma_client, get_gemini_client
 from google.genai import types
+
+import google.generativeai as genai_async
+import os
+
+# Configure the async client
+if os.environ.get("GOOGLE_API_KEY"):
+    genai_async.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
 
 class MemoryAccessError(Exception):
     """メモリーへのアクセス中にエラーが発生した場合に発生する例外"""
@@ -32,7 +41,7 @@ class MemoryManager:
                 memories[id] = json.dumps(value_obj, ensure_ascii=False, indent=2)
             return memories
         except Exception as e:
-            print(f"メモリーの取得中にエラーが発生しました: {e}")
+            logging.error(f"メモリーの取得中にエラーが発生しました: {e}", exc_info=True)
             return {}
 
     def add_or_update_memory(self, key, value, type=None, user=None):
@@ -61,7 +70,7 @@ class MemoryManager:
                 config=types.EmbedContentConfig(task_type="retrieval_document")
             )
             if not (embedding_response and embedding_response.embeddings):
-                print(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
+                logging.warning(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
                 return
             embedding = embedding_response.embeddings[0].values
 
@@ -81,27 +90,25 @@ class MemoryManager:
                 documents=[document],
                 metadatas=[metadata]
             )
-            print(f"メモリーを保存しました: {key}")
+            logging.info(f"メモリーを保存しました: {key}")
         except Exception as e:
-            print(f"メモリーの保存中にエラーが発生しました: {e}")
+            logging.error(f"メモリーの保存中にエラーが発生しました: {e}", exc_info=True)
 
     def delete_memory(self, key):
         """指定されたキーのメモリーを削除する"""
         try:
             self.collection.delete(ids=[key])
-            print(f"メモリーを削除しました: {key}")
+            logging.info(f"メモリーを削除しました: {key}")
             return True
         except Exception as e:
-            print(f"メモリーの削除中にエラーが発生しました: {e}")
+            logging.error(f"メモリーの削除中にエラーが発生しました: {e}", exc_info=True)
             return False
 
-    def save_event_to_chroma(self, event_data: dict) -> None:
+    async def save_event_to_chroma(self, event_data: dict) -> None:
         """セッションイベントをChromaDBに直接保存する"""
-        print(f"[DEBUG] save_event_to_chroma called with event_data: {event_data}")
+        logging.debug(f"ChromaDBへのイベント保存を開始: {event_data}")
         try:
             import uuid
-            import logging
-            from google.genai import types
 
             event_id = str(uuid.uuid4())
             content = event_data.get('content', '')
@@ -111,24 +118,26 @@ class MemoryManager:
                 'timestamp': event_data.get('timestamp')
             }
 
-            # Use the same embedding model as the summary saver
             embedding_model = "models/embedding-001"
-            embedding_response = self.gemini_client.models.embed_content(
+            
+            embedding_response = await genai_async.embed_content_async(
                 model=embedding_model,
-                contents=[content],
-                config=types.EmbedContentConfig(task_type="retrieval_document")
+                content=content,
+                task_type="retrieval_document"
             )
-            if not (embedding_response and embedding_response.embeddings):
-                logging.error(f"Failed to generate embedding for event: {event_id}")
-                return
-            embedding = embedding_response.embeddings[0].values
 
-            self.collection.upsert(
+            if not (embedding_response and embedding_response.get('embedding')):
+                logging.error(f"イベントのEmbedding生成に失敗しました: {event_id}")
+                return
+            embedding = embedding_response['embedding']
+
+            await asyncio.to_thread(
+                self.collection.upsert,
                 ids=[event_id],
                 embeddings=[embedding],
                 documents=[content],
                 metadatas=[metadata]
             )
-            print("[DEBUG] Successfully upserted event to ChromaDB.")
+            logging.debug(f"ChromaDBへのイベント保存に成功しました: {event_id}")
         except Exception as e:
-            logging.error("Failed to save event to ChromaDB: %s", e)
+            logging.error(f"ChromaDBへのイベント保存に失敗しました: {e}", exc_info=True)

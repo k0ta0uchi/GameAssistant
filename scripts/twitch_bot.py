@@ -1,6 +1,7 @@
 import logging
 import re
 from typing import Optional, List, Callable, Awaitable, Any, cast
+import inspect
 
 import twitchio
 from twitchio.ext import commands
@@ -98,8 +99,7 @@ class TwitchBot(commands.Bot):
 
     async def event_ready(self) -> None:
         """ボットが正常にログインしたときに呼び出されます。"""
-        LOGGER.info(f"Successfully logged in as: {self.bot_id}")
-        print(f"** {self.nick} (id: {self.bot_id}) として正常にログインしました！ **")
+        LOGGER.info(f"Twitchに正常にログインしました: {self.nick} (ID: {self.bot_id})")
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:
         """OAuth認証が成功したときに呼び出されます。"""
@@ -133,7 +133,7 @@ class TwitchBot(commands.Bot):
                 LOGGER.warning(f"ユーザー {user_id} のサブスクリプションに失敗しました: {e}")
 
     async def event_message(self, message: twitchio.ChatMessage) -> None:
-        print("--- TwitchBot.event_message CALLED ---")
+        logging.debug(f"Twitchメッセージ受信: {message.chatter.name if message.chatter else 'Unknown'}: {message.text}")
         if self.message_callback:
             await self.message_callback(message)
         await super().event_message(message) # type: ignore
@@ -147,9 +147,11 @@ class TwitchBot(commands.Bot):
             author_name = message.chatter.name if message.chatter.name else ""
             channel = message.broadcaster
             try:
-                self.mention_callback(author_name, prompt, channel)
+                result = self.mention_callback(author_name, prompt, channel)
+                if inspect.isawaitable(result):
+                    await result
             except Exception as exc:
-                LOGGER.error(f"mention_callback failed: {exc}")
+                LOGGER.error(f"メンションコールバックの実行に失敗しました: {exc}", exc_info=True)
 
     @commands.command()
     async def hello(self, ctx: commands.Context) -> None:
@@ -158,19 +160,15 @@ class TwitchBot(commands.Bot):
             
     async def send_chat_message(self, channel: twitchio.PartialUser, message: str) -> None:
         """指定されたチャンネルにチャットメッセージを送信します。"""# type: ignore
-        print(f"[DEBUG] send_chat_message called for channel {getattr(channel, 'name', 'N/A')}")
+        logging.debug(f"Twitchへチャット送信: channel={getattr(channel, 'name', 'N/A')}, message={message}")
         if channel:
             try:
-                print(f"[DEBUG] Attempting to send message: {message}")
                 await channel.send_message(message, self.bot_id)
-                LOGGER.info(f"Sent message to {channel.name}: {message}")
-                print("[DEBUG] channel.send_message successful.")
+                LOGGER.info(f"メッセージを送信しました -> {channel.name}: {message}")
             except Exception as e:
-                LOGGER.error(f"Failed to send message to {channel.name}: {e}")
-                print(f"[DEBUG] Error in channel.send_message: {e}")
+                LOGGER.error(f"メッセージの送信に失敗しました -> {channel.name}: {e}", exc_info=True)
         else:
-            LOGGER.warning(f"Could not find channel to send message.")
-            print("[DEBUG] Channel object is None.")
+            LOGGER.warning("メッセージの送信先チャンネルが見つかりませんでした。")
 
 
 class TwitchService:
@@ -185,7 +183,7 @@ class TwitchService:
     def copy_auth_url(self):
         client_id = self.app.twitch_client_id.get()
         if not client_id:
-            print("エラー: Client IDが設定されていません。")
+            logging.error("Twitch Client IDが設定されていません。")
             return
         
         auth_url = twitch_auth.generate_auth_url(client_id)
@@ -193,13 +191,13 @@ class TwitchService:
         try:
             import pyperclip
             pyperclip.copy(auth_url)
-            print("成功: 認証URLをクリップボードにコピーしました。")
+            logging.info("Twitch認証URLをクリップボードにコピーしました。")
         except ImportError:
-            print("エラー: pyperclipモジュールが見つかりません。`pip install pyperclip`でインストールしてください。")
-            print(f"認証URL: {auth_url}")
+            logging.warning("pyperclipモジュールが見つかりません。`pip install pyperclip`でインストールしてください。")
+            logging.info(f"認証URL: {auth_url}")
         except Exception as e:
-            print(f"クリップボードへのコピーに失敗しました: {e}")
-            print(f"認証URL: {auth_url}")
+            logging.error(f"クリップボードへのコピーに失敗しました: {e}", exc_info=True)
+            logging.info(f"認証URL: {auth_url}")
 
     def register_auth_code(self):
         threading.Thread(target=self.run_register_auth_code, daemon=True).start()
@@ -212,34 +210,34 @@ class TwitchService:
     async def async_register_auth_code(self):
         code = self.app.twitch_auth_code.get()
         if not code:
-            print("エラー: 認証コードが入力されていません。")
+            logging.error("Twitch認証コードが入力されていません。")
             return
 
         client_id = self.app.twitch_client_id.get()
         client_secret = self.app.twitch_client_secret.get()
 
         if not all([client_id, client_secret]):
-            print("エラー: Client IDまたはClient Secretが設定されていません。")
+            logging.error("Twitch Client IDまたはClient Secretが設定されていません。")
             return
         
-        print(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
+        logging.info(f"認証コード '{code[:10]}...' を使ってトークンを交換しています...")
         try:
             result = await twitch_auth.exchange_code_for_token(client_id, client_secret, code)
             if result and result.get("user_id"):
                 user_id = result["user_id"]
-                print(f"成功: ユーザーID {user_id} のトークンを登録しました。")
+                logging.info(f"成功: ユーザーID {user_id} のトークンを登録しました。")
                 
                 # 登録されたIDをBot IDとして設定・保存する
                 self.app.twitch_bot_id.set(user_id)
                 self.app.settings_manager.set('twitch_bot_id', user_id)
                 self.app.settings_manager.save(self.app.settings_manager.settings)
-                print(f"Bot IDを {user_id} に設定し、保存しました。")
+                logging.info(f"Bot IDを {user_id} に設定し、保存しました。")
 
                 self.app.twitch_auth_code.set("")
             else:
-                print("エラー: トークンの登録に失敗しました。")
+                logging.error("トークンの登録に失敗しました。")
         except Exception as e:
-            print(f"トークン登録中にエラーが発生しました: {e}")
+            logging.error(f"トークン登録中にエラーが発生しました: {e}", exc_info=True)
 
     def toggle_twitch_connection(self):
         if self.twitch_bot and self.twitch_thread and self.twitch_thread.is_alive():
@@ -266,7 +264,7 @@ class TwitchService:
         
         bot_id = self.app.twitch_bot_id.get()
         if not bot_id:
-            print("エラー: ボットのIDが設定ファイルに見つかりません。認証コードでボットのトークンを登録してください。")
+            logging.error("ボットのIDが設定ファイルに見つかりません。認証コードでボットのトークンを登録してください。")
             return
 
         if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
@@ -274,11 +272,11 @@ class TwitchService:
 
         bot_token_info = await twitch_auth.get_token_from_db(bot_id)
         if not bot_token_info or 'token' not in bot_token_info:
-            print("エラー: DBからボットのトークンを取得できませんでした。")
+            logging.error("DBからボットのトークンを取得できませんでした。")
             return
         bot_token = bot_token_info['token']
 
-        print("Twitchボットに接続しています...")
+        logging.info("Twitchボットに接続しています...")
         try:
             token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
             
@@ -295,11 +293,11 @@ class TwitchService:
             )
 
         except Exception as e:
-            print(f"Twitchへの接続に失敗しました: {e}")
+            logging.error(f"Twitchへの接続に失敗しました: {e}", exc_info=True)
             self.twitch_bot = None
 
     def disconnect_twitch_bot(self):
-        print("Twitchボットの切断を試みます...")
+        logging.info("Twitchボットの切断を試みます...")
         if self.twitch_bot and self.twitch_bot_loop:
             asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
         if self.twitch_thread and self.twitch_thread.is_alive():
@@ -307,7 +305,7 @@ class TwitchService:
         self.twitch_thread = None
         self.twitch_bot = None
         self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "接続", "style": "primary.TButton"})
-        print("Twitchボットを切断しました。")
+        logging.info("Twitchボットを切断しました。")
 
     def run_bot_in_thread(self, loop):
         asyncio.set_event_loop(loop)

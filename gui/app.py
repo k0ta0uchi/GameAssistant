@@ -23,6 +23,8 @@ from datetime import datetime
 from scripts.memory import MemoryManager
 from twitchio.utils import setup_logging
 import logging
+from logging.handlers import QueueHandler
+import queue
 import scripts.capture as capture
 from scripts.settings import SettingsManager
 from scripts.record import AudioService
@@ -108,18 +110,26 @@ class GameAssistantApp:
         self.session_manager = SessionManager(self, self.twitch_service)
         self.twitch_last_mention_time = {}
         self.twitch_mention_cooldown = 30
+        self.log_history = []
 
         self.create_widgets()
-
-        self.redirector = OutputRedirector(self.output_textbox)
-        sys.stdout = self.redirector
+        self._setup_logging()
 
         self.audio_file_path = "temp_recording.wav"
         self.screenshot_file_path = "temp_screenshot.png"
         self.image = None
 
         keyboard.add_hotkey("ctrl+shift+f2", self.audio_service.toggle_recording)
-        print("ホットキー (Ctrl+Shift+F2) が登録されました。")
+        logging.info("ホットキー (Ctrl+Shift+F2) が登録されました。")
+
+        self._process_log_queue()
+
+        # Initial setup after all widgets are created
+        if self.audio_devices:
+            self.update_device_index()
+        if self.windows:
+            self.update_window()
+        self.update_record_buttons_state()
 
     def get_device_index_from_name(self, device_name):
         return record.get_device_index_from_name(device_name)
@@ -136,6 +146,7 @@ class GameAssistantApp:
         right_frame = ttk.Frame(main_frame)
         right_frame.pack(side=RIGHT, fill=BOTH, expand=True)
 
+        # --- Left Frame Widgets ---
         device_frame = ttk.Frame(left_frame)
         device_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(device_frame, text="インプットデバイス", style="inverse-primary").pack(fill=X, pady=(0, 8))
@@ -168,21 +179,8 @@ class GameAssistantApp:
         memory_button = ttk.Button(left_frame, text="メモリー管理", command=self.open_memory_window, style="info.TButton")
         memory_button.pack(fill=X, pady=(15, 0))
 
-        self.response_frame = ttk.Frame(right_frame, padding=(0, 0, 0, 10))
-        self.response_frame.pack(fill=X)
-        self.response_label = ttk.Label(self.response_frame, text="", wraplength=400, justify=LEFT, font=("Arial", 14), style="inverse-info")
-        self.response_label.pack(fill=X, ipady=10)
-
-        self.meter_container = ttk.Frame(right_frame)
-        self.meter_container.pack(fill=X, pady=(0, 10))
-
-        self.level_meter = ttk.Progressbar(
-            self.meter_container, length=300, maximum=100, value=0, style="danger.Horizontal.TProgressbar"
-        )
-        self.level_meter.pack(pady=10)
-
         config_frame = ttk.Frame(left_frame)
-        config_frame.pack(fill=X, pady=(0, 15))
+        config_frame.pack(fill=X, pady=(15, 15))
         ttk.Label(config_frame, text="設定", style="inverse-primary").pack(fill=X, pady=(0, 8))
 
         self.use_image_check = ttk.Checkbutton(
@@ -249,7 +247,7 @@ class GameAssistantApp:
         ttk.Label(bot_id_frame, text="Bot ID:", width=12).pack(side=LEFT)
         bot_id_entry = ttk.Entry(bot_id_frame, textvariable=self.twitch_bot_id)
         bot_id_entry.pack(side=LEFT, fill=X, expand=True)
-        bot_id_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('twitch_bot_id', self.twitch_bot_id.get()), self.settings_manager.save(self.settings_manager.settings)))
+        bot_id_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('bot_id', self.twitch_bot_id.get()), self.settings_manager.save(self.settings_manager.settings)))
 
         client_id_frame = ttk.Frame(twitch_frame)
         client_id_frame.pack(fill=X, pady=2)
@@ -271,7 +269,6 @@ class GameAssistantApp:
         auth_code_entry = ttk.Entry(auth_code_frame, textvariable=self.twitch_auth_code)
         auth_code_entry.pack(side=LEFT, fill=X, expand=True)
         
-
         auth_button_frame = ttk.Frame(twitch_frame)
         auth_button_frame.pack(fill=X, pady=5)
         self.register_token_button = ttk.Button(auth_button_frame, text="トークン登録", command=self.twitch_service.register_auth_code, style="success.TButton")
@@ -282,23 +279,53 @@ class GameAssistantApp:
         self.twitch_connect_button = ttk.Button(twitch_frame, text="接続", command=self.twitch_service.toggle_twitch_connection, style="primary.TButton")
         self.twitch_connect_button.pack(fill=X, pady=5)
 
+        # --- Right Frame Widgets ---
+        self.response_frame = ttk.Frame(right_frame, padding=(0, 0, 0, 10))
+        self.response_frame.pack(fill=X)
+        self.response_label = ttk.Label(self.response_frame, text="", wraplength=400, justify=LEFT, font=("Arial", 14), style="inverse-info")
+        self.response_label.pack(fill=X, ipady=10)
+
+        self.meter_container = ttk.Frame(right_frame)
+        self.meter_container.pack(fill=X, pady=(0, 10))
+        self.level_meter = ttk.Progressbar(
+            self.meter_container, length=300, maximum=100, value=0, style="danger.Horizontal.TProgressbar"
+        )
+        self.level_meter.pack(pady=10)
+
         self.image_frame = ttk.Frame(right_frame, height=300)
         self.image_frame.pack(fill=X, pady=10)
         self.image_frame.pack_propagate(False)
-
         self.image_label = ttk.Label(self.image_frame)
         self.image_label.pack(pady=10)
 
-        self.text_container = ttk.Frame(right_frame)
-        self.text_container.pack(fill=BOTH, expand=True)
+        # New Log Frame
+        log_container = ttk.Labelframe(right_frame, text="ログ", style="info.TLabelframe")
+        log_container.pack(fill=BOTH, expand=True, pady=(10, 0))
+        
+        filter_frame = ttk.Frame(log_container)
+        filter_frame.pack(fill=X, padx=5, pady=5)
+        
+        self.log_filters = {}
+        log_levels = {"DEBUG": "secondary", "INFO": "info", "WARNING": "warning", "ERROR": "danger", "CRITICAL": "danger"}
+        for level, style in log_levels.items():
+            var = ttk.BooleanVar(value=True)
+            cb = ttk.Checkbutton(filter_frame, text=level, variable=var, style=f"{style}.TCheckbutton", command=self._refilter_logs)
+            cb.pack(side=LEFT, padx=5)
+            self.log_filters[level] = var
 
-        self.output_textbox = ttk.Text(master=self.text_container, height=5, width=50, wrap=WORD)
-        self.output_textbox.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 5), pady=(0, 10))
+        log_text_frame = ttk.Frame(log_container)
+        log_text_frame.pack(fill=BOTH, expand=True, padx=5, pady=(0, 5))
 
-        self.scrollbar = ttk.Scrollbar(self.text_container, orient=VERTICAL, command=self.output_textbox.yview)
-        self.scrollbar.pack(side=RIGHT, fill=Y, pady=(0, 10))
+        self.log_textbox = ttk.ScrolledText(master=log_text_frame, height=5, width=50, wrap=WORD)
+        self.log_textbox.pack(fill=BOTH, expand=True)
+        self.log_textbox.config(state="disabled")
 
-        self.output_textbox['yscrollcommand'] = self.scrollbar.set
+        # Log level colors
+        self.log_textbox.tag_config("DEBUG", foreground="gray")
+        self.log_textbox.tag_config("INFO", foreground="#007bff") # Blue
+        self.log_textbox.tag_config("WARNING", foreground="#ffc107") # Yellow
+        self.log_textbox.tag_config("ERROR", foreground="#dc3545") # Red
+        self.log_textbox.tag_config("CRITICAL", foreground="#dc3545", font=("TkDefaultFont", 10, "bold"))
 
         self.record_container = ttk.Frame(right_frame)
         self.record_container.pack(fill=X, padx=10, pady=10)
@@ -312,19 +339,10 @@ class GameAssistantApp:
 
         self.record_button = ttk.Button(self.record_container, text="録音開始", style="success.TButton", command=self.audio_service.toggle_recording)
         self.record_button.pack(side=LEFT, padx=5)
-        self.record_button.config(state="disabled")
 
         self.record_wait_button = ttk.Button(self.record_container, text="録音待機", style="success.TButton", command=self.audio_service.toggle_record_waiting)
         self.record_wait_button.pack(side=LEFT, padx=5)
-        self.record_wait_button.config(state="disabled")
 
-        if self.audio_devices:
-            self.update_device_index()
-
-        if self.windows:
-            self.update_window()
-        
-        self.update_record_buttons_state()
 
     def start_session(self):
         self.session_manager.start_session()
@@ -347,17 +365,17 @@ class GameAssistantApp:
         selected_window_title = self.selected_window_title.get()
         self.selected_window = capture.get_window_by_title(selected_window_title)
         if self.selected_window:
-            print(f"選択されたウィンドウ: {self.selected_window.title}")
+            logging.info(f"選択されたウィンドウ: {self.selected_window.title}")
             self.selected_window_label.config(text=f"選択されたウィンドウ: {self.selected_window.title}")
         else:
-            print("ウィンドウが見つかりませんでした")
+            logging.warning("ウィンドウが見つかりませんでした")
             self.selected_window_label.config(text="選択されたウィンドウ: (見つかりません)")
         self.settings_manager.set("window", selected_window_title)
         self.settings_manager.save(self.settings_manager.settings)
         self.update_record_buttons_state()
 
     def refresh_window_list(self):
-        print("ウィンドウリストを更新します...")
+        logging.info("ウィンドウリストを更新します...")
         self.windows = capture.list_available_windows()
         self.window_dropdown['values'] = self.windows
         current_selection = self.selected_window_title.get()
@@ -369,13 +387,13 @@ class GameAssistantApp:
             self.selected_window_title.set("")
         
         self.update_window()
-        print("ウィンドウリストを更新しました。")
+        logging.info("ウィンドウリストを更新しました。")
 
     def update_record_buttons_state(self, event=None):
         if self.use_image.get() and self.selected_window is None:
             self.record_button.config(state="disabled")
             self.record_wait_button.config(state="disabled")
-            print("画像利用がオンですが、ウィンドウが選択されていないため録音ボタンを無効化しました。")
+            logging.info("画像利用がオンですが、ウィンドウが選択されていないため録音ボタンを無効化しました。")
         else:
             self.record_button.config(state="normal")
             self.record_wait_button.config(state="normal")
@@ -388,16 +406,16 @@ class GameAssistantApp:
         self.level_meter['value'] = level
 
     def transcribe_audio(self):
-        print("音声認識を開始します...")
+        logging.info("音声認識を開始します...")
         try:
             text = whisper.recognize_speech(self.audio_file_path)
             if text:
-                print(f"*** 認識されたテキスト: '{text}' ***")
+                logging.info(f"*** 認識されたテキスト: '{text}' ***")
             else:
-                print("*** 音声は検出されましたが、テキストとして認識されませんでした。***")
+                logging.warning("*** 音声は検出されましたが、テキストとして認識されませんでした。***")
             return text
         except Exception as e:
-            print(f"音声認識エラー: {e}")
+            logging.error(f"音声認識エラー: {e}", exc_info=True)
             return None
 
     async def process_and_respond_async(self, from_temporary_stop=False):
@@ -406,7 +424,7 @@ class GameAssistantApp:
 
         # promptがNoneまたは空文字列の場合、処理を中断
         if not prompt:
-            print("プロンプトが空のため、処理を中断します。")
+            logging.info("プロンプトが空のため、処理を中断します。")
             def enable_buttons():
                 self.record_button.config(text="録音開始", style="success.TButton", state="normal")
                 self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
@@ -440,8 +458,10 @@ class GameAssistantApp:
                     self.show_gemini_response(response)
             else:
                 if response:
-                    self.output_textbox.insert(END, "Geminiの回答: " + response + "\n")
-                    self.output_textbox.see(END)
+                    self.log_textbox.config(state="normal")
+                    self.log_textbox.insert(END, "Geminiの回答: " + response + "\n")
+                    self.log_textbox.see(END)
+                    self.log_textbox.config(state="disabled")
             voice.text_to_speech(response)
             if os.path.exists(self.audio_file_path):
                 os.remove(self.audio_file_path)
@@ -480,15 +500,21 @@ class GameAssistantApp:
     def schedule_twitch_mention(self, author_name, prompt, channel):
         """Twitchのメンション処理をスレッドセーフにスケジュールする"""
         if self.twitch_service.twitch_bot_loop:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self.handle_twitch_mention(author_name, prompt, channel),
                 self.twitch_service.twitch_bot_loop
             )
+            def callback(future):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"handle_twitch_mentionで予期せぬエラーが発生しました: {e}", exc_info=True)
+            future.add_done_callback(callback)
 
     async def handle_twitch_mention(self, author_name, prompt, channel):
         """Twitchのメンションを処理する"""
         try:
-            print(f"[DEBUG] handle_twitch_mention called by {author_name}: {prompt}")
+            logging.debug(f"handle_twitch_mention called by {author_name}: {prompt}")
 
             event_data = {
                 'type': 'twitch_mention',
@@ -496,31 +522,29 @@ class GameAssistantApp:
                 'content': prompt,
                 'timestamp': datetime.now().isoformat()
             }
-            self.memory_manager.save_event_to_chroma(event_data)
+            await self.memory_manager.save_event_to_chroma(event_data)
 
             session_history = None
             if self.session_manager.is_session_active():
-                print("[DEBUG] Session is active.")
+                logging.debug("Session is active.")
                 session_history = self.session_manager.get_session_history()
             else:
-                print("[DEBUG] Session is not active.")
+                logging.debug("Session is not active.")
 
-            response = self.gemini_service.ask(prompt, None, self.is_private.get(), session_history=session_history)
-            print(f"[DEBUG] Gemini response: {response}")
+            response = await asyncio.to_thread(self.gemini_service.ask, prompt, None, self.is_private.get(), session_history=session_history)
+            logging.debug(f"Gemini response: {response}")
 
             if response:
                 if self.twitch_service.twitch_bot:
-                    print(f"[DEBUG] Sending message to Twitch channel {channel.name}")
+                    logging.debug(f"Sending message to Twitch channel {channel.name}")
                     await self.twitch_service.twitch_bot.send_chat_message(channel, response)
-                    print("[DEBUG] Message sent to Twitch.")
+                    logging.debug("Message sent to Twitch.")
                 else:
-                    print("[DEBUG] twitch_bot is not available.")
+                    logging.warning("twitch_bot is not available.")
             else:
-                print("[DEBUG] Gemini response is empty.")
+                logging.info("Gemini response is empty.")
         except Exception as e:
-            print(f"handle_twitch_mentionでエラーが発生しました: {e}")
-            import traceback
-            traceback.print_exc()
+            logging.error(f"handle_twitch_mentionでエラーが発生しました: {e}", exc_info=True)
 
     def process_prompt(self, prompt, session_history, screenshot_path=None):
         thread = threading.Thread(target=self.process_prompt_thread, args=(prompt, session_history, screenshot_path))
@@ -528,7 +552,7 @@ class GameAssistantApp:
 
     def process_prompt_thread(self, prompt, session_history, screenshot_path=None):
         if not prompt:
-            print("プロンプトが空のため、処理を中断します。")
+            logging.info("プロンプトが空のため、処理を中断します。")
             return
 
         if "検索" in prompt or "けんさく" in prompt:
@@ -547,7 +571,7 @@ class GameAssistantApp:
         if response and self.session_manager.session_memory:
             event = GeminiResponse(content=response)
             self.session_manager.session_memory.events.append(event)
-            print(f"Geminiレスポンスを保存しました: {event}")
+            logging.info(f"Geminiレスポンスを保存しました: {event}")
 
         def update_gui_and_speak(response_text):
             if self.show_response_in_new_window.get():
@@ -555,8 +579,10 @@ class GameAssistantApp:
                     self.show_gemini_response(response_text)
             else:
                 if response_text:
-                    self.output_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
-                    self.output_textbox.see(END)
+                    self.log_textbox.config(state="normal")
+                    self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
+                    self.log_textbox.see(END)
+                    self.log_textbox.config(state="disabled")
             voice.text_to_speech(response_text)
             if os.path.exists(self.audio_file_path):
                 os.remove(self.audio_file_path)
@@ -564,3 +590,63 @@ class GameAssistantApp:
                 os.remove(self.screenshot_file_path)
 
         self.root.after(0, update_gui_and_speak, response)
+
+    def _setup_logging(self):
+        self.log_queue = queue.Queue()
+        # Set up the queue handler
+        queue_handler = QueueHandler(self.log_queue)
+        
+        root_logger = logging.getLogger()
+        
+        # Remove all existing handlers to avoid duplicate logs
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+            
+        # Add a stream handler to log to console
+        stream_handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        stream_handler.setFormatter(formatter)
+
+        root_logger.addHandler(queue_handler)
+        root_logger.addHandler(stream_handler) # Add the stream handler
+        root_logger.setLevel(logging.DEBUG) # Capture all levels
+
+    def _process_log_queue(self):
+        try:
+            while True:
+                record = self.log_queue.get_nowait()
+                self._write_log(record)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._process_log_queue)
+
+    def _refilter_logs(self):
+        self.log_textbox.config(state="normal")
+        self.log_textbox.delete("1.0", END)
+        self.log_textbox.config(state="disabled")
+
+        for record in self.log_history:
+            self._write_log(record, from_history=True)
+
+    def _write_log(self, record, from_history=False):
+        if not from_history:
+            self.log_history.append(record)
+
+        # Apply filter
+        if not self.log_filters.get(record.levelname, ttk.BooleanVar(value=True)).get():
+            return
+
+        log_level_emojis = {
+            'DEBUG': '⚙️',
+            'INFO': '🔵',
+            'WARNING': '🟡',
+            'ERROR': '🔴',
+            'CRITICAL': '🔥'
+        }
+        self.log_textbox.config(state="normal")
+        
+        msg = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} {log_level_emojis.get(record.levelname, ' ')} [{record.levelname}] {record.getMessage()}\n"
+        
+        self.log_textbox.insert(END, msg, record.levelname)
+        self.log_textbox.see(END)
+        self.log_textbox.config(state="disabled")

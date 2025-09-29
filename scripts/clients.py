@@ -30,6 +30,7 @@ def _get_chroma_settings() -> Settings:
     return Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_dir)
 
 def get_chroma_client() -> Any:
+    os.environ['CHROMA_TELEMETRY_DISABLED'] = 'true'
     """
     新しい Chroma の永続クライアントを使う（PersistentClient）。
     - 既存の古いデータがある場合は chroma-migrate が必要（下記参照）。
@@ -42,7 +43,8 @@ def get_chroma_client() -> Any:
         # 1) まず PersistentClient を使ってローカル永続化を試す（一般的で簡単）
         try:
             # ここは chromadb.PersistentClient(path=...) の形式が安定してる例が多い
-            _chroma_client = chromadb.PersistentClient(path=persist_dir, settings=Settings(anonymized_telemetry=False))  # type: ignore[call-arg]
+            settings = Settings(is_persistent=True, anonymized_telemetry=False)
+            _chroma_client = chromadb.PersistentClient(path=persist_dir, settings=settings)
             logger.info("Using chromadb.PersistentClient (path=%s)", persist_dir)
             return _chroma_client
         except Exception as e:
@@ -50,7 +52,8 @@ def get_chroma_client() -> Any:
 
         # 2) fallback: 簡易 client（in-memory / ephemeral）
         try:
-            _chroma_client = chromadb.Client(settings=Settings(anonymized_telemetry=False))  # type: ignore[call-arg]
+            settings = Settings(is_persistent=False, anonymized_telemetry=False)
+            _chroma_client = chromadb.Client(settings=settings)
             logger.info("Using ephemeral chromadb.Client() as fallback")
             return _chroma_client
         except Exception as e:

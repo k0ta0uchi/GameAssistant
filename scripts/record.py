@@ -4,6 +4,7 @@ import wave
 import os
 import pvporcupine
 import struct
+import logging
 from dotenv import load_dotenv
 from scripts.voice import play_wav_data
 
@@ -50,15 +51,15 @@ def record_audio(device_index, update_callback, audio_file_path=TEMP_WAV_FILE, s
         channels = int(device_info.get('maxInputChannels', 1))
         rate = int(device_info.get('defaultSampleRate', 44100))
         
-        print("--- 録音デバイス情報 (通常録音) ---")
-        print(f"マイク: {device_info['name']} (ID: {device_index}, Channels: {channels}, Rate: {rate})")
+        logging.debug("--- 録音デバイス情報 (通常録音) ---")
+        logging.debug(f"マイク: {device_info['name']} (ID: {device_index}, Channels: {channels}, Rate: {rate})")
         
         stream = p.open(format=FORMAT, channels=channels, rate=rate, input=True,
                         frames_per_buffer=CHUNK, input_device_index=device_index)
         
-        print("録音開始！話してください…")
+        logging.info("録音開始！話してください…")
     except Exception as e:
-        print(f"!!! PyAudioストリーム開始エラー: {e}")
+        logging.error(f"PyAudioストリーム開始エラー: {e}", exc_info=True)
         return None
 
     frames = []
@@ -77,21 +78,21 @@ def record_audio(device_index, update_callback, audio_file_path=TEMP_WAV_FILE, s
                 silent_time = 0
 
             if silent_time > SILENCE_DURATION:
-                print("\n無音が続いたため録音を終了します。")
+                logging.info("無音が続いたため録音を終了します。")
                 break
         except IOError:
             pass # Overflowエラーは無視
         except Exception as e:
-            print(f"録音中に予期せぬエラーが発生しました: {e}")
+            logging.error(f"録音中に予期せぬエラーが発生しました: {e}", exc_info=True)
             break
 
-    print("録音ストリームを停止します。")
+    logging.info("録音ストリームを停止します。")
     if stream:
         stream.stop_stream()
         stream.close()
 
     if not frames:
-        print("録音データがありません。")
+        logging.warning("録音データがありません。")
         return None
 
     with wave.open(audio_file_path, 'wb') as wf:
@@ -100,7 +101,7 @@ def record_audio(device_index, update_callback, audio_file_path=TEMP_WAV_FILE, s
         wf.setframerate(rate)
         wf.writeframes(b"".join(frames))
 
-    print(f"録音ファイルが {audio_file_path} に保存されました。")
+    logging.info(f"録音ファイルが {audio_file_path} に保存されました。")
     return audio_file_path
 
 def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FILE, stop_event=None):
@@ -118,8 +119,8 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
         channels = 1 # Porcupineはモノラルを要求
         rate = porcupine.sample_rate
 
-        print("--- 録音デバイス情報 (キーワード待機) ---")
-        print(f"マイク: {device_info['name']} (ID: {device_index}, Channels: {channels}, Rate: {rate})")
+        logging.debug("--- 録音デバイス情報 (キーワード待機) ---")
+        logging.debug(f"マイク: {device_info['name']} (ID: {device_index}, Channels: {channels}, Rate: {rate})")
 
         stream = p.open(
             rate=rate,
@@ -130,7 +131,7 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
             input_device_index=device_index
         )
 
-        print(f"録音待機中！「ねえぐり」と発言してください...")
+        logging.info(f"キーワード待機中！「ねえぐり」と発言してください...")
         
         while not (stop_event and stop_event.is_set()):
             pcm = stream.read(porcupine.frame_length, exception_on_overflow=False)
@@ -138,31 +139,31 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
 
             keyword_index = porcupine.process(pcm)
             if keyword_index >= 0:
-                print("\nキーワード検出！")
+                logging.info("キーワード検出！")
                 # wav/nod/1.wavを再生
                 try:
                     with open("wav/nod/1.wav", "rb") as f:
                         wav_data = f.read()
                     play_wav_data(wav_data)
                 except Exception as e:
-                    print(f"音声ファイルの再生エラー: {e}")
+                    logging.warning(f"音声ファイルの再生エラー: {e}")
                 
-                print("録音を開始します...")
+                logging.info("録音を開始します...")
                 break
         
         if stop_event and stop_event.is_set():
-            print("キーワード待機がキャンセルされました。")
+            logging.info("キーワード待機がキャンセルされました。")
             return None
 
     except Exception as e:
-        print(f"!!! Porcupine初期化または待機中にエラー: {e}")
+        logging.error(f"Porcupine初期化または待機中にエラー: {e}", exc_info=True)
         return None
     finally:
         if porcupine:
             porcupine.delete()
 
     # --- キーワード検出後の録音処理 ---
-    print("話してください…")
+    logging.info("話してください…")
     frames = []
     silent_time = 0
     
@@ -183,21 +184,21 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
                 silent_time = 0
 
             if silent_time > SILENCE_DURATION:
-                print("\n無音が続いたため録音を終了します。")
+                logging.info("無音が続いたため録音を終了します。")
                 break
         except IOError:
             pass # Overflowエラーは無視
         except Exception as e:
-            print(f"録音中に予期せぬエラーが発生しました: {e}")
+            logging.error(f"録音中に予期せぬエラーが発生しました: {e}", exc_info=True)
             break
 
-    print("録音ストリームを停止します。")
+    logging.info("録音ストリームを停止します。")
     if stream:
         stream.stop_stream()
         stream.close()
 
     if not frames:
-        print("録音データがありません。")
+        logging.warning("録音データがありません。")
         return None
 
     with wave.open(audio_file_path, 'wb') as wf:
@@ -206,7 +207,7 @@ def wait_for_keyword(device_index, update_callback, audio_file_path=TEMP_WAV_FIL
         wf.setframerate(rate)
         wf.writeframes(b"".join(frames))
 
-    print(f"録音ファイルが {audio_file_path} に保存されました。")
+    logging.info(f"録音ファイルが {audio_file_path} に保存されました。")
     return audio_file_path
 
 
@@ -280,7 +281,7 @@ class AudioService:
 
     def toggle_recording(self):
         if self.app.device_index is None:
-            print("デバイスが選択されていません")
+            logging.warning("録音デバイスが選択されていません。")
             return
         if not self.recording:
             self.start_recording()
@@ -289,7 +290,7 @@ class AudioService:
 
     def toggle_record_waiting(self):
         if self.app.device_index is None:
-            print("デバイスが選択されていません")
+            logging.warning("録音デバイスが選択されていません。")
             return
         if not self.record_waiting:
             self.start_record_waiting()
@@ -310,7 +311,7 @@ class AudioService:
         if self.app.selected_window:
             self.app.capture_service.capture_window()
         else:
-            print("ウィンドウが選択されていません")
+            logging.warning("キャプチャ対象のウィンドウが選択されていません。")
             return
         self.app.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
         self.app.play_random_nod_thread.start()
@@ -318,7 +319,7 @@ class AudioService:
             thread = threading.Thread(target=self.app.process_and_respond)
             thread.start()
         else:
-            print("録音が停止されていません")
+            logging.warning("録音が完了していません。")
 
     def start_record_waiting(self):
         self.record_waiting = True
@@ -334,7 +335,7 @@ class AudioService:
         if self.app.selected_window:
             self.app.capture_service.capture_window()
         else:
-            print("ウィンドウが選択されていません")
+            logging.warning("キャプチャ対象のウィンドウが選択されていません。")
             return
         self.app.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
         self.app.play_random_nod_thread.start()
@@ -342,7 +343,7 @@ class AudioService:
             thread = threading.Thread(target=self.app.process_and_respond, args=(True,))
             thread.start()
         else:
-            print("録音が停止されていません")
+            logging.warning("録音が完了していません。")
 
     def stop_record_waiting(self):
         self.record_waiting = False
@@ -351,7 +352,7 @@ class AudioService:
 
     def record_audio_thread(self):
         if self.app.device_index is None:
-            print("マイクが選択されていません。")
+            logging.warning("マイクが選択されていません。")
             return
         record_audio(
             device_index=self.app.device_index,
@@ -359,14 +360,14 @@ class AudioService:
             audio_file_path=self.app.audio_file_path,
             stop_event=self.stop_event
         )
-        print("録音完了")
+        logging.info("録音完了")
         self.recording_complete = True
         if self.recording:
             self.app.root.after(0, self.stop_recording)
 
     def wait_for_keyword_thread(self):
         if self.app.device_index is None:
-            print("マイクが選択されていません。")
+            logging.warning("マイクが選択されていません。")
             return
         result = wait_for_keyword(
             device_index=self.app.device_index,
@@ -375,13 +376,13 @@ class AudioService:
             stop_event=self.stop_event
         )
         if result:
-            print("録音完了")
+            logging.info("録音完了")
             self.recording_complete = True
             if not self.stop_event.is_set():
                 self.app.root.after(0, self.stop_record_temporary)
 
     def record_chunk(self, duration, audio_file_path, update_callback):
         if self.app.device_index is None:
-            print("マイクが選択されていません。")
+            logging.warning("マイクが選択されていません。")
             return None
         return record_audio_chunk(device_index=self.app.device_index, duration=duration, audio_file_path=audio_file_path, update_callback=update_callback)

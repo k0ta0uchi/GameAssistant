@@ -175,7 +175,7 @@ class MemoryWindow(tk.Toplevel):
                 'display_ts': display_ts,
                 'key': key,
                 'type': meta.get('type', ''),
-                'user': meta.get('user', ''),
+                'user': meta.get('source') or meta.get('user', ''),
                 'comment': doc
             })
 

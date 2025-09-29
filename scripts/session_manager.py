@@ -6,10 +6,12 @@ import os
 import threading
 import time
 import queue
+import logging
 from scripts.twitch_bot import TwitchService
 from twitchio import ChatMessage as TwitchChatMessage
 from scripts.record import AudioService, wait_for_keyword
 from scripts.whisper import recognize_speech
+from scripts.voice import play_random_nod
 
 @dataclass
 class TwitchMessage:
@@ -65,7 +67,7 @@ class SessionManager:
         return self.session_running
 
     def start_session(self):
-        print("SessionManager: セッションを開始します。")
+        logging.info("セッションを開始します。")
         self.session_running = True
         self.session_memory = SessionMemory()
         self.twitch_service.connect_twitch_bot()
@@ -78,7 +80,7 @@ class SessionManager:
         self.transcription_thread.start()
 
     def stop_session(self):
-        print("SessionManager: セッションを停止します。")
+        logging.info("セッションを停止します。")
         self.session_running = False
         self.twitch_service.disconnect_twitch_bot()
         self._stop_event.set()
@@ -90,11 +92,7 @@ class SessionManager:
                 self.app.memory_manager.add_or_update_memory(self.session_memory.session_id, summary, type='session_summary')
 
     async def handle_twitch_message(self, message: Union[TwitchChatMessage, object]):
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! handle_twitch_message in SessionManager CALLED !!!")
-        print(f"!!! Message: {message}")
-        print(f"!!! session_memory is None: {self.session_memory is None}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        logging.debug(f"handle_twitch_message received: {message}")
         if self.session_memory:
             author_name = ""
             content = ""
@@ -110,20 +108,20 @@ class SessionManager:
             elif hasattr(message, 'message') and hasattr(message.message, 'text'):
                 content = message.message.text
 
-            print(f"Extracted author: {author_name}, content: {content}")
+            logging.debug(f"Extracted author: {author_name}, content: {content}")
 
             if author_name and content:
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
-                print(f"Twitchメッセージを保存しました: {event}")
-                print("[DEBUG] Calling save_event_to_chroma for twitch_chat...")
+                logging.info(f"Twitchメッセージを保存しました: {event}")
+                logging.debug("Calling save_event_to_chroma for twitch_chat...")
                 event_data = {
                     'type': 'twitch_chat',
                     'source': author_name,
                     'content': content,
                     'timestamp': event.timestamp.isoformat()
                 }
-                self.app.memory_manager.save_event_to_chroma(event_data)
+                await self.app.memory_manager.save_event_to_chroma(event_data)
 
     def continuous_recording_thread(self):
         while not self._stop_event.is_set():
@@ -136,7 +134,7 @@ class SessionManager:
 
     def get_session_history(self):
         if not self.session_memory:
-            print("DEBUG: get_session_history - セッションメモリがありません。")
+            logging.debug("get_session_history - セッションメモリがありません。")
             return ""
         history = ""
         for event in self.session_memory.events:
@@ -147,9 +145,9 @@ class SessionManager:
             elif isinstance(event, GeminiResponse):
                 history += f"Assistant: {event.content}\n"
         
-        print("--- DEBUG: get_session_history ---")
-        print(history)
-        print("------------------------------------")
+        logging.debug("--- get_session_history ---")
+        logging.debug(history)
+        logging.debug("------------------------------------")
         return history
 
     def wait_for_hotword_thread(self):
@@ -161,7 +159,8 @@ class SessionManager:
                 stop_event=self._stop_event
             )
             if result:
-                print("ホットワードを検出しました。プロンプトの録音を開始します。")
+                play_random_nod()
+                logging.info("ホットワードを検出しました。プロンプトの録音を開始します。")
                 screenshot_path = self.app.capture_service.capture_window()
                 task = TranscriptionTask(priority=1, audio_file_path=self.app.audio_file_path, is_prompt=True, screenshot_path=screenshot_path)
                 self.transcription_queue.put(task)
@@ -174,14 +173,19 @@ class SessionManager:
                 if text and text.strip() != "ごめん" and self.session_memory:
                     event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=task.is_prompt)
                     self.session_memory.events.append(event)
-                    print(f"音声を保存しました: {event}")
+                    logging.info(f"音声を保存しました: {event}")
                     event_data = {
                         'type': 'user_speech',
                         'source': self.app.user_name.get(),
                         'content': text,
                         'timestamp': event.timestamp.isoformat()
                     }
-                    self.app.memory_manager.save_event_to_chroma(event_data)
+                    if self.app.twitch_service.twitch_bot_loop:
+                        import asyncio
+                        asyncio.run_coroutine_threadsafe(
+                            self.app.memory_manager.save_event_to_chroma(event_data),
+                            self.app.twitch_service.twitch_bot_loop
+                        )
                     if task.is_prompt:
                         session_history = self.get_session_history()
                         self.app.process_prompt(text, session_history, task.screenshot_path)
@@ -190,7 +194,7 @@ class SessionManager:
                     if os.path.exists(task.audio_file_path):
                         os.remove(task.audio_file_path)
                 except Exception as e:
-                    print(f"Error removing audio file: {e}")
+                    logging.error(f"Error removing audio file: {e}", exc_info=True)
                 self.transcription_queue.task_done()
             except queue.Empty:
                 continue
