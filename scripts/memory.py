@@ -94,3 +94,41 @@ class MemoryManager:
         except Exception as e:
             print(f"メモリーの削除中にエラーが発生しました: {e}")
             return False
+
+    def save_event_to_chroma(self, event_data: dict) -> None:
+        """セッションイベントをChromaDBに直接保存する"""
+        print(f"[DEBUG] save_event_to_chroma called with event_data: {event_data}")
+        try:
+            import uuid
+            import logging
+            from google.genai import types
+
+            event_id = str(uuid.uuid4())
+            content = event_data.get('content', '')
+            metadata = {
+                'type': event_data.get('type'),
+                'source': event_data.get('source'),
+                'timestamp': event_data.get('timestamp')
+            }
+
+            # Use the same embedding model as the summary saver
+            embedding_model = "models/embedding-001"
+            embedding_response = self.gemini_client.models.embed_content(
+                model=embedding_model,
+                contents=[content],
+                config=types.EmbedContentConfig(task_type="retrieval_document")
+            )
+            if not (embedding_response and embedding_response.embeddings):
+                logging.error(f"Failed to generate embedding for event: {event_id}")
+                return
+            embedding = embedding_response.embeddings[0].values
+
+            self.collection.upsert(
+                ids=[event_id],
+                embeddings=[embedding],
+                documents=[content],
+                metadatas=[metadata]
+            )
+            print("[DEBUG] Successfully upserted event to ChromaDB.")
+        except Exception as e:
+            logging.error("Failed to save event to ChromaDB: %s", e)

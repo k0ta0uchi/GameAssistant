@@ -160,7 +160,7 @@ class MemoryWindow(tk.Toplevel):
                 doc = value_json # Not a JSON, treat as plain text
                 meta = {}
 
-            timestamp_str = meta.get('created_at', '')
+            timestamp_str = meta.get('created_at') or meta.get('timestamp', '')
             if timestamp_str:
                 try:
                     dt_obj = datetime.fromisoformat(timestamp_str)

@@ -116,6 +116,14 @@ class SessionManager:
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
                 print(f"Twitchメッセージを保存しました: {event}")
+                print("[DEBUG] Calling save_event_to_chroma for twitch_chat...")
+                event_data = {
+                    'type': 'twitch_chat',
+                    'source': author_name,
+                    'content': content,
+                    'timestamp': event.timestamp.isoformat()
+                }
+                self.app.memory_manager.save_event_to_chroma(event_data)
 
     def continuous_recording_thread(self):
         while not self._stop_event.is_set():
@@ -167,6 +175,13 @@ class SessionManager:
                     event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=task.is_prompt)
                     self.session_memory.events.append(event)
                     print(f"音声を保存しました: {event}")
+                    event_data = {
+                        'type': 'user_speech',
+                        'source': self.app.user_name.get(),
+                        'content': text,
+                        'timestamp': event.timestamp.isoformat()
+                    }
+                    self.app.memory_manager.save_event_to_chroma(event_data)
                     if task.is_prompt:
                         session_history = self.get_session_history()
                         self.app.process_prompt(text, session_history, task.screenshot_path)

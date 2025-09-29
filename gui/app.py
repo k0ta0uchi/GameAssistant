@@ -19,6 +19,7 @@ import keyboard
 import json
 import asyncio
 import time
+from datetime import datetime
 from scripts.memory import MemoryManager
 from twitchio.utils import setup_logging
 import logging
@@ -488,6 +489,14 @@ class GameAssistantApp:
         """Twitchのメンションを処理する"""
         try:
             print(f"[DEBUG] handle_twitch_mention called by {author_name}: {prompt}")
+
+            event_data = {
+                'type': 'twitch_mention',
+                'source': author_name,
+                'content': prompt,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.memory_manager.save_event_to_chroma(event_data)
 
             session_history = None
             if self.session_manager.is_session_active():
