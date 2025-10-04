@@ -198,4 +198,3 @@ class SessionManager:
                 self.transcription_queue.task_done()
             except queue.Empty:
                 continue
-

@@ -340,7 +340,7 @@ class AudioService:
         self.app.play_random_nod_thread = threading.Thread(target=voice.play_random_nod)
         self.app.play_random_nod_thread.start()
         if self.recording_complete:
-            thread = threading.Thread(target=self.app.process_and_respond, args=(True,))
+            thread = threading.Thread(target=self.app.process_and_respond)
             thread.start()
         else:
             logging.warning("録音が完了していません。")

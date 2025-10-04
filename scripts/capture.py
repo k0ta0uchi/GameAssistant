@@ -60,7 +60,7 @@ def capture_screen(window, output_file="screenshot.png"):
     # screenshot_img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
     screenshot.save(output_file)
 
-    print(f"スクリーンショットが保存されました: screenshot.png")
+    print(f"スクリーンショットが保存されました: {output_file}")
     return screenshot
 
 def list_available_windows():
@@ -88,8 +88,10 @@ class CaptureService:
         try:
             capture_screen(self.app.selected_window, self.app.screenshot_file_path)
             self.load_and_display_image(self.app.screenshot_file_path)
+            return self.app.screenshot_file_path
         except Exception as e:
             print(f"キャプチャできませんでした： {e}")
+            return None
 
     def load_and_display_image(self, image_path):
         threading.Thread(target=self.process_image, args=(image_path,)).start()

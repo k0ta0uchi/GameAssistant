@@ -115,8 +115,8 @@ class GameAssistantApp:
         self.create_widgets()
         self._setup_logging()
 
-        self.audio_file_path = "temp_recording.wav"
-        self.screenshot_file_path = "temp_screenshot.png"
+        self.audio_file_path = os.path.abspath("temp_recording.wav")
+        self.screenshot_file_path = os.path.abspath("temp_screenshot.png")
         self.image = None
 
         keyboard.add_hotkey("ctrl+shift+f2", self.audio_service.toggle_recording)
@@ -418,11 +418,9 @@ class GameAssistantApp:
             logging.error(f"音声認識エラー: {e}", exc_info=True)
             return None
 
-    async def process_and_respond_async(self, from_temporary_stop=False):
-        # このメソッドは非同期で実行される
+    def process_and_respond(self, from_temporary_stop=False):
         prompt = self.transcribe_audio()
 
-        # promptがNoneまたは空文字列の場合、処理を中断
         if not prompt:
             logging.info("プロンプトが空のため、処理を中断します。")
             def enable_buttons():
@@ -437,32 +435,32 @@ class GameAssistantApp:
 
         if "検索" in prompt or "けんさく" in prompt:
             search_keyword = prompt
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            search_results = loop.run_until_complete(self.run_ai_search(search_keyword))
+            search_results = asyncio.run(self.run_ai_search(search_keyword))
             if search_results:
                 prompt += "\n\n検索結果:\n" + "\n".join(search_results)
 
         self.prompt = prompt
         image_path = self.screenshot_file_path if self.use_image.get() and os.path.exists(self.screenshot_file_path) else None
         
-        response = await self.gemini_service.ask(self.prompt, image_path, self.is_private.get()) # type: ignore
+        session_history = None
+        if self.session_manager.is_session_active():
+            logging.debug("Session is active, getting history.")
+            session_history = self.session_manager.get_session_history()
+
+        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
         self.response = response
 
-        def update_gui_and_speak():
+        def update_gui_and_speak(response_text):
             if self.show_response_in_new_window.get():
-                if response:
-                    self.show_gemini_response(response)
+                if response_text:
+                    self.show_gemini_response(response_text)
             else:
-                if response:
+                if response_text:
                     self.log_textbox.config(state="normal")
-                    self.log_textbox.insert(END, "Geminiの回答: " + response + "\n")
+                    self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
                     self.log_textbox.see(END)
                     self.log_textbox.config(state="disabled")
-            voice.text_to_speech(response)
+            voice.text_to_speech(response_text)
             if os.path.exists(self.audio_file_path):
                 os.remove(self.audio_file_path)
             if os.path.exists(self.screenshot_file_path):
@@ -472,16 +470,11 @@ class GameAssistantApp:
                 self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
                 self.audio_service.record_waiting_thread.start()
             self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-            self.record_wait_button.config(state="normal")
+            self.record_wait_button.config(text="normal")
             if not self.audio_service.record_waiting:
                 self.record_wait_button.config(text="録音待機", style="success.TButton")
 
-        self.root.after(0, update_gui_and_speak)
-
-    def process_and_respond(self, from_temporary_stop=False):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.process_and_respond_async(from_temporary_stop))
+        self.root.after(0, update_gui_and_speak, response)
 
     def open_memory_window(self):
         """メモリー管理ウィンドウを開く"""
@@ -557,7 +550,6 @@ class GameAssistantApp:
 
         if "検索" in prompt or "けんさく" in prompt:
             search_keyword = prompt
-            # This is a blocking call, so it's fine in a thread
             search_results = asyncio.run(self.run_ai_search(search_keyword))
             if search_results:
                 prompt += "\n\n検索結果:\n" + "\n".join(search_results)
@@ -565,7 +557,7 @@ class GameAssistantApp:
         self.prompt = prompt
         image_path = screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None
         
-        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history) # type: ignore
+        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
         self.response = response
 
         if response and self.session_manager.session_memory:
@@ -593,23 +585,20 @@ class GameAssistantApp:
 
     def _setup_logging(self):
         self.log_queue = queue.Queue()
-        # Set up the queue handler
         queue_handler = QueueHandler(self.log_queue)
         
         root_logger = logging.getLogger()
         
-        # Remove all existing handlers to avoid duplicate logs
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
             
-        # Add a stream handler to log to console
         stream_handler = logging.StreamHandler()
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         stream_handler.setFormatter(formatter)
 
         root_logger.addHandler(queue_handler)
-        root_logger.addHandler(stream_handler) # Add the stream handler
-        root_logger.setLevel(logging.DEBUG) # Capture all levels
+        root_logger.addHandler(stream_handler)
+        root_logger.setLevel(logging.DEBUG)
 
     def _process_log_queue(self):
         try:
@@ -632,7 +621,6 @@ class GameAssistantApp:
         if not from_history:
             self.log_history.append(record)
 
-        # Apply filter
         if not self.log_filters.get(record.levelname, ttk.BooleanVar(value=True)).get():
             return
 

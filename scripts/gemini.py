@@ -7,12 +7,13 @@ from google.genai import types
 from io import BytesIO
 import mimetypes
 import wave
-from .clients import get_gemini_client # get_chroma_clientはMemoryManager内で使用するため不要に
+from .clients import get_gemini_client
 from . import local_summarizer
 from .memory import MemoryManager
 import uuid
 import google.generativeai as genai
 import threading
+import asyncio
 
 # --- Environment Setup ---
 load_dotenv()
@@ -20,8 +21,6 @@ load_dotenv()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
 USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
-
-import asyncio
 
 class GeminiSession:
     def __init__(self, custom_instruction: str | None = None, settings_manager=None):
@@ -32,7 +31,6 @@ class GeminiSession:
         self.settings_manager = settings_manager
         self.disable_thinking_mode = self.settings_manager.get("disable_thinking_mode", False) if self.settings_manager else False
         
-        # --- Chat Session Initialization ---
         self.history = []
         if custom_instruction:
             self.history.append(types.Content(role='user', parts=[types.Part(text=custom_instruction)]))
@@ -40,43 +38,36 @@ class GeminiSession:
         
         self.embedding_model = "models/embedding-001"
 
-        # --- Memory Manager and Summarizer Initialization ---
         self.memory_manager = MemoryManager(collection_name="memories")
         local_summarizer.initialize_llm()
 
-    async def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = 'app', memory_user_id: str | None = None):
-        # メモリ保存用のユーザーIDを決定
+    def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = 'app', memory_user_id: str | None = None):
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
         if not target_user_id:
             raise ValueError("User ID is not set for the selected privacy level or memory type.")
 
-        # メモリ保存処理を別スレッドで実行
         thread = threading.Thread(target=self._run_add_memory_in_background, args=(prompt, target_user_id, memory_type))
         thread.start()
 
-        # クエリのEmbeddingを生成 (非同期化)
-        query_embedding_response = await asyncio.to_thread(
-            self.client.models.embed_content,
+        query_embedding_response = self.client.models.embed_content(
             model=self.embedding_model,
             contents=[prompt],
             config=types.EmbedContentConfig(task_type="retrieval_query")
         )
         query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
-        # 関連性の高い会話を検索
         results = self.memory_manager.collection.query(
             query_embeddings=[query_embedding],
             n_results=5,
             where={"$and": [{"type": memory_type}, {"user": target_user_id}]}
         )
         
-        # 検索結果を要約 (非同期化)
         documents = results.get('documents') if results else None
         if documents and documents[0]:
             memory_text = "\n".join([doc for doc in documents[0] if doc is not None])
         else:
             memory_text = ""
-        memory = await asyncio.to_thread(local_summarizer.summarize, memory_text) if memory_text else ""
+        memory = local_summarizer.summarize(memory_text) if memory_text else ""
 
         contents = []
         if image_path:
@@ -90,7 +81,6 @@ class GeminiSession:
 
         prompt_with_memory = f"Previous conversations:\n{memory}\n\nUser: {prompt}\nAI:" if memory else f"User: {prompt}\nAI:"
         
-        # APIに渡すcontentsを構築
         current_user_parts = []
         if image_path:
             try:
@@ -108,7 +98,6 @@ class GeminiSession:
         
         current_user_parts.append(types.Part(text=prompt_with_memory))
 
-        # 今回のユーザー入力を履歴に追加
         self.history.append(types.Content(role='user', parts=current_user_parts))
 
         try:
@@ -116,20 +105,16 @@ class GeminiSession:
             config = types.GenerateContentConfig(
                 thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget)
             )
-            # generate_content を非同期で実行
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
+            response = self.client.models.generate_content(
                 model=GEMINI_MODEL, # type: ignore
                 contents=self.history,
                 config=config
             )
             response_text = response.text
             
-            # モデルの応答を履歴に追加
             if response and response.candidates:
                 self.history.append(response.candidates[0].content)
             else:
-                # 応答がない場合でも、ダミーのモデル応答を履歴に追加しておく
                 self.history.append(types.Content(role='model', parts=[types.Part(text="（応答がありませんでした）")]))
 
             return response_text
@@ -143,7 +128,6 @@ class GeminiSession:
         loop.run_until_complete(self._add_memory_in_background(prompt, user_id, memory_type))
 
     async def _add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
-        """（バックグラウンド処理）メモリへの追加を行う"""
         try:
             if not prompt.endswith(('?', '？')) and not any(q in prompt for q in ['何', 'どこ', 'いつ', '誰', 'なぜ']):
                 summary = await asyncio.to_thread(local_summarizer.summarize, prompt)
@@ -171,9 +155,6 @@ class GeminiSession:
             print(f"バックグラウンドでのメモリ追加中にエラーが発生しました: {e}")
 
     def generate_speech(self, text: str, voice_name: str = 'Laomedeia'):
-        """
-        Gemini APIを使用してテキストから音声を生成します。
-        """
         try:
             response = self.client.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
@@ -217,14 +198,14 @@ class GeminiService:
     def __init__(self, custom_instruction, settings_manager):
         self.session = GeminiSession(custom_instruction, settings_manager)
 
-    async def ask(self, prompt: str, image_path: Optional[str] = None, is_private: bool = False, memory_type: str = 'local', memory_user_id: Optional[str] = None, session_history: Optional[str] = None) -> Optional[str]:
+    def ask(self, prompt: str, image_path: Optional[str] = None, is_private: bool = False, memory_type: str = 'local', memory_user_id: Optional[str] = None, session_history: Optional[str] = None) -> Optional[str]:
         if not prompt:
             return "プロンプトがありません。"
         if session_history:
             full_prompt = session_history + "\n\n" + prompt
         else:
             full_prompt = prompt
-        return await self.session.generate_content(full_prompt, image_path, is_private, memory_type, memory_user_id)
+        return self.session.generate_content(full_prompt, image_path, is_private, memory_type, memory_user_id)
 
     def summarize_session(self, session_history: str) -> Optional[str]:
         prompt = f"以下の会話履歴を要約し、重要な情報のみを抽出してください。\n\n{session_history}"
@@ -242,4 +223,3 @@ if __name__ == "__main__":
     image_file_path = "screenshot.png"
     if not os.path.exists(image_file_path):
         Image.new("RGB", (100, 100), color=0).save(image_file_path)
-
