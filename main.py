@@ -44,7 +44,7 @@ def on_closing(app_instance):
 if __name__ == "__main__":
     backup_chromadb()
     setup_logging(level=logging.DEBUG)
-    root = ttk.Window(themename="superhero")
+    root = ttk.Window(themename="darkly")
     root.geometry("1280x960")
     app = GameAssistantApp(root)
     root.protocol("WM_DELETE_WINDOW", lambda: on_closing(app))
