@@ -19,7 +19,33 @@ class MemoryManager:
     def __init__(self, collection_name='memories'):
         self.chroma_client = get_chroma_client()
         self.gemini_client = get_gemini_client()
-        self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
+
+        try:
+            # まずコレクションの取得を試みる
+            self.collection = self.chroma_client.get_collection(name=collection_name)
+            logging.info(f"Collection '{collection_name}' found.")
+        except ValueError:
+            # 存在しない場合は ValueError が発生するので、作成する
+            logging.info(f"Collection '{collection_name}' not found. Creating a new one with HNSW parameters.")
+            try:
+                self.collection = self.chroma_client.create_collection(
+                    name=collection_name,
+                    metadata={
+                        "hnsw:space": "l2",
+                        "hnsw:M": 16,
+                        "hnsw:construction_ef": 256
+                    }
+                )
+                logging.info(f"Collection '{collection_name}' created successfully.")
+            except Exception as e:
+                logging.error(f"Failed to create collection '{collection_name}': {e}", exc_info=True)
+                # エラーが発生した場合は、フォールバックとしてパラメータなしで作成を試みる
+                try:
+                    logging.warning("Retrying to create collection without HNSW parameters.")
+                    self.collection = self.chroma_client.get_or_create_collection(name=collection_name)
+                except Exception as fallback_e:
+                    logging.critical(f"Failed to create collection even without HNSW parameters: {fallback_e}", exc_info=True)
+                    raise fallback_e
 
     def get_all_memories(self):
         """すべてのメモリーを取得する"""
