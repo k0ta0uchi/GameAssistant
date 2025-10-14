@@ -1,5 +1,6 @@
 from tkinter import font
 import ttkbootstrap as ttk
+import glob
 from ttkbootstrap.constants import (
     END, BOTH, LEFT, RIGHT, Y, X, VERTICAL, WORD, READONLY
 )
@@ -32,11 +33,11 @@ from scripts.capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
 from .components import OutputRedirector, GeminiResponseWindow, MemoryWindow
 
-
 class GameAssistantApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ゲームアシスタント")
+        self.cleanup_temp_files()
 
         self.settings_manager = SettingsManager()
 
@@ -130,6 +131,21 @@ class GameAssistantApp:
         if self.windows:
             self.update_window()
         self.update_record_buttons_state()
+
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def on_closing(self):
+        self.cleanup_temp_files()
+        self.root.destroy()
+
+    def cleanup_temp_files(self):
+        temp_files = glob.glob("temp_recording_*.wav")
+        for f in temp_files:
+            try:
+                os.remove(f)
+                logging.info(f"一時ファイルを削除しました: {f}")
+            except OSError as e:
+                logging.error(f"一時ファイルの削除に失敗しました: {f} - {e}")
 
     def get_device_index_from_name(self, device_name):
         return record.get_device_index_from_name(device_name)
