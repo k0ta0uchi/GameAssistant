@@ -18,7 +18,7 @@ p = pyaudio.PyAudio()
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 CHUNK = 1024
-SILENCE_THRESHOLD = 50 
+SILENCE_THRESHOLD = 100 
 SILENCE_DURATION = 2
 
 # --- Picovoice Porcupine 設定 ---
