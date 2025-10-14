@@ -20,6 +20,8 @@ import keyboard
 import json
 import asyncio
 import time
+import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from scripts.memory import MemoryManager
 from twitchio.utils import setup_logging
@@ -476,21 +478,93 @@ class GameAssistantApp:
                     self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
                     self.log_textbox.see(END)
                     self.log_textbox.config(state="disabled")
-            voice.text_to_speech(response_text)
-            if os.path.exists(self.audio_file_path):
-                os.remove(self.audio_file_path)
-            if os.path.exists(self.screenshot_file_path):
-                os.remove(self.screenshot_file_path)
-            if self.audio_service.record_waiting:
-                self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-                self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
-                self.audio_service.record_waiting_thread.start()
-            self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-            self.record_wait_button.config(text="normal")
-            if not self.audio_service.record_waiting:
-                self.record_wait_button.config(text="録音待機", style="success.TButton")
 
-        self.root.after(0, update_gui_and_speak, response)
+            # レスポンスを文に分割
+            sentences = [s.strip() for s in re.split(r'(?<=[。！？])', response_text) if s.strip()]
+            if not sentences:
+                self.root.after(0, self.finalize_response_processing)
+                return
+
+            def play_audio_sequence():
+                # TTSを並列実行して音声データを取得
+                with ThreadPoolExecutor() as executor:
+                    futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
+                    wav_datas = [future.result() for future in futures]
+
+                # 順番に再生
+                for wav_data in wav_datas:
+                    if wav_data:
+                        voice.play_wav_data(wav_data)
+
+                # GUIの更新をメインスレッドで実行
+                self.root.after(0, self.finalize_response_processing)
+
+            # 再生処理を別スレッドで実行
+            threading.Thread(target=play_audio_sequence).start()
+
+    def finalize_response_processing(self):
+        if os.path.exists(self.audio_file_path):
+            os.remove(self.audio_file_path)
+        if os.path.exists(self.screenshot_file_path):
+            os.remove(self.screenshot_file_path)
+        if self.audio_service.record_waiting:
+            self.record_wait_button.config(text="録音待機中", style="danger.TButton")
+            self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
+            self.audio_service.record_waiting_thread.start()
+        self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+        self.record_wait_button.config(text="normal")
+        if not self.audio_service.record_waiting:
+            self.record_wait_button.config(text="録音待機", style="success.TButton")
+
+        self.root.after(0, self.update_gui_and_speak, response)
+
+    def update_gui_and_speak(self, response_text):
+        if self.show_response_in_new_window.get():
+            if response_text:
+                self.show_gemini_response(response_text)
+        else:
+            if response_text:
+                self.log_textbox.config(state="normal")
+                self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
+                self.log_textbox.see(END)
+                self.log_textbox.config(state="disabled")
+
+        # レスポンスを文に分割
+        sentences = [s.strip() for s in re.split(r'(?<=[。！？])', response_text) if s.strip()]
+        if not sentences:
+            self.root.after(0, self.finalize_response_processing)
+            return
+
+        def play_audio_sequence():
+            # TTSを並列実行して音声データを取得
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
+                wav_datas = [future.result() for future in futures]
+
+            # 順番に再生
+            for wav_data in wav_datas:
+                if wav_data:
+                    voice.play_wav_data(wav_data)
+
+            # GUIの更新をメインスレッドで実行
+            self.root.after(0, self.finalize_response_processing)
+
+        # 再生処理を別スレッドで実行
+        threading.Thread(target=play_audio_sequence).start()
+
+    def finalize_response_processing(self):
+        if os.path.exists(self.audio_file_path):
+            os.remove(self.audio_file_path)
+        if os.path.exists(self.screenshot_file_path):
+            os.remove(self.screenshot_file_path)
+        if self.audio_service.record_waiting:
+            self.record_wait_button.config(text="録音待機中", style="danger.TButton")
+            self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
+            self.audio_service.record_waiting_thread.start()
+        self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+        self.record_wait_button.config(text="normal")
+        if not self.audio_service.record_waiting:
+            self.record_wait_button.config(text="録音待機", style="success.TButton")
 
     def open_memory_window(self):
         """メモリー管理ウィンドウを開く"""
@@ -581,23 +655,7 @@ class GameAssistantApp:
             self.session_manager.session_memory.events.append(event)
             logging.info(f"Geminiレスポンスを保存しました: {event}")
 
-        def update_gui_and_speak(response_text):
-            if self.show_response_in_new_window.get():
-                if response_text:
-                    self.show_gemini_response(response_text)
-            else:
-                if response_text:
-                    self.log_textbox.config(state="normal")
-                    self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
-                    self.log_textbox.see(END)
-                    self.log_textbox.config(state="disabled")
-            voice.text_to_speech(response_text)
-            if os.path.exists(self.audio_file_path):
-                os.remove(self.audio_file_path)
-            if os.path.exists(self.screenshot_file_path):
-                os.remove(self.screenshot_file_path)
-
-        self.root.after(0, update_gui_and_speak, response)
+        self.root.after(0, self.update_gui_and_speak, response)
 
     def _setup_logging(self):
         self.log_queue = queue.Queue()

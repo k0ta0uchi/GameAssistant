@@ -16,15 +16,18 @@ RANDOM_NOD = [
     "2.wav",
 ]
 
-def text_to_speech(text, speaker_id=46, core_version=None):
+def generate_speech_data(text, speaker_id=46, core_version=None):
     """
-    与えられたテキストを音声に変換し、再生する。
+    与えられたテキストを音声データに変換する。
     設定に応じてVOICEVOXまたはGemini TTSを使用する。
 
     Args:
         text (str): 音声に変換するテキスト。
         speaker_id (int): 話者ID。デフォルトは1。
         core_version (str, optional): core_version。デフォルトはNone。
+    
+    Returns:
+        bytes: WAV形式の音声データ。エラーの場合はNone。
     """
     try:
         with open('settings.json', 'r', encoding="utf-8") as f:
@@ -37,7 +40,7 @@ def text_to_speech(text, speaker_id=46, core_version=None):
         gemini_session = GeminiSession()
         pcm_data = gemini_session.generate_speech(text)
         if pcm_data:
-            # PCMデータをWAV形式に変換して再生
+            # PCMデータをWAV形式に変換
             wav_data = io.BytesIO()
             with wave.open(wav_data, 'wb') as wf:
                 wf.setnchannels(1)
@@ -45,7 +48,7 @@ def text_to_speech(text, speaker_id=46, core_version=None):
                 wf.setframerate(24000)
                 wf.writeframes(pcm_data)
             wav_data.seek(0)
-            play_wav_data(wav_data.read())
+            return wav_data.read()
     else: # voicevox
         base_url = "http://localhost:50021"
 
@@ -78,10 +81,9 @@ def text_to_speech(text, speaker_id=46, core_version=None):
             wav_data = response.content
         except requests.exceptions.RequestException as e:
             print(f"音声合成APIエラー: {e}")
-            return
+            return None
 
-        # 3. WAVデータを再生する
-        play_wav_data(wav_data)
+        return wav_data
 
 def text_to_speech_kokoro(text):
     """
