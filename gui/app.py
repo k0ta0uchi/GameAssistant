@@ -440,6 +440,19 @@ class GameAssistantApp:
     def process_and_respond(self, from_temporary_stop=False):
         prompt = self.transcribe_audio()
 
+        if prompt and ("まて" in prompt or "待て" in prompt):
+            logging.info("キャンセルワードを検出しました。処理を中断し、待機モードに戻ります。")
+            voice.play_wav_file("wav/nod/5.wav")
+            def enable_buttons():
+                self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+                self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
+                if self.audio_service.record_waiting:
+                    self.record_wait_button.config(text="録音待機中", style="danger.TButton")
+                    self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
+                    self.audio_service.record_waiting_thread.start()
+            self.root.after(0, enable_buttons)
+            return
+
         if not prompt:
             logging.info("プロンプトが空のため、処理を中断します。")
             def enable_buttons():
@@ -635,6 +648,11 @@ class GameAssistantApp:
         thread.start()
 
     def process_prompt_thread(self, prompt, session_history, screenshot_path=None):
+        if prompt and ("まて" in prompt or "待て" in prompt):
+            logging.info("キャンセルワードを検出しました。処理を中断します。")
+            voice.play_wav_file("wav/nod/5.wav")
+            return
+
         if not prompt:
             logging.info("プロンプトが空のため、処理を中断します。")
             return

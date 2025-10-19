@@ -157,6 +157,20 @@ def play_random_nod():
     except Exception as e:
         print(f"エラーが発生しました: {e}")
 
+def play_wav_file(filepath):
+    """
+    指定されたWAVファイルを再生する。
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            wav_data = f.read()
+            play_wav_data(wav_data)
+
+    except FileNotFoundError:
+        print(f"ファイルが見つかりません: {filepath}")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+
 if __name__ == '__main__':
     text = '''
         Kokoro（/kˈOkəɹO/）は、8200万のパラメータを持つオープンウェイトTTSモデルです。軽量なアーキテクチャにもかかわらず、大幅に高速かつコスト効率が良い一方で、より大規模なモデルに匹敵する品質を提供します。Apacheライセンスの重みを持つKokoro（/kˈOkəɹO/）は、本番環境から個人プロジェクトまで、あらゆる場所にデプロイできます。

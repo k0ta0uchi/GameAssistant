@@ -14,7 +14,15 @@ SCOPES = "chat:read chat:edit moderator:read:followers user:read:chat user:write
 
 # --- ChromaDBクライアントの初期化 ---
 chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
-token_collection = chroma_client.get_or_create_collection(name="user_tokens")
+token_collection = chroma_client.get_or_create_collection(
+    name="user_tokens",
+    metadata={
+        "hnsw:space": "l2",
+        "hnsw:M": 16,
+        "hnsw:construction_ef": 256,
+        "hnsw:ef": 256
+    }
+)
 
 # --- トークン管理 (ChromaDB) ---
 

@@ -27,7 +27,15 @@ async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[st
     ChromaDBをセットアップします。
     """
     tokens = []
-    token_collection = chroma_client.get_or_create_collection(name="user_tokens")
+    token_collection = chroma_client.get_or_create_collection(
+    name="user_tokens",
+    metadata={
+        "hnsw:space": "l2",
+        "hnsw:M": 16,
+        "hnsw:construction_ef": 256,
+        "hnsw:ef": 256
+    }
+)
     results = token_collection.get()
 
     if results and results['ids']:
@@ -278,7 +286,15 @@ class TwitchService:
 
         logging.info("Twitchボットに接続しています...")
         try:
-            token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(name="user_tokens")
+            token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(
+        name="user_tokens",
+        metadata={
+            "hnsw:space": "l2",
+            "hnsw:M": 16,
+            "hnsw:construction_ef": 256,
+            "hnsw:ef": 256
+        }
+    )
             
             self.twitch_bot = TwitchBot(
                 token=bot_token,
