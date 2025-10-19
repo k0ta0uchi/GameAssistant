@@ -19,6 +19,7 @@ import asyncio
 load_dotenv()
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
+GEMINI_PRO_MODEL = os.environ.get("GEMINI_PRO_MODEL")
 USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
@@ -217,6 +218,53 @@ class GeminiService:
             return response.text
         except Exception as e:
             print(f"セッションの要約中にエラーが発生しました: {e}")
+            return None
+
+    def generate_blog_post(self, conversation: list[dict[str, str]]) -> Optional[str]:
+        if not conversation:
+            return None
+
+        system_prompt = """
+あなたはプロのゲームライターです。
+これから提供するユーザーとAIアシスタントの会話履歴を元に、読者の心を掴む魅力的なブログ記事を作成してください。
+
+# 指示
+- 会話履歴は、記事を作成するための素材です。会話をそのまま引用するのではなく、あなたの言葉でゲームプレイの状況や感情を生き生きと描写してください。
+- 読者がまるでその場でプレイを見ているかのような臨場感あふれる文章を心がけてください。
+- 専門用語やゲーム内スラングは、初心者にも分かるように簡単な解説を加えてください。
+- ゲームの魅力、面白さ、そしてプレイヤーとアシスタントのやり取りの楽しさが伝わるように、情熱的に書き上げてください。
+
+# 記事の構成
+1.  **魅力的なタイトル**: 読者が思わずクリックしたくなるような、キャッチーなタイトルをつけてください。
+2.  **導入**: なんのゲームの、どのような状況でのプレイ記録なのかを簡潔に紹介し、読者の興味を引きつけます。
+3.  **プレイのハイライト**: 会話履歴を参考に、ゲームプレイ中の最も盛り上がった場面や印象的な出来事を複数取り上げ、詳細に描写します。プレイヤーとアシスタントの面白いやり取りもハイライトしてください。
+4.  **ライターによる考察**: ゲームのデザイン、ストーリー、難易度などについて、あなた自身の専門的な視点から考察や感想を述べます。
+5.  **まとめ**: 記事全体を締めくくり、読者にゲームへの興味を持たせたり、プレイヤーへの共感を促したりするような、心に残る言葉で結んでください。
+
+# フォーマット
+- Markdown形式で記述してください。
+- 全体で5000字程度のボリュームにしてください。
+
+それでは、以下の会話履歴を元に、最高のゲームレビュー記事を作成してください。
+"""
+
+        conversation_text = "\n".join(f"- {item['role']}: {item['content']}" for item in conversation)
+        full_prompt = f"# 会話履歴\n{conversation_text}"
+
+        if not GEMINI_PRO_MODEL:
+            return
+
+        try:
+            # Gemini Proモデルを明示的に指定
+            response = self.session.client.models.generate_content(
+                model=GEMINI_PRO_MODEL,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt),
+                contents=full_prompt
+            )
+            return response.text
+        except Exception as e:
+            print(f"ブログ記事の生成中にエラーが発生しました: {e}")
             return None
 
 if __name__ == "__main__":

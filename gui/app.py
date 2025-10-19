@@ -99,6 +99,7 @@ class GameAssistantApp:
         self.tts_engine = ttk.StringVar(value=self.settings_manager.get("tts_engine", "voicevox"))
         self.disable_thinking_mode = ttk.BooleanVar(value=self.settings_manager.get("disable_thinking_mode", False))
         self.user_name = ttk.StringVar(value=self.settings_manager.get("user_name", "User"))
+        self.create_blog_post = ttk.BooleanVar(value=self.settings_manager.get("create_blog_post", False))
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings_manager.get("twitch_bot_username", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings_manager.get("twitch_client_id", ""))
@@ -250,6 +251,13 @@ class GameAssistantApp:
         user_name_entry.pack(side=LEFT, fill=X, expand=True)
         user_name_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('user_name', self.user_name.get()), self.settings_manager.save(self.settings_manager.settings)))
 
+        self.create_blog_post_check = ttk.Checkbutton(
+            config_frame, text="セッション終了時にブログ記事を作成する", variable=self.create_blog_post,
+            style="success-square-toggle",
+            command=lambda: (self.settings_manager.set('create_blog_post', self.create_blog_post.get()), self.settings_manager.save(self.settings_manager.settings))
+        )
+        self.create_blog_post_check.pack(fill=X, pady=5)
+
         twitch_frame = ttk.Frame(left_frame)
         twitch_frame.pack(fill=X, pady=(0, 15))
         ttk.Label(twitch_frame, text="Twitch Bot", style="inverse-primary").pack(fill=X, pady=(0, 8))
@@ -369,9 +377,42 @@ class GameAssistantApp:
         self.stop_session_button.pack(side=LEFT, padx=5)
 
     def stop_session(self):
-        self.session_manager.stop_session()
+        summary = self.session_manager.stop_session()
         self.stop_session_button.pack_forget()
         self.start_session_button.pack(side=LEFT, padx=5)
+
+        if self.create_blog_post.get():
+            threading.Thread(target=self.generate_and_save_blog_post).start()
+
+    def generate_and_save_blog_post(self):
+        logging.info("ブログ記事の生成を開始します...")
+        try:
+            conversation = self.session_manager.get_session_conversation()
+            if not conversation:
+                logging.warning("ブログ記事の生成をスキップしました。会話がありません。")
+                return
+
+            blog_post = self.gemini_service.generate_blog_post(conversation)
+            if blog_post:
+                if not os.path.exists("blogs"):
+                    os.makedirs("blogs")
+                
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                filepath = os.path.join("blogs", f"{today_str}.md")
+                
+                counter = 1
+                while os.path.exists(filepath):
+                    filepath = os.path.join("blogs", f"{today_str}_{counter}.md")
+                    counter += 1
+
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(blog_post)
+                logging.info(f"ブログ記事を保存しました: {filepath}")
+            else:
+                logging.error("ブログ記事の生成に失敗しました。")
+
+        except Exception as e:
+            logging.error(f"ブログ記事の生成または保存中にエラーが発生しました: {e}", exc_info=True)
 
     def update_device_index(self, event=None):
         selected_device_name = self.selected_device.get()

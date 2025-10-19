@@ -150,6 +150,18 @@ class SessionManager:
         logging.debug("------------------------------------")
         return history
 
+    def get_session_conversation(self) -> list[dict[str, str]]:
+        if not self.session_memory:
+            return []
+        
+        conversation = []
+        for event in self.session_memory.events:
+            if isinstance(event, UserSpeech):
+                conversation.append({"role": "User", "content": event.content})
+            elif isinstance(event, GeminiResponse):
+                conversation.append({"role": "Assistant", "content": event.content})
+        return conversation
+
     def wait_for_hotword_thread(self):
         while not self._stop_event.is_set():
             result = wait_for_keyword(
