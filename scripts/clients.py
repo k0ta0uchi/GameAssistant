@@ -95,7 +95,15 @@ class TwitchTokenManager:
     def __init__(self, collection_name: str = "twitch_tokens"):
         client = get_chroma_client()
         # 型は Any なので get_or_create_collection も Any として扱う
-        self.collection: Any = client.get_or_create_collection(name=collection_name)
+        self.collection: Any = client.get_or_create_collection(
+            name=collection_name,
+            metadata={
+                "hnsw:space": "l2",
+                "hnsw:M": 16,
+                "hnsw:construction_ef": 256,
+                "hnsw:ef": 256
+            }
+        )
 
     def get_all_tokens(self) -> List[Tuple[str, str, str]]:
         """
