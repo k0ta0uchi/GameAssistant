@@ -130,8 +130,6 @@ class MemoryManager:
         """セッションイベントをChromaDBに同期的に保存する"""
         logging.debug(f"ChromaDBへの同期イベント保存を開始: {event_data}")
         try:
-            import uuid
-
             event_id = str(uuid.uuid4())
             content = event_data.get('content', '')
             metadata = {

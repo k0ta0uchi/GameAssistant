@@ -121,7 +121,12 @@ class SessionManager:
                     'content': content,
                     'timestamp': event.timestamp.isoformat()
                 }
-                self.app.db_save_queue.put(event_data)
+                save_task = {
+                    'type': 'save',
+                    'data': event_data,
+                    'future': None
+                }
+                self.app.db_save_queue.put(save_task)
 
     def continuous_recording_thread(self):
         while not self._stop_event.is_set():
@@ -192,7 +197,12 @@ class SessionManager:
                         'content': text,
                         'timestamp': event.timestamp.isoformat()
                     }
-                    self.app.db_save_queue.put(event_data)
+                    save_task = {
+                        'type': 'save',
+                        'data': event_data,
+                        'future': None
+                    }
+                    self.app.db_save_queue.put(save_task)
                     if task.is_prompt:
                         session_history = self.get_session_history()
                         self.app.process_prompt(text, session_history, task.screenshot_path)

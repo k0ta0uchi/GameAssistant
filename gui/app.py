@@ -143,28 +143,41 @@ class GameAssistantApp:
         self.db_worker_thread.start()
 
     def _process_db_save_queue(self):
-        """DB保存キューを処理するワーカー"""
+        """DB関連の全タスクを処理する単一のワーカースレッド"""
         while True:
             try:
-                event_data = self.db_save_queue.get()
-                if event_data is None:
-                    logging.info("DB保存スレッドを終了します。")
+                task = self.db_save_queue.get()
+                if task is None:
+                    logging.info("DBワーカースレッドを終了します。")
                     break
+
+                task_type = task.get('type')
+                future = task.get('future')
+                data = task.get('data')
+
+                try:
+                    if task_type == 'query':
+                        result = self.memory_manager.query_collection(**data)
+                        if future:
+                            future.set_result(result)
+                    
+                    elif task_type == 'summarize_and_save':
+                        self.memory_manager.summarize_and_add_memory(**data)
+                        if future:
+                            future.set_result(True) # 完了を通知
+                    
+                    else: # デフォルトは通常のイベント保存
+                        self.memory_manager.save_event_to_chroma_sync(data)
+                        if future:
+                            future.set_result(True) # 完了を通知
                 
-                task_type = event_data.get('type')
-                if task_type == 'summarize_and_save':
-                    # 要約して保存するタスク
-                    self.memory_manager.summarize_and_add_memory(
-                        prompt=event_data['content'],
-                        user_id=event_data['user_id'],
-                        memory_type=event_data['memory_type']
-                    )
-                else:
-                    # 通常のイベント保存タスク
-                    self.memory_manager.save_event_to_chroma_sync(event_data)
+                except Exception as e:
+                    logging.error(f"DBタスク '{task_type}' の処理中にエラー: {e}", exc_info=True)
+                    if future:
+                        future.set_exception(e)
 
             except Exception as e:
-                logging.error(f"DB保存キューの処理中にエラーが発生しました: {e}", exc_info=True)
+                logging.error(f"DB保存キューのループで予期せぬエラー: {e}", exc_info=True)
 
     def on_closing(self):
         self.cleanup_temp_files()
@@ -747,7 +760,12 @@ class GameAssistantApp:
             'content': self.prompt,
             'timestamp': datetime.now().isoformat()
         }
-        self.db_save_queue.put(user_event_data)
+        user_save_task = {
+            'type': 'save',
+            'data': user_event_data,
+            'future': None
+        }
+        self.db_save_queue.put(user_save_task)
 
         # GeminiレスポンスをDBに保存
         if response:
@@ -757,7 +775,12 @@ class GameAssistantApp:
                 'content': response,
                 'timestamp': datetime.now().isoformat()
             }
-            self.db_save_queue.put(ai_event_data)
+            ai_save_task = {
+                'type': 'save',
+                'data': ai_event_data,
+                'future': None
+            }
+            self.db_save_queue.put(ai_save_task)
 
         if response and self.session_manager.session_memory:
             event = GeminiResponse(content=response)

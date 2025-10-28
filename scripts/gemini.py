@@ -16,6 +16,7 @@ import threading
 import asyncio
 import time
 import logging
+from concurrent.futures import Future
 
 # --- Environment Setup ---
 load_dotenv()
@@ -50,22 +51,19 @@ class GeminiSession:
         if not target_user_id:
             raise ValueError("User ID is not set for the selected privacy level or memory type.")
 
-        # 同期的な要約・保存処理と時間計測
-        try:
-            logging.info("同期的な要約・保存処理を開始します...")
-            start_time = time.time()
-            self.memory_manager.summarize_and_add_memory(
-                prompt=prompt,
-                user_id=target_user_id,
-                memory_type=memory_type
-            )
-            end_time = time.time()
-            duration = end_time - start_time
-            logging.info(f"同期的な要約・保存処理が完了しました。所要時間: {duration:.2f}秒")
-        except Exception as e:
-            logging.error(f"同期的な要約・保存処理中にエラーが発生しました: {e}", exc_info=True)
+        # --- バックグラウンドでの要約・保存タスクをキューに追加 ---
+        summarize_task = {
+            'type': 'summarize_and_save',
+            'future': None, # 結果は待たない
+            'data': {
+                'prompt': prompt,
+                'user_id': target_user_id,
+                'memory_type': memory_type
+            }
+        }
+        self.app.db_save_queue.put(summarize_task)
 
-
+        # --- DBからの過去の会話履歴の取得（タスク依頼） ---
         query_embedding_response = self.client.models.embed_content(
             model=self.embedding_model,
             contents=[prompt],
@@ -73,12 +71,21 @@ class GeminiSession:
         )
         query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
-        results = self.memory_manager.query_collection(
-            query_embeddings=[query_embedding],
-            n_results=5,
-            where={"$and": [{"type": memory_type}, {"user": target_user_id}]}
-        )
+        query_future = Future()
+        query_task = {
+            'type': 'query',
+            'future': query_future,
+            'data': {
+                'query_embeddings': [query_embedding],
+                'n_results': 5,
+                'where': {"$and": [{"type": memory_type}, {"user": target_user_id}]}
+            }
+        }
+        self.app.db_save_queue.put(query_task)
         
+        # DBワーカースレッドからの結果を待つ
+        results = query_future.result() # ブロッキング呼び出し
+
         documents = results.get('documents') if results else None
         if documents and documents[0]:
             memory_text = "\n".join([doc for doc in documents[0] if doc is not None])
@@ -86,6 +93,7 @@ class GeminiSession:
             memory_text = ""
         memory = local_summarizer.summarize(memory_text) if memory_text else ""
 
+        # --- AIへの応答要求 ---
         contents = []
         if image_path:
             try:
@@ -138,38 +146,6 @@ class GeminiSession:
         except Exception as e:
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
-
-    def _run_add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._add_memory_in_background(prompt, user_id, memory_type))
-
-    async def _add_memory_in_background(self, prompt: str, user_id: str, memory_type: str):
-        try:
-            if not prompt.endswith(('?', '？')) and not any(q in prompt for q in ['何', 'どこ', 'いつ', '誰', 'なぜ']):
-                summary = await asyncio.to_thread(local_summarizer.summarize, prompt)
-                if summary and "要約できませんでした" not in summary and "エラーが発生しました" not in summary:
-                    embedding_response = await asyncio.to_thread(
-                        self.client.models.embed_content,
-                        model=self.embedding_model,
-                        contents=[summary],
-                        config=types.EmbedContentConfig(task_type="retrieval_document")
-                    )
-                    if embedding_response and embedding_response.embeddings:
-                        embedding = embedding_response.embeddings[0].values
-                    else:
-                        print(f"メモリーの保存中にEmbeddingの生成に失敗しました: {prompt}")
-                        return
-
-                    self.memory_manager.add_or_update_memory(
-                        key=str(uuid.uuid4()),
-                        value=summary,
-                        type=memory_type,
-                        user=user_id
-                    )
-                    print(f"バックグラウンドでメモリを追加しました: {summary} (type: {memory_type}, user: {user_id})")
-        except Exception as e:
-            print(f"バックグラウンドでのメモリ追加中にエラーが発生しました: {e}")
 
     def generate_speech(self, text: str, voice_name: str = 'Laomedeia'):
         try:
