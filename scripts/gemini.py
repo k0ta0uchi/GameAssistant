@@ -14,6 +14,8 @@ import uuid
 import google.generativeai as genai
 import threading
 import asyncio
+import time
+import logging
 
 # --- Environment Setup ---
 load_dotenv()
@@ -24,10 +26,11 @@ USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
 class GeminiSession:
-    def __init__(self, custom_instruction: str | None = None, settings_manager=None):
+    def __init__(self, app, custom_instruction: str | None = None, settings_manager=None):
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")
 
+        self.app = app
         self.client = get_gemini_client()
         self.settings_manager = settings_manager
         self.disable_thinking_mode = self.settings_manager.get("disable_thinking_mode", False) if self.settings_manager else False
@@ -47,8 +50,21 @@ class GeminiSession:
         if not target_user_id:
             raise ValueError("User ID is not set for the selected privacy level or memory type.")
 
-        thread = threading.Thread(target=self._run_add_memory_in_background, args=(prompt, target_user_id, memory_type))
-        thread.start()
+        # 同期的な要約・保存処理と時間計測
+        try:
+            logging.info("同期的な要約・保存処理を開始します...")
+            start_time = time.time()
+            self.memory_manager.summarize_and_add_memory(
+                prompt=prompt,
+                user_id=target_user_id,
+                memory_type=memory_type
+            )
+            end_time = time.time()
+            duration = end_time - start_time
+            logging.info(f"同期的な要約・保存処理が完了しました。所要時間: {duration:.2f}秒")
+        except Exception as e:
+            logging.error(f"同期的な要約・保存処理中にエラーが発生しました: {e}", exc_info=True)
+
 
         query_embedding_response = self.client.models.embed_content(
             model=self.embedding_model,
@@ -57,7 +73,7 @@ class GeminiSession:
         )
         query_embedding = query_embedding_response.embeddings[0].values # type: ignore
         
-        results = self.memory_manager.collection.query(
+        results = self.memory_manager.query_collection(
             query_embeddings=[query_embedding],
             n_results=5,
             where={"$and": [{"type": memory_type}, {"user": target_user_id}]}
@@ -196,8 +212,8 @@ class GeminiSession:
 
 
 class GeminiService:
-    def __init__(self, custom_instruction, settings_manager):
-        self.session = GeminiSession(custom_instruction, settings_manager)
+    def __init__(self, app, custom_instruction, settings_manager):
+        self.session = GeminiSession(app, custom_instruction, settings_manager)
 
     def ask(self, prompt: str, image_path: Optional[str] = None, is_private: bool = False, memory_type: str = 'local', memory_user_id: Optional[str] = None, session_history: Optional[str] = None) -> Optional[str]:
         if not prompt:

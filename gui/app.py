@@ -109,7 +109,7 @@ class GameAssistantApp:
 
         self.audio_service = AudioService(self)
         self.capture_service = CaptureService(self)
-        self.gemini_service = gemini.GeminiService(self.custom_instruction, self.settings_manager)
+        self.gemini_service = gemini.GeminiService(self, self.custom_instruction, self.settings_manager)
         self.memory_manager = MemoryManager()
         self.twitch_service = TwitchService(self, mention_callback=self.schedule_twitch_mention)
         self.session_manager = SessionManager(self, self.twitch_service)
@@ -150,7 +150,19 @@ class GameAssistantApp:
                 if event_data is None:
                     logging.info("DB保存スレッドを終了します。")
                     break
-                self.memory_manager.save_event_to_chroma_sync(event_data)
+                
+                task_type = event_data.get('type')
+                if task_type == 'summarize_and_save':
+                    # 要約して保存するタスク
+                    self.memory_manager.summarize_and_add_memory(
+                        prompt=event_data['content'],
+                        user_id=event_data['user_id'],
+                        memory_type=event_data['memory_type']
+                    )
+                else:
+                    # 通常のイベント保存タスク
+                    self.memory_manager.save_event_to_chroma_sync(event_data)
+
             except Exception as e:
                 logging.error(f"DB保存キューの処理中にエラーが発生しました: {e}", exc_info=True)
 
@@ -679,7 +691,7 @@ class GameAssistantApp:
                 'content': prompt,
                 'timestamp': datetime.now().isoformat()
             }
-            await self.memory_manager.save_event_to_chroma(event_data)
+            self.db_save_queue.put(event_data)
 
             session_history = None
             if self.session_manager.is_session_active():
@@ -724,6 +736,7 @@ class GameAssistantApp:
                 prompt += "\n\n検索結果:\n" + "\n".join(search_results)
 
         self.prompt = prompt
+        image_path = screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None
         response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
         self.response = response
 
@@ -754,20 +767,33 @@ class GameAssistantApp:
         self.root.after(0, self.update_gui_and_speak, response)
 
     def _setup_logging(self):
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+
         self.log_queue = queue.Queue()
         queue_handler = QueueHandler(self.log_queue)
         
         root_logger = logging.getLogger()
         
+        # 既存のハンドラをすべて削除
         for handler in root_logger.handlers[:]:
             root_logger.removeHandler(handler)
             
+        # 新しいハンドラを設定
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(threadName)s - %(message)s')
+        
+        # StreamHandler (コンソール出力)
         stream_handler = logging.StreamHandler()
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         stream_handler.setFormatter(formatter)
+
+        # FileHandler (ファイル出力)
+        file_handler = logging.FileHandler(os.path.join(log_dir, "app.log"), encoding='utf-8')
+        file_handler.setFormatter(formatter)
 
         root_logger.addHandler(queue_handler)
         root_logger.addHandler(stream_handler)
+        root_logger.addHandler(file_handler)
         root_logger.setLevel(logging.DEBUG)
 
     def _process_log_queue(self):

@@ -1,6 +1,8 @@
 import json
 import logging
 import asyncio
+import uuid
+from . import local_summarizer
 from .clients import get_chroma_client, get_gemini_client
 from google.genai import types
 
@@ -17,13 +19,18 @@ class MemoryAccessError(Exception):
 
 class MemoryManager:
     def __init__(self, collection_name='memories'):
-        self.chroma_client = get_chroma_client()
-        self.gemini_client = get_gemini_client()
-
+        """
+        MemoryManagerを初期化し、ChromaDBとGeminiのクライアントを即座にセットアップする。
+        """
         try:
-            logging.info(f"Getting or creating collection '{collection_name}' with HNSW parameters.")
+            logging.debug("MemoryManagerの初期化を開始します...")
+            self.chroma_client = get_chroma_client()
+            self.gemini_client = get_gemini_client()
+            self.collection_name = collection_name
+
+            logging.info(f"Getting or creating collection '{self.collection_name}' with HNSW parameters.")
             self.collection = self.chroma_client.get_or_create_collection(
-                name=collection_name,
+                name=self.collection_name,
                 metadata={
                     "hnsw:space": "l2",
                     "hnsw:M": 16,
@@ -31,9 +38,9 @@ class MemoryManager:
                     "hnsw:ef": 256
                 }
             )
-            logging.info(f"Collection '{collection_name}' ready.")
+            logging.info(f"コレクションの準備ができました: '{self.collection_name}'")
         except Exception as e:
-            logging.critical(f"Failed to get or create collection '{collection_name}': {e}", exc_info=True)
+            logging.critical(f"MemoryManagerの初期化中に致命的なエラーが発生しました: {e}", exc_info=True)
             raise
 
     def get_all_memories(self):
@@ -119,44 +126,6 @@ class MemoryManager:
             logging.error(f"メモリーの削除中にエラーが発生しました: {e}", exc_info=True)
             return False
 
-    async def save_event_to_chroma(self, event_data: dict) -> None:
-        """セッションイベントをChromaDBに直接保存する"""
-        logging.debug(f"ChromaDBへのイベント保存を開始: {event_data}")
-        try:
-            import uuid
-
-            event_id = str(uuid.uuid4())
-            content = event_data.get('content', '')
-            metadata = {
-                'type': event_data.get('type'),
-                'source': event_data.get('source'),
-                'timestamp': event_data.get('timestamp')
-            }
-
-            embedding_model = "models/embedding-001"
-            
-            embedding_response = await genai_async.embed_content_async(
-                model=embedding_model,
-                content=content,
-                task_type="retrieval_document"
-            )
-
-            if not (embedding_response and embedding_response.get('embedding')):
-                logging.error(f"イベントのEmbedding生成に失敗しました: {event_id}")
-                return
-            embedding = embedding_response['embedding']
-
-            await asyncio.to_thread(
-                self.collection.upsert,
-                ids=[event_id],
-                embeddings=[embedding],
-                documents=[content],
-                metadatas=[metadata]
-            )
-            logging.debug(f"ChromaDBへのイベント保存に成功しました: {event_id}")
-        except Exception as e:
-            logging.error(f"ChromaDBへのイベント保存に失敗しました: {e}", exc_info=True)
-
     def save_event_to_chroma_sync(self, event_data: dict) -> None:
         """セッションイベントをChromaDBに同期的に保存する"""
         logging.debug(f"ChromaDBへの同期イベント保存を開始: {event_data}")
@@ -193,3 +162,36 @@ class MemoryManager:
             logging.debug(f"ChromaDBへの同期イベント保存に成功しました: {event_id}")
         except Exception as e:
             logging.error(f"ChromaDBへの同期イベント保存に失敗しました: {e}", exc_info=True)
+
+    def query_collection(self, query_texts=None, query_embeddings=None, n_results=5, where=None):
+        """コレクションに対してクエリを実行する"""
+        try:
+            # テキストとエンベディングのどちらか一方が提供されていることを確認
+            if (query_texts is None and query_embeddings is None) or (query_texts is not None and query_embeddings is not None):
+                raise ValueError("query_textsまたはquery_embeddingsのどちらか一方を指定する必要があります。")
+            
+            return self.collection.query(query_texts=query_texts, query_embeddings=query_embeddings, n_results=n_results, where=where)
+        except Exception as e:
+            logging.error(f"コレクションのクエリ中にエラーが発生しました: {e}", exc_info=True)
+            return None
+
+    def summarize_and_add_memory(self, prompt: str, user_id: str, memory_type: str):
+        """プロンプトを要約し、メモリに追加する"""
+        try:
+            # 質問形式のプロンプトは要約・保存しない
+            if prompt.endswith(('?', '？')) or any(q in prompt for q in ['何', 'どこ', 'いつ', '誰', 'なぜ']):
+                return
+
+            logging.debug(f"プロンプトの要約を開始: {prompt}")
+            summary = local_summarizer.summarize(prompt)
+
+            if summary and "要約できませんでした" not in summary and "エラーが発生しました" not in summary:
+                self.add_or_update_memory(
+                    key=str(uuid.uuid4()),
+                    value=summary,
+                    type=memory_type,
+                    user=user_id
+                )
+                logging.info(f"要約されたメモリを追加しました: {summary} (type: {memory_type}, user: {user_id})")
+        except Exception as e:
+            logging.error(f"要約メモリの追加中にエラーが発生しました: {e}", exc_info=True)

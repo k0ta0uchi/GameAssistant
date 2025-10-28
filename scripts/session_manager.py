@@ -91,7 +91,7 @@ class SessionManager:
             if summary:
                 self.app.memory_manager.add_or_update_memory(self.session_memory.session_id, summary, type='session_summary')
 
-    async def handle_twitch_message(self, message: Union[TwitchChatMessage, object]):
+    def handle_twitch_message(self, message: Union[TwitchChatMessage, object]):
         logging.debug(f"handle_twitch_message received: {message}")
         if self.session_memory:
             author_name = ""
@@ -121,7 +121,7 @@ class SessionManager:
                     'content': content,
                     'timestamp': event.timestamp.isoformat()
                 }
-                await self.app.memory_manager.save_event_to_chroma(event_data)
+                self.app.db_save_queue.put(event_data)
 
     def continuous_recording_thread(self):
         while not self._stop_event.is_set():
@@ -192,12 +192,7 @@ class SessionManager:
                         'content': text,
                         'timestamp': event.timestamp.isoformat()
                     }
-                    if self.app.twitch_service.twitch_bot_loop:
-                        import asyncio
-                        asyncio.run_coroutine_threadsafe(
-                            self.app.memory_manager.save_event_to_chroma(event_data),
-                            self.app.twitch_service.twitch_bot_loop
-                        )
+                    self.app.db_save_queue.put(event_data)
                     if task.is_prompt:
                         session_history = self.get_session_history()
                         self.app.process_prompt(text, session_history, task.screenshot_path)
