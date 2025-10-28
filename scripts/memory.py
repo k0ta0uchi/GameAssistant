@@ -156,3 +156,40 @@ class MemoryManager:
             logging.debug(f"ChromaDBへのイベント保存に成功しました: {event_id}")
         except Exception as e:
             logging.error(f"ChromaDBへのイベント保存に失敗しました: {e}", exc_info=True)
+
+    def save_event_to_chroma_sync(self, event_data: dict) -> None:
+        """セッションイベントをChromaDBに同期的に保存する"""
+        logging.debug(f"ChromaDBへの同期イベント保存を開始: {event_data}")
+        try:
+            import uuid
+
+            event_id = str(uuid.uuid4())
+            content = event_data.get('content', '')
+            metadata = {
+                'type': event_data.get('type'),
+                'source': event_data.get('source'),
+                'timestamp': event_data.get('timestamp')
+            }
+
+            embedding_model = "models/embedding-001"
+            
+            embedding_response = self.gemini_client.models.embed_content(
+                model=embedding_model,
+                contents=[content],
+                config=types.EmbedContentConfig(task_type="retrieval_document")
+            )
+
+            if not (embedding_response and embedding_response.embeddings):
+                logging.error(f"同期イベントのEmbedding生成に失敗しました: {event_id}")
+                return
+            embedding = embedding_response.embeddings[0].values
+
+            self.collection.upsert(
+                ids=[event_id],
+                embeddings=[embedding],
+                documents=[content],
+                metadatas=[metadata]
+            )
+            logging.debug(f"ChromaDBへの同期イベント保存に成功しました: {event_id}")
+        except Exception as e:
+            logging.error(f"ChromaDBへの同期イベント保存に失敗しました: {e}", exc_info=True)

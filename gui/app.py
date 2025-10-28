@@ -138,8 +138,27 @@ class GameAssistantApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
+        self.db_save_queue = queue.Queue()
+        self.db_worker_thread = threading.Thread(target=self._process_db_save_queue, daemon=True)
+        self.db_worker_thread.start()
+
+    def _process_db_save_queue(self):
+        """DB保存キューを処理するワーカー"""
+        while True:
+            try:
+                event_data = self.db_save_queue.get()
+                if event_data is None:
+                    logging.info("DB保存スレッドを終了します。")
+                    break
+                self.memory_manager.save_event_to_chroma_sync(event_data)
+            except Exception as e:
+                logging.error(f"DB保存キューの処理中にエラーが発生しました: {e}", exc_info=True)
+
     def on_closing(self):
         self.cleanup_temp_files()
+        # DB保存スレッドを終了
+        self.db_save_queue.put(None)
+        self.db_worker_thread.join()
         self.root.destroy()
 
     def cleanup_temp_files(self):
@@ -705,10 +724,27 @@ class GameAssistantApp:
                 prompt += "\n\n検索結果:\n" + "\n".join(search_results)
 
         self.prompt = prompt
-        image_path = screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None
-        
         response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
         self.response = response
+
+        # ユーザープロンプトをDBに保存
+        user_event_data = {
+            'type': 'user_prompt',
+            'source': self.user_name.get(),
+            'content': self.prompt,
+            'timestamp': datetime.now().isoformat()
+        }
+        self.db_save_queue.put(user_event_data)
+
+        # GeminiレスポンスをDBに保存
+        if response:
+            ai_event_data = {
+                'type': 'ai_response',
+                'source': 'AI',
+                'content': response,
+                'timestamp': datetime.now().isoformat()
+            }
+            self.db_save_queue.put(ai_event_data)
 
         if response and self.session_manager.session_memory:
             event = GeminiResponse(content=response)
