@@ -8,6 +8,8 @@ user32,gdi32 = windll.user32,windll.gdi32
 PW_RENDERFULLCONTENT = 2
 
 import threading
+import mss
+import mss.tools
 from PIL import Image, ImageTk
 
 def getWindowBMAP(hwnd,returnImage=False):
@@ -50,18 +52,34 @@ def getSnapshot(hwnd): # get Window HBITMAP as Image
     hbmp,w,h,img = getWindowBMAP(hwnd,True); gdi32.DeleteObject(hbmp); return img
 
 def capture_screen(window, output_file="screenshot.png"):
-    screenshot = None
     hwnd = win32gui.FindWindow(None, window.title)
+    if not hwnd:
+        print(f"ウィンドウが見つかりません: {window.title}")
+        return None
 
-    # ウィンドウのスクリーンショットを取得
-    screenshot = getSnapshot(hwnd)
+    try:
+        with mss.mss() as sct:
+            # ウィンドウの座標を取得 (クライアント領域ではなくウィンドウ全体)
+            rect = win32gui.GetWindowRect(hwnd)
+            monitor = {"top": rect[1], "left": rect[0], "width": rect[2] - rect[0], "height": rect[3] - rect[1]}
+            
+            if monitor["width"] <= 0 or monitor["height"] <= 0:
+                print(f"無効なウィンドウサイズです: {monitor}")
+                return None
 
-    # 取得した画像を保存
-    # screenshot_img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-    screenshot.save(output_file)
-
-    print(f"スクリーンショットが保存されました: {output_file}")
-    return screenshot
+            # スクリーンショットを撮る
+            sct_img = sct.grab(monitor)
+            
+            # PIL Imageに変換して保存
+            mss.tools.to_png(sct_img.rgb, sct_img.size, output=output_file)
+            
+            print(f"スクリーンショットが保存されました (mss使用): {output_file}")
+            # 保存した画像を読み込んで返す
+            return Image.open(output_file)
+            
+    except Exception as e:
+        print(f"mssでのスクリーンショット取得に失敗しました: {e}")
+        return None
 
 def list_available_windows():
     """現在開かれているウィンドウのタイトルリストを取得する"""

@@ -19,3 +19,4 @@ playwright
 sounddevice
 twitchio==3.1.0
 pvporcupine
+mss
