@@ -143,7 +143,9 @@ class TwitchBot(commands.Bot):
     async def event_message(self, message: twitchio.ChatMessage) -> None:
         logging.debug(f"Twitchメッセージ受信: {message.chatter.name if message.chatter else 'Unknown'}: {message.text}")
         if self.message_callback:
-            await self.message_callback(message)
+            result = self.message_callback(message)
+            if inspect.isawaitable(result):
+                await result
         await super().event_message(message) # type: ignore
         if self.mention_callback and self.nick and (f"@{self.nick.lower()}" in message.text.lower() or "ねえぐり" in message.text):
             prompt = message.text
