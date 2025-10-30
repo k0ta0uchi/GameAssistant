@@ -278,6 +278,8 @@ class AudioService:
         self.stop_event = threading.Event()
         self.recording_thread = None
         self.record_waiting_thread = None
+        self.stop_word_monitor_thread = None
+        self.stop_word_event = threading.Event()
 
     def toggle_recording(self):
         if self.app.device_index is None:
@@ -386,3 +388,77 @@ class AudioService:
             logging.warning("マイクが選択されていません。")
             return None
         return record_audio_chunk(device_index=self.app.device_index, duration=duration, audio_file_path=audio_file_path, update_callback=update_callback)
+
+    def start_monitoring_stop_word(self):
+        if self.app.device_index is None:
+            logging.warning("録音デバイスが選択されていません。")
+            return
+        if self.stop_word_monitor_thread is None or not self.stop_word_monitor_thread.is_alive():
+            self.stop_word_event.clear()
+            self.stop_word_monitor_thread = threading.Thread(target=self.monitor_for_stop_word)
+            self.stop_word_monitor_thread.daemon = True
+            self.stop_word_monitor_thread.start()
+            logging.info("TTS再生中の「ストップ」キーワード監視を開始しました。")
+
+    def stop_monitoring_stop_word(self):
+        if self.stop_word_monitor_thread and self.stop_word_monitor_thread.is_alive():
+            self.stop_word_event.set()
+            self.stop_word_monitor_thread.join(timeout=1.0) # タイムアウトを設定
+            logging.info("TTS再生中の「ストップ」キーワード監視を停止しました。")
+        self.stop_word_monitor_thread = None
+
+    def monitor_for_stop_word(self):
+        """Porcupineを使用して「ストップ」キーワードを監視する"""
+        porcupine = None
+        stream = None
+        try:
+            stop_keyword_path = 'porcupine/ストップ_ja_windows_v3_0_0.ppn'
+            if not os.path.exists(stop_keyword_path):
+                logging.error(f"ストップキーワードファイルが見つかりません: {stop_keyword_path}")
+                return
+
+            porcupine = pvporcupine.create(
+                access_key=ACCESS_KEY,
+                keyword_paths=[stop_keyword_path],
+                model_path=MODEL_FILE_PATH
+            )
+
+            stream = p.open(
+                rate=porcupine.sample_rate,
+                channels=1,
+                format=pyaudio.paInt16,
+                input=True,
+                frames_per_buffer=porcupine.frame_length,
+                input_device_index=self.app.device_index
+            )
+
+            logging.info("「ストップ」を待機中...")
+            
+            while not self.stop_word_event.is_set():
+                try:
+                    pcm = stream.read(porcupine.frame_length, exception_on_overflow=False)
+                    pcm = struct.unpack_from("h" * porcupine.frame_length, pcm)
+
+                    keyword_index = porcupine.process(pcm)
+                    if keyword_index >= 0:
+                        logging.info("「ストップ」キーワード検出！音声再生を停止します。")
+                        voice.request_stop_playback()
+                        # 検出後、このスレッドは役目を終えるので自ら終了する
+                        break
+                except IOError as e:
+                    # [Errno -9981] Input overflowed
+                    if e.errno == -9981:
+                        logging.warning("Porcupine監視中のオーバーフローを無視します。")
+                        continue
+                    else:
+                        raise
+
+        except Exception as e:
+            logging.error(f"Porcupine(ストップ)初期化または待機中にエラー: {e}", exc_info=True)
+        finally:
+            if stream:
+                stream.stop_stream()
+                stream.close()
+            if porcupine:
+                porcupine.delete()
+            logging.info("「ストップ」監視をクリーンアップしました。")

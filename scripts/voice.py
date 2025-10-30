@@ -1,6 +1,13 @@
 import requests
 import json
 import wave
+import threading
+
+stop_playback_event = threading.Event()
+
+def request_stop_playback():
+    """音声再生の停止をリクエストする。"""
+    stop_playback_event.set()
 import io
 import pyaudio
 import urllib.parse
@@ -112,10 +119,12 @@ def text_to_speech_kokoro(text):
 def play_wav_data(wav_data):
     """
     WAVデータを再生する。
+    再生中に stop_playback_event がセットされたら停止する。
 
     Args:
         wav_data (bytes): WAVデータ。
     """
+    stop_playback_event.clear()  # 再生開始時に停止フラグをリセット
     try:
         wf = wave.open(io.BytesIO(wav_data), 'rb')
         p = pyaudio.PyAudio()
@@ -128,6 +137,9 @@ def play_wav_data(wav_data):
         data = wf.readframes(1024)
 
         while data:
+            if stop_playback_event.is_set():
+                print("音声再生を中断しました。")
+                break
             stream.write(data)
             data = wf.readframes(1024)
 

@@ -585,20 +585,29 @@ class GameAssistantApp:
                 return
 
             def play_audio_sequence():
-                # TTSを並列実行して音声データを取得
-                with ThreadPoolExecutor() as executor:
-                    futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
-                    wav_datas = [future.result() for future in futures]
+                try:
+                    # TTSを並列実行して音声データを取得
+                    with ThreadPoolExecutor() as executor:
+                        futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
+                        wav_datas = [future.result() for future in futures]
 
-                # 順番に再生
-                for wav_data in wav_datas:
-                    if wav_data:
-                        voice.play_wav_data(wav_data)
+                    # 順番に再生
+                    for wav_data in wav_datas:
+                        if wav_data:
+                            # 再生前に停止フラグが立っていたら、以降の再生を中止
+                            if voice.stop_playback_event.is_set():
+                                logging.info("再生が中断されたため、後続の再生をスキップします。")
+                                break
+                            voice.play_wav_data(wav_data)
+                        
+                finally:
+                    # 再生が終了または中断したら、必ず監視を停止する
+                    self.audio_service.stop_monitoring_stop_word()
+                    # GUIの更新をメインスレッドで実行
+                    self.root.after(0, self.finalize_response_processing)
 
-                # GUIの更新をメインスレッドで実行
-                self.root.after(0, self.finalize_response_processing)
-
-            # 再生処理を別スレッドで実行
+            # 再生処理を別スreadで実行
+            self.audio_service.start_monitoring_stop_word()
             threading.Thread(target=play_audio_sequence).start()
 
     def finalize_response_processing(self):
@@ -635,20 +644,29 @@ class GameAssistantApp:
             return
 
         def play_audio_sequence():
-            # TTSを並列実行して音声データを取得
-            with ThreadPoolExecutor() as executor:
-                futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
-                wav_datas = [future.result() for future in futures]
+            try:
+                # TTSを並列実行して音声データを取得
+                with ThreadPoolExecutor() as executor:
+                    futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
+                    wav_datas = [future.result() for future in futures]
 
-            # 順番に再生
-            for wav_data in wav_datas:
-                if wav_data:
-                    voice.play_wav_data(wav_data)
+                # 順番に再生
+                for wav_data in wav_datas:
+                    if wav_data:
+                        # 再生前に停止フラグが立っていたら、以降の再生を中止
+                        if voice.stop_playback_event.is_set():
+                            logging.info("再生が中断されたため、後続の再生をスキップします。")
+                            break
+                        voice.play_wav_data(wav_data)
 
-            # GUIの更新をメインスレッドで実行
-            self.root.after(0, self.finalize_response_processing)
+            finally:
+                # 再生が終了または中断したら、必ず監視を停止する
+                self.audio_service.stop_monitoring_stop_word()
+                # GUIの更新をメインスレッドで実行
+                self.root.after(0, self.finalize_response_processing)
 
         # 再生処理を別スレッドで実行
+        self.audio_service.start_monitoring_stop_word()
         threading.Thread(target=play_audio_sequence).start()
 
     def finalize_response_processing(self):
