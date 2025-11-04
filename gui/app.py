@@ -428,10 +428,12 @@ class GameAssistantApp:
         if self.create_blog_post.get():
             threading.Thread(target=self.generate_and_save_blog_post).start()
 
-    def generate_and_save_blog_post(self):
+    def generate_and_save_blog_post(self, conversation=None):
         logging.info("ブログ記事の生成を開始します...")
         try:
-            conversation = self.session_manager.get_session_conversation()
+            if conversation is None:
+                conversation = self.session_manager.get_session_conversation()
+            
             if not conversation:
                 logging.warning("ブログ記事の生成をスキップしました。会話がありません。")
                 return
@@ -685,7 +687,7 @@ class GameAssistantApp:
 
     def open_memory_window(self):
         """メモリー管理ウィンドウを開く"""
-        MemoryWindow(self.root, self.memory_manager)
+        MemoryWindow(self.root, self, self.memory_manager, self.gemini_service)
 
     def show_gemini_response(self, response_text):
         if self.show_response_in_new_window.get():

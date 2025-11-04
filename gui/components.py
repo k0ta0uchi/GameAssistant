@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, font, END, LEFT, X, BOTH, Y, RIGHT
 import json
 from datetime import datetime
+import threading
 
 
 class OutputRedirector:
@@ -67,10 +68,11 @@ class GeminiResponseWindow(tk.Toplevel):
 
 
 class MemoryWindow(tk.Toplevel):
-    def __init__(self, parent, memory_manager):
+    def __init__(self, parent, app, memory_manager, gemini_service):
         super().__init__(parent)
-        self.parent = parent
+        self.app = app
         self.memory_manager = memory_manager
+        self.gemini_service = gemini_service
         self.title("メモリー管理")
         self.geometry("1000x600")
 
@@ -85,7 +87,7 @@ class MemoryWindow(tk.Toplevel):
         left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
 
         columns = ("timestamp", "key", "type", "user", "comment")
-        self.memory_listbox = ttk.Treeview(left_frame, columns=columns, show="headings")
+        self.memory_listbox = ttk.Treeview(left_frame, columns=columns, show="headings", selectmode="extended")
         
         self.memory_listbox.heading("timestamp", text="タイムスタンプ", command=lambda: self.sort_column("timestamp", False))
         self.memory_listbox.heading("key", text="キー", command=lambda: self.sort_column("key", False))
@@ -134,6 +136,9 @@ class MemoryWindow(tk.Toplevel):
 
         delete_button = ttk.Button(button_frame, text="削除", command=self.delete_memory, style="danger.TButton")
         delete_button.pack(side=LEFT, expand=True, fill=X)
+
+        generate_blog_button = ttk.Button(button_frame, text="ブログ生成", command=self.generate_blog_from_selection, style="info.TButton")
+        generate_blog_button.pack(fill=X, pady=(5, 0))
 
     def sort_column(self, col, reverse):
         l = [(self.memory_listbox.set(k, col), k) for k in self.memory_listbox.get_children('')]
@@ -195,8 +200,9 @@ class MemoryWindow(tk.Toplevel):
         if not selected_items:
             return
         
-        selected_item = self.memory_listbox.item(selected_items[0])
-        values = selected_item['values']
+        # 複数選択されている場合でも、最初のアイテムを詳細欄に表示
+        first_item = self.memory_listbox.item(selected_items[0])
+        values = first_item['values']
         
         display_ts, key, type_val, user_val, comment = values
 
@@ -215,6 +221,33 @@ class MemoryWindow(tk.Toplevel):
         
         self.comment_text.delete("1.0", END)
         self.comment_text.insert("1.0", comment)
+
+    def generate_blog_from_selection(self):
+        selected_items = self.memory_listbox.selection()
+        if not selected_items:
+            print("ブログを生成するメモリーが選択されていません。")
+            return
+
+        conversation_parts = []
+        for item_id in selected_items:
+            item = self.memory_listbox.item(item_id)
+            values = item['values']
+            timestamp, _, type_val, user, comment = values
+
+            if type_val in ['user_prompt', 'ai_response']:
+                # タイムスタンプとユーザー情報を使って会話形式の文字列を作成
+                conversation_parts.append(f"{user} ({timestamp}):\n{comment}")
+        
+        if not conversation_parts:
+            print("ブログを生成するための会話が見つかりませんでした。（user_promptまたはai_responseタイプのメモリを選択してください）")
+            return
+
+        conversation = "\n\n".join(conversation_parts)
+
+        # GameAssistantAppのブログ生成・保存メソッドを呼び出す
+        # スレッドで実行してGUIが固まらないようにする
+        threading.Thread(target=self.app.generate_and_save_blog_post, args=(conversation,)).start()
+
 
     def save_memory(self):
         key = self.key_entry.get()

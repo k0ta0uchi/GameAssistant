@@ -212,7 +212,7 @@ class GeminiService:
             print(f"セッションの要約中にエラーが発生しました: {e}")
             return None
 
-    def generate_blog_post(self, conversation: list[dict[str, str]]) -> Optional[str]:
+    def generate_blog_post(self, conversation: list[dict[str, str]] | str) -> Optional[str]:
         if not conversation:
             return None
 
@@ -240,7 +240,14 @@ class GeminiService:
 それでは、以下の会話履歴を元に、最高のゲームレビュー記事を作成してください。
 """
 
-        conversation_text = "\n".join(f"- {item['role']}: {item['content']}" for item in conversation)
+        if isinstance(conversation, str):
+            conversation_text = conversation
+        elif isinstance(conversation, list):
+            conversation_text = "\n".join(f"- {item['role']}: {item['content']}" for item in conversation)
+        else:
+            logging.error(f"予期しない会話の型: {type(conversation)}")
+            return None
+
         full_prompt = f"# 会話履歴\n{conversation_text}"
 
         if not GEMINI_PRO_MODEL:
