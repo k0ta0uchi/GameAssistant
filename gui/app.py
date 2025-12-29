@@ -142,6 +142,36 @@ class GameAssistantApp:
         self.db_worker_thread = threading.Thread(target=self._process_db_save_queue, daemon=True)
         self.db_worker_thread.start()
 
+        self.tts_queue = queue.Queue()
+        self.tts_worker_thread = threading.Thread(target=self._tts_worker, daemon=True)
+        self.tts_worker_thread.start()
+
+        self.current_response_window = None
+
+    def _tts_worker(self):
+        """音声合成と再生を順次処理するワーカースレッド"""
+        while True:
+            item = self.tts_queue.get()
+            if item is None:
+                break
+            
+            sentence = item
+            try:
+                # 再生中断フラグが立っていたらキューをクリアするかスキップ
+                if voice.stop_playback_event.is_set():
+                    logging.info(f"再生中断中のためスキップ: {sentence}")
+                    continue
+
+                logging.info(f"TTS生成開始: {sentence}")
+                wav_data = voice.generate_speech_data(sentence)
+                if wav_data:
+                    if not voice.stop_playback_event.is_set():
+                        voice.play_wav_data(wav_data)
+            except Exception as e:
+                logging.error(f"TTSワーカーでエラー: {e}")
+            finally:
+                self.tts_queue.task_done()
+
     def _process_db_save_queue(self):
         """DB関連の全タスクを処理する単一のワーカースレッド"""
         while True:
@@ -524,32 +554,92 @@ class GameAssistantApp:
             logging.error(f"音声認識エラー: {e}", exc_info=True)
             return None
 
+    def execute_gemini_interaction(self, prompt, image_path, session_history):
+        """Geminiとの対話をストリーミングで実行し、表示・音声・保存を行う。"""
+        logging.info(f"Gemini対話開始: {prompt}")
+        
+        # ユーザープロンプトをDBに保存
+        user_event_data = {
+            'type': 'user_prompt',
+            'source': self.user_name.get(),
+            'content': prompt,
+            'timestamp': datetime.now().isoformat()
+        }
+        self.db_save_queue.put({'type': 'save', 'data': user_event_data, 'future': None})
+
+        # 応答表示の準備
+        full_response = ""
+        voice.stop_playback_event.clear()
+        self.audio_service.start_monitoring_stop_word()
+        
+        # チャットログへの表示（初期空文字）
+        if not self.show_response_in_new_window.get():
+            self.root.after(0, lambda: self._update_log_with_partial_response("Gemini: ", is_start=True))
+
+        try:
+            # ストリーミング開始
+            stream = self.gemini_service.ask_stream(prompt, image_path, self.is_private.get(), session_history=session_history)
+            
+            # 文割ジェネレータ
+            for sentence in gemini.split_into_sentences(stream):
+                if voice.stop_playback_event.is_set():
+                    logging.info("ユーザーによる中断を検知しました。")
+                    break
+                
+                full_response += sentence
+                
+                # GUI更新
+                self.root.after(0, self.show_gemini_response, full_response)
+                if not self.show_response_in_new_window.get():
+                    self.root.after(0, lambda s=sentence: self._update_log_with_partial_response(s))
+                
+                # TTSキューへ投入
+                self.tts_queue.put(sentence)
+
+            # 最終的な応答をDBに保存
+            if full_response:
+                ai_event_data = {
+                    'type': 'ai_response',
+                    'source': 'AI',
+                    'content': full_response,
+                    'timestamp': datetime.now().isoformat()
+                }
+                self.db_save_queue.put({'type': 'save', 'data': ai_event_data, 'future': None})
+                
+                if self.session_manager.session_memory:
+                    event = GeminiResponse(content=full_response)
+                    self.session_manager.session_memory.events.append(event)
+
+                # ウィンドウの自動終了タイマーを開始（ストリーミング終了後）
+                self.root.after(0, lambda: self.show_gemini_response(full_response, auto_close=True))
+
+        except Exception as e:
+            logging.error(f"Gemini対話中にエラー: {e}", exc_info=True)
+        finally:
+            self.audio_service.stop_monitoring_stop_word()
+            self.root.after(0, self.finalize_response_processing)
+
+    def _update_log_with_partial_response(self, text, is_start=False):
+        self.log_textbox.config(state="normal")
+        if is_start:
+            self.log_textbox.insert(END, "\n" + text)
+        else:
+            self.log_textbox.insert(END, text)
+        self.log_textbox.see(END)
+        self.log_textbox.config(state="disabled")
+
     def process_and_respond(self, from_temporary_stop=False):
         prompt = self.transcribe_audio()
 
         if prompt and ("まて" in prompt or "待て" in prompt):
             logging.info("キャンセルワードを検出しました。処理を中断し、待機モードに戻ります。")
             voice.play_wav_file("wav/nod/5.wav")
-            def enable_buttons():
-                self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-                self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
-                if self.audio_service.record_waiting:
-                    self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-                    self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
-                    self.audio_service.record_waiting_thread.start()
-            self.root.after(0, enable_buttons)
+            self.root.after(0, self.reset_buttons_after_cancel)
             return
 
         if not prompt:
             logging.info("プロンプトが空のため、処理を中断します。")
-            def enable_buttons():
-                self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-                self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
-                if self.audio_service.record_waiting:
-                    self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-                    self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
-                    self.audio_service.record_waiting_thread.start()
-            self.root.after(0, enable_buttons)
+            self.root.after(0, self.reset_buttons_after_cancel)
             return
 
         if "検索" in prompt or "けんさく" in prompt:
@@ -558,118 +648,36 @@ class GameAssistantApp:
             if search_results:
                 prompt += "\n\n検索結果:\n" + "\n".join(search_results)
 
-        self.prompt = prompt
         image_path = self.screenshot_file_path if self.use_image.get() and os.path.exists(self.screenshot_file_path) else None
-        
-        session_history = None
-        if self.session_manager.is_session_active():
-            logging.debug("Session is active, getting history.")
-            session_history = self.session_manager.get_session_history()
+        session_history = self.session_manager.get_session_history() if self.session_manager.is_session_active() else None
 
-        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
-        self.response = response
+        threading.Thread(target=self.execute_gemini_interaction, args=(prompt, image_path, session_history)).start()
 
-        def update_gui_and_speak(response_text):
-            if self.show_response_in_new_window.get():
-                if response_text:
-                    self.show_gemini_response(response_text)
-            else:
-                if response_text:
-                    self.log_textbox.config(state="normal")
-                    self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
-                    self.log_textbox.see(END)
-                    self.log_textbox.config(state="disabled")
-
-            # レスポンスを文に分割
-            sentences = [s.strip() for s in re.split(r'(?<=[。！？])', response_text) if s.strip()]
-            if not sentences:
-                self.root.after(0, self.finalize_response_processing)
-                return
-
-            def play_audio_sequence():
-                try:
-                    # TTSを並列実行して音声データを取得
-                    with ThreadPoolExecutor() as executor:
-                        futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
-                        wav_datas = [future.result() for future in futures]
-
-                    # 順番に再生
-                    for wav_data in wav_datas:
-                        if wav_data:
-                            # 再生前に停止フラグが立っていたら、以降の再生を中止
-                            if voice.stop_playback_event.is_set():
-                                logging.info("再生が中断されたため、後続の再生をスキップします。")
-                                break
-                            voice.play_wav_data(wav_data)
-                        
-                finally:
-                    # 再生が終了または中断したら、必ず監視を停止する
-                    self.audio_service.stop_monitoring_stop_word()
-                    # GUIの更新をメインスレッドで実行
-                    self.root.after(0, self.finalize_response_processing)
-
-            # 再生処理を別スreadで実行
-            self.audio_service.start_monitoring_stop_word()
-            threading.Thread(target=play_audio_sequence).start()
-
-    def finalize_response_processing(self):
-        if os.path.exists(self.audio_file_path):
-            os.remove(self.audio_file_path)
-        if os.path.exists(self.screenshot_file_path):
-            os.remove(self.screenshot_file_path)
+    def reset_buttons_after_cancel(self):
+        self.record_button.config(text="録音開始", style="success.TButton", state="normal")
+        self.record_wait_button.config(text="録音待機", style="success.TButton", state="normal")
         if self.audio_service.record_waiting:
             self.record_wait_button.config(text="録音待機中", style="danger.TButton")
             self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
             self.audio_service.record_waiting_thread.start()
-        self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-        self.record_wait_button.config(text="normal")
-        if not self.audio_service.record_waiting:
-            self.record_wait_button.config(text="録音待機", style="success.TButton")
 
-        self.root.after(0, self.update_gui_and_speak, response)
-
-    def update_gui_and_speak(self, response_text):
-        if self.show_response_in_new_window.get():
-            if response_text:
-                self.show_gemini_response(response_text)
-        else:
-            if response_text:
-                self.log_textbox.config(state="normal")
-                self.log_textbox.insert(END, "Geminiの回答: " + response_text + "\n")
-                self.log_textbox.see(END)
-                self.log_textbox.config(state="disabled")
-
-        # レスポンスを文に分割
-        sentences = [s.strip() for s in re.split(r'(?<=[。！？])', response_text) if s.strip()]
-        if not sentences:
-            self.root.after(0, self.finalize_response_processing)
+    def process_prompt_thread(self, prompt, session_history, screenshot_path=None):
+        if prompt and ("まて" in prompt or "待て" in prompt):
+            logging.info("キャンセルワードを検出しました。処理を中断します。")
+            voice.play_wav_file("wav/nod/5.wav")
             return
 
-        def play_audio_sequence():
-            try:
-                # TTSを並列実行して音声データを取得
-                with ThreadPoolExecutor() as executor:
-                    futures = [executor.submit(voice.generate_speech_data, sentence) for sentence in sentences]
-                    wav_datas = [future.result() for future in futures]
+        if not prompt:
+            logging.info("プロンプトが空のため、処理を中断します。")
+            return
 
-                # 順番に再生
-                for wav_data in wav_datas:
-                    if wav_data:
-                        # 再生前に停止フラグが立っていたら、以降の再生を中止
-                        if voice.stop_playback_event.is_set():
-                            logging.info("再生が中断されたため、後続の再生をスキップします。")
-                            break
-                        voice.play_wav_data(wav_data)
+        if "検索" in prompt or "けんさく" in prompt:
+            search_keyword = prompt
+            search_results = asyncio.run(self.run_ai_search(search_keyword))
+            if search_results:
+                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
 
-            finally:
-                # 再生が終了または中断したら、必ず監視を停止する
-                self.audio_service.stop_monitoring_stop_word()
-                # GUIの更新をメインスレッドで実行
-                self.root.after(0, self.finalize_response_processing)
-
-        # 再生処理を別スレッドで実行
-        self.audio_service.start_monitoring_stop_word()
-        threading.Thread(target=play_audio_sequence).start()
+        self.execute_gemini_interaction(prompt, screenshot_path, session_history)
 
     def finalize_response_processing(self):
         if os.path.exists(self.audio_file_path):
@@ -681,7 +689,7 @@ class GameAssistantApp:
             self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
             self.audio_service.record_waiting_thread.start()
         self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-        self.record_wait_button.config(text="normal")
+        self.record_wait_button.config(state="normal")
         if not self.audio_service.record_waiting:
             self.record_wait_button.config(text="録音待機", style="success.TButton")
 
@@ -689,12 +697,18 @@ class GameAssistantApp:
         """メモリー管理ウィンドウを開く"""
         MemoryWindow(self.root, self, self.memory_manager, self.gemini_service)
 
-    def show_gemini_response(self, response_text):
+    def show_gemini_response(self, response_text, auto_close=False):
         if self.show_response_in_new_window.get():
-            GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
+            if self.current_response_window and self.current_response_window.winfo_exists():
+                self.current_response_window.set_response_text(response_text, auto_close=auto_close)
+            else:
+                self.current_response_window = GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
+                if auto_close:
+                    self.current_response_window.set_response_text(response_text, auto_close=True)
         else:
             self.response_label.config(text=response_text)
-            self.root.after(self.response_display_duration.get(), lambda: self.response_label.config(text=""))
+            if auto_close:
+                self.root.after(self.response_display_duration.get(), lambda: self.response_label.config(text=""))
 
     async def run_ai_search(self, query: str):
         return await ai_search(query)
@@ -751,63 +765,6 @@ class GameAssistantApp:
     def process_prompt(self, prompt, session_history, screenshot_path=None):
         thread = threading.Thread(target=self.process_prompt_thread, args=(prompt, session_history, screenshot_path))
         thread.start()
-
-    def process_prompt_thread(self, prompt, session_history, screenshot_path=None):
-        if prompt and ("まて" in prompt or "待て" in prompt):
-            logging.info("キャンセルワードを検出しました。処理を中断します。")
-            voice.play_wav_file("wav/nod/5.wav")
-            return
-
-        if not prompt:
-            logging.info("プロンプトが空のため、処理を中断します。")
-            return
-
-        if "検索" in prompt or "けんさく" in prompt:
-            search_keyword = prompt
-            search_results = asyncio.run(self.run_ai_search(search_keyword))
-            if search_results:
-                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
-
-        self.prompt = prompt
-        image_path = screenshot_path if screenshot_path and os.path.exists(screenshot_path) else None
-        response = self.gemini_service.ask(self.prompt, image_path, self.is_private.get(), session_history=session_history)
-        self.response = response
-
-        # ユーザープロンプトをDBに保存
-        user_event_data = {
-            'type': 'user_prompt',
-            'source': self.user_name.get(),
-            'content': self.prompt,
-            'timestamp': datetime.now().isoformat()
-        }
-        user_save_task = {
-            'type': 'save',
-            'data': user_event_data,
-            'future': None
-        }
-        self.db_save_queue.put(user_save_task)
-
-        # GeminiレスポンスをDBに保存
-        if response:
-            ai_event_data = {
-                'type': 'ai_response',
-                'source': 'AI',
-                'content': response,
-                'timestamp': datetime.now().isoformat()
-            }
-            ai_save_task = {
-                'type': 'save',
-                'data': ai_event_data,
-                'future': None
-            }
-            self.db_save_queue.put(ai_save_task)
-
-        if response and self.session_manager.session_memory:
-            event = GeminiResponse(content=response)
-            self.session_manager.session_memory.events.append(event)
-            logging.info(f"Geminiレスポンスを保存しました: {event}")
-
-        self.root.after(0, self.update_gui_and_speak, response)
 
     def _setup_logging(self):
         log_dir = "logs"

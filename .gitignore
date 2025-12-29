@@ -19,6 +19,8 @@ temp_*
 .serena/
 .vscode/
 .gemini/
+.gemini_workflow/
+.pytest_cache/
 .specify/
 specs/
 

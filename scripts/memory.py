@@ -9,6 +9,8 @@ from google.genai import types
 import google.generativeai as genai_async
 import os
 
+GEMINI_EMBEDDING=os.environ.get("GEMINI_EMBEDDING")
+
 # Configure the async client
 if os.environ.get("GOOGLE_API_KEY"):
     genai_async.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
@@ -69,7 +71,7 @@ class MemoryManager:
     def add_or_update_memory(self, key, value, type=None, user=None):
         """メモリーを追加または更新する"""
         try:
-            embedding_model = "models/embedding-001"
+            embedding_model = GEMINI_EMBEDDING
             
             document = ""
             metadata = {}
@@ -89,7 +91,10 @@ class MemoryManager:
             embedding_response = self.gemini_client.models.embed_content(
                 model=embedding_model,
                 contents=[document],
-                config=types.EmbedContentConfig(task_type="retrieval_document")
+                config=types.EmbedContentConfig(
+                    task_type="retrieval_document",
+                    output_dimensionality=768
+                )
             )
             if not (embedding_response and embedding_response.embeddings):
                 logging.warning(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
@@ -138,12 +143,15 @@ class MemoryManager:
                 'timestamp': event_data.get('timestamp')
             }
 
-            embedding_model = "models/embedding-001"
+            embedding_model = GEMINI_EMBEDDING
             
             embedding_response = self.gemini_client.models.embed_content(
                 model=embedding_model,
                 contents=[content],
-                config=types.EmbedContentConfig(task_type="retrieval_document")
+                config=types.EmbedContentConfig(
+                    task_type="retrieval_document",
+                    output_dimensionality=768
+                )
             )
 
             if not (embedding_response and embedding_response.embeddings):

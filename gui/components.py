@@ -38,10 +38,11 @@ class GeminiResponseWindow(tk.Toplevel):
         self.title("Gemini Response")
         self.geometry("600x400")
         self.label = None
+        self.duration = duration
+        self.close_timer = None
         self.create_widgets()
         self.configure(background="green")
-        self.set_response_text(response_text) # Initialize with text
-        self.after(duration, self.close_window) # Use close_window directly
+        self.set_response_text(response_text)
 
     def create_widgets(self):
         my_font = font.Font(family='Arial', size=20)
@@ -59,9 +60,18 @@ class GeminiResponseWindow(tk.Toplevel):
         )
         self.label.pack(expand=True, fill=X)
 
-    def set_response_text(self, response_text):
+    def set_response_text(self, response_text, auto_close=False):
         if self.label:
             self.label.configure(text=response_text)
+        
+        # 既存のタイマーがあればキャンセル
+        if self.close_timer:
+            self.after_cancel(self.close_timer)
+            self.close_timer = None
+        
+        # ストリーミング終了時などに auto_close=True で呼び出す
+        if auto_close:
+            self.close_timer = self.after(self.duration, self.close_window)
 
     def close_window(self):
         self.destroy()
