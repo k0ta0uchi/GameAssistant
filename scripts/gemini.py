@@ -11,6 +11,7 @@ import wave
 from .clients import get_gemini_client
 from . import local_summarizer
 from .memory import MemoryManager
+from .prompts import BLOG_WRITER_SYSTEM_PROMPT, SESSION_SUMMARIZE_PROMPT, TTS_STYLE_INSTRUCTION
 import uuid
 import google.generativeai as genai
 import threading
@@ -314,7 +315,7 @@ class GeminiSession:
         try:
             response = self.client.models.generate_content(
                 model="gemini-2.5-flash-preview-tts",
-                contents=f"優しく控えめでオドオドしていて、萌え声でかわいく高く透明感のある声で: {text}",
+                contents=f"{TTS_STYLE_INSTRUCTION}{text}",
                 config=types.GenerateContentConfig(
                     response_modalities=["AUDIO"],
                     speech_config=types.SpeechConfig(
@@ -388,7 +389,7 @@ class GeminiService:
         )
 
     def summarize_session(self, session_history: str) -> Optional[str]:
-        prompt = f"以下の会話履歴を要約し、重要な情報のみを抽出してください。\n\n{session_history}"
+        prompt = f"{SESSION_SUMMARIZE_PROMPT}{session_history}"
         try:
             response = self.session.client.models.generate_content(
                 model=GEMINI_MODEL,
@@ -405,73 +406,7 @@ class GeminiService:
         if not conversation:
             return None
 
-        system_prompt = """
-あなたはゲーム配信を行っているストリーマーです。
-これから提供するユーザーとAIアシスタントの会話履歴を元に、
-**自分自身のプレイ体験を振り返る「プレイ日誌（配信ログ）」としてのブログ記事**を作成してください。
-
-このブログは「レビュー」ではなく、
-・その日のプレイで何が起きたのか  
-・どんな判断をして、何に迷い、どこで盛り上がったのか  
-・配信中に考えていたこと、感じたこと  
-を、あとから読み返せる記録であり、同時に読者も楽しめる内容であることを目的とします。
-
----
-
-## 指示
-
-- 会話履歴は**配信中の出来事・思考・やり取りのログ素材**です。  
-  そのまま引用せず、ストリーマー本人の語りとして自然な文章に再構成してください。
-- 「今この瞬間にプレイしている感覚」「配信画面越しの空気感」が伝わるよう、  
-  臨場感・テンポ・感情の揺れを重視してください。
-- 専門用語やゲーム内スラングは、  
-  *初見リスナーやアーカイブ視聴者*にも伝わるよう、軽く補足説明を入れてください。
-- ゲームそのものの面白さだけでなく、  
-  **配信という場での選択・失敗・雑談・AIアシスタントとの掛け合い**も重要な見どころとして描写してください。
-- 評価や断定よりも、「その時どう感じたか」「なぜそう動いたか」を中心に書いてください。
-
----
-
-## 記事の構成
-
-1. **タイトル**  
-   - 配信タイトル、または配信後に見返したくなるような  
-     “その日の象徴的な出来事”を含んだキャッチーなタイトルにしてください。
-
-2. **導入（今日の配信について）**  
-   - どのゲームを、どんな目的・進行状況でプレイしていた配信なのか。  
-   - 配信前や序盤の空気感、軽い動機づけも含めて書いてください。
-
-3. **プレイ日誌・ハイライト**  
-   - 会話履歴を元に、配信中に特に印象に残った場面を時系列で描写します。
-   - 操作ミス、判断の迷い、予想外の展開、盛り上がった瞬間などを具体的に。
-   - AIアシスタントとのやり取りは、  
-     *「一緒に配信している相棒」*のような距離感で自然に組み込んでください。
-
-4. **配信者としての振り返り**  
-   - プレイ後に感じたこと、次回への課題や期待。  
-   - ゲームデザインや難易度についても、  
-     *レビューではなく「配信していてどうだったか」*という視点で述べてください。
-   - リスナー目線で「ここは見ていて楽しい／難しい」と感じた点も含めてください。
-
-5. **まとめ（次回につなぐ一言）**  
-   - 今日の配信を一言で振り返りつつ、  
-     次の配信や続きを匂わせる形で締めくくってください。
-   - 読者が「次のアーカイブも見たい」と思える余韻を残してください。
-
----
-
-## フォーマット
-
-- Markdown形式で記述してください。
-- 全体で**約5000字程度**を目安にしてください。
-- 文章は一人称（自分視点）で統一してください。
-
----
-
-それでは、以下の会話履歴を元に、
-**ストリーマーのプレイ日誌として最高のブログ記事**を書いてください。
-"""
+        system_prompt = BLOG_WRITER_SYSTEM_PROMPT
 
         if isinstance(conversation, str):
             conversation_text = conversation

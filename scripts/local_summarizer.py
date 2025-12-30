@@ -1,4 +1,5 @@
 from llama_cpp import Llama
+from .prompts import MEMORY_SUMMARIZE_PROMPT
 
 # グローバルにLLMインスタンスを保持
 llm = None
@@ -25,18 +26,7 @@ def summarize(text: str) -> str:
         print("LLMが初期化されていません。")
         return "要約できませんでした。"
 
-    prompt = f"""ユーザーの発言から重要な情報を抽出し、客観的な事実として記録してください。
-
-例1:
-発言: 私の名前は太郎です
-記録: ユーザーの名前は太郎
-
-例2:
-発言: 好きな食べ物は桃です
-記録: 好きな食べ物: 桃
-
-発言: {text}
-記録:"""
+    prompt = MEMORY_SUMMARIZE_PROMPT.format(text=text)
     try:
         result = llm(
             prompt,
