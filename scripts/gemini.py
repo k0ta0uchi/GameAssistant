@@ -56,10 +56,7 @@ USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
 class GeminiSession:
     def __init__(
-        self,
-        app,
-        custom_instruction: str | None = None,
-        settings_manager=None,
+        self, app, custom_instruction: str | None = None, settings_manager=None
     ):
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")
@@ -124,9 +121,9 @@ class GeminiSession:
             "type": "query",
             "future": query_future,
             "data": {
-                "query_texts": [prompt], # テキストを渡すとMemoryManagerがローカルでベクトル化する
+                "query_texts": [prompt],
                 "n_results": 5,
-                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]}
+                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]},
             },
         }
         self.app.db_save_queue.put(query_task)
@@ -403,17 +400,34 @@ class GeminiService:
         if not GEMINI_MODEL:
             return
 
-        try:
-            # Geminiモデルを使用（環境変数から取得）
-            response = self.session.client.models.generate_content(
-                model=GEMINI_MODEL,
-                config=types.GenerateContentConfig(system_instruction=system_prompt),
-                contents=full_prompt,
-            )
-            return response.text
-        except Exception as e:
-            print(f"ブログ記事の生成中にエラーが発生しました: {e}")
-            return None
+        max_retries = 5
+        base_delay = 10 # 最初の待機時間（秒）
+
+        for attempt in range(max_retries):
+            try:
+                logging.info(f"ブログ記事の生成を試行中... (試行 {attempt + 1}/{max_retries})")
+                response = self.session.client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    config=types.GenerateContentConfig(system_instruction=system_prompt),
+                    contents=full_prompt,
+                )
+                if response and response.text:
+                    return response.text
+                else:
+                    logging.warning("ブログ記事の生成応答が空でした。")
+            except Exception as e:
+                # 429 Too Many Requests やその他のエラーをキャッチ
+                error_msg = str(e)
+                if "429" in error_msg or "Too Many Requests" in error_msg.lower() or "ResourceExhausted" in error_msg:
+                    delay = base_delay * (2 ** attempt) # 指数バックオフ
+                    logging.warning(f"レート制限(429)を検出しました。{delay}秒後に再試行します... エラー: {e}")
+                    time.sleep(delay)
+                else:
+                    logging.error(f"ブログ記事の生成中に致命的なエラーが発生しました: {e}", exc_info=True)
+                    break # 429以外はリトライせずに終了
+
+        logging.error("最大リトライ回数に達したため、ブログ記事の生成を断念しました。")
+        return None
 
 
 if __name__ == "__main__":
