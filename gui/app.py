@@ -111,40 +111,62 @@ class GameAssistantApp:
         self.db_worker_thread.start()
 
         self.tts_queue = queue.Queue()
-        self.tts_worker_thread = threading.Thread(target=self._tts_worker, daemon=True)
+        self.tts_worker_thread = threading.Thread(target=self._tts_synthesis_worker, daemon=True)
         self.tts_worker_thread.start()
+
+        self.playback_queue = queue.Queue()
+        self.playback_worker_thread = threading.Thread(target=self._tts_playback_worker, daemon=True)
+        self.playback_worker_thread.start()
 
         self.current_response_window = None
 
-    def _tts_worker(self):
-        """音声合成と再生を順次処理するワーカースレッド"""
+    def _tts_synthesis_worker(self):
+        """文を音声データに変換する（先行合成）スレッド"""
         while True:
             item = self.tts_queue.get()
             if item is None:
                 break
             
             if item == "END_MARKER":
-                logging.info("すべてのTTS再生が完了しました。表示終了タイマーを開始します。")
-                self.root.after(0, lambda: self.show_gemini_response(None, auto_close=True, only_timer=True))
+                self.playback_queue.put("END_MARKER")
                 self.tts_queue.task_done()
                 continue
 
             sentence = item
             try:
-                # 再生中断フラグが立っていたらキューをクリアするかスキップ
                 if voice.stop_playback_event.is_set():
-                    logging.info(f"再生中断中のためスキップ: {sentence}")
                     continue
 
-                logging.info(f"TTS生成開始: {sentence}")
+                logging.info(f"TTS先行合成開始: {sentence}")
                 wav_data = voice.generate_speech_data(sentence)
                 if wav_data:
-                    if not voice.stop_playback_event.is_set():
-                        voice.play_wav_data(wav_data)
+                    self.playback_queue.put(wav_data)
             except Exception as e:
-                logging.error(f"TTSワーカーでエラー: {e}")
+                logging.error(f"TTS合成ワーカーでエラー: {e}")
             finally:
                 self.tts_queue.task_done()
+
+    def _tts_playback_worker(self):
+        """合成済み音声を順次再生するスレッド"""
+        while True:
+            item = self.playback_queue.get()
+            if item is None:
+                break
+            
+            if item == "END_MARKER":
+                logging.info("すべての再生が完了しました。")
+                self.root.after(0, lambda: self.show_gemini_response(None, auto_close=True, only_timer=True))
+                self.playback_queue.task_done()
+                continue
+
+            wav_data = item
+            try:
+                if not voice.stop_playback_event.is_set():
+                    voice.play_wav_data(wav_data)
+            except Exception as e:
+                logging.error(f"TTS再生ワーカーでエラー: {e}")
+            finally:
+                self.playback_queue.task_done()
 
     def _process_db_save_queue(self):
         """DB関連の全タスクを処理する単一のワーカースレッド"""
@@ -547,6 +569,15 @@ class GameAssistantApp:
         # 応答表示の準備
         full_response = ""
         voice.stop_playback_event.clear()
+        
+        # キューをクリアして古い発話を破棄
+        while not self.tts_queue.empty():
+            try: self.tts_queue.get_nowait()
+            except queue.Empty: break
+        while not self.playback_queue.empty():
+            try: self.playback_queue.get_nowait()
+            except queue.Empty: break
+
         self.audio_service.start_monitoring_stop_word()
         
         # チャットログへの表示（初期空文字）
