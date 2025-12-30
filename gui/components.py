@@ -36,42 +36,45 @@ class GeminiResponseWindow(tk.Toplevel):
     def __init__(self, parent, response_text, duration=10000):
         super().__init__(parent)
         self.title("Gemini Response")
-        self.geometry("600x400")
-        self.label = None
+        self.geometry("600x450")
+        self.text_area = None
         self.duration = duration
         self.close_timer = None
         self.create_widgets()
-        self.configure(background="green")
+        self.configure(background="#2b2b2b") # ダークテーマ風
         self.set_response_text(response_text)
 
     def create_widgets(self):
-        my_font = font.Font(family='Arial', size=20)
-
-        self.label = ttk.Label(
+        self.text_area = tk.Text(
             self,
-            text="",
-            wraplength=600,
-            justify=LEFT,
-            background="green",
+            wrap=tk.WORD,
+            font=("Arial", 18),
+            background="#2b2b2b",
             foreground="white",
-            padding=10,
-            font=my_font,
-            borderwidth=2,
+            padx=20,
+            pady=20,
+            borderwidth=0,
+            highlightthickness=0
         )
-        self.label.pack(expand=True, fill=X)
+        self.text_area.pack(expand=True, fill=tk.BOTH)
+        self.text_area.config(state="disabled")
 
     def set_response_text(self, response_text, auto_close=False):
-        if self.label:
-            self.label.configure(text=response_text)
+        if self.text_area:
+            self.text_area.config(state="normal")
+            self.text_area.delete("1.0", tk.END)
+            self.text_area.insert(tk.END, response_text)
+            self.text_area.see(tk.END)
+            self.text_area.config(state="disabled")
         
-        # 既存のタイマーがあればキャンセル
+        if auto_close:
+            self.start_close_timer()
+
+    def start_close_timer(self):
+        """表示終了タイマーを開始またはリセットする"""
         if self.close_timer:
             self.after_cancel(self.close_timer)
-            self.close_timer = None
-        
-        # ストリーミング終了時などに auto_close=True で呼び出す
-        if auto_close:
-            self.close_timer = self.after(self.duration, self.close_window)
+        self.close_timer = self.after(self.duration, self.close_window)
 
     def close_window(self):
         self.destroy()

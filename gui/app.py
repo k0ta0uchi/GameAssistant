@@ -123,6 +123,12 @@ class GameAssistantApp:
             if item is None:
                 break
             
+            if item == "END_MARKER":
+                logging.info("すべてのTTS再生が完了しました。表示終了タイマーを開始します。")
+                self.root.after(0, lambda: self.show_gemini_response(None, auto_close=True, only_timer=True))
+                self.tts_queue.task_done()
+                continue
+
             sentence = item
             try:
                 # 再生中断フラグが立っていたらキューをクリアするかスキップ
@@ -349,10 +355,13 @@ class GameAssistantApp:
         self.twitch_connect_button.pack(fill=X, pady=5)
 
         # --- Right Frame Widgets ---
-        self.response_frame = ttk.Frame(right_frame, padding=(0, 0, 0, 10))
-        self.response_frame.pack(fill=X)
-        self.response_label = ttk.Label(self.response_frame, text="", wraplength=400, justify=LEFT, font=("Arial", 14), style="inverse-info")
-        self.response_label.pack(fill=X, ipady=10)
+        self.response_frame = ttk.Labelframe(right_frame, text="Geminiの回答", style="info.TLabelframe")
+        self.response_frame.pack(fill=X, pady=(0, 10))
+        
+        self.response_text_area = ttk.ScrolledText(
+            self.response_frame, height=6, font=("Arial", 12), wrap=WORD, state="disabled"
+        )
+        self.response_text_area.pack(fill=X, padx=5, pady=5)
 
         self.meter_container = ttk.Frame(right_frame)
         self.meter_container.pack(fill=X, pady=(0, 10))
@@ -578,8 +587,8 @@ class GameAssistantApp:
                     event = GeminiResponse(content=full_response)
                     self.session_manager.session_memory.events.append(event)
 
-                # ウィンドウの自動終了タイマーを開始（ストリーミング終了後）
-                self.root.after(0, lambda: self.show_gemini_response(full_response, auto_close=True))
+                # 全ての文を投げ終えたらマーカーを投入
+                self.tts_queue.put("END_MARKER")
 
         except Exception as e:
             logging.error(f"Gemini対話中にエラー: {e}", exc_info=True)
@@ -665,18 +674,32 @@ class GameAssistantApp:
         """メモリー管理ウィンドウを開く"""
         MemoryWindow(self.root, self, self.memory_manager, self.gemini_service)
 
-    def show_gemini_response(self, response_text, auto_close=False):
+    def show_gemini_response(self, response_text, auto_close=False, only_timer=False):
         if self.show_response_in_new_window.get():
             if self.current_response_window and self.current_response_window.winfo_exists():
-                self.current_response_window.set_response_text(response_text, auto_close=auto_close)
-            else:
+                if not only_timer:
+                    self.current_response_window.set_response_text(response_text, auto_close=auto_close)
+                else:
+                    self.current_response_window.start_close_timer()
+            elif not only_timer:
                 self.current_response_window = GeminiResponseWindow(self.root, response_text, self.response_display_duration.get())
                 if auto_close:
-                    self.current_response_window.set_response_text(response_text, auto_close=True)
+                    self.current_response_window.start_close_timer()
         else:
-            self.response_label.config(text=response_text)
-            if auto_close:
-                self.root.after(self.response_display_duration.get(), lambda: self.response_label.config(text=""))
+            if not only_timer:
+                self.response_text_area.config(state="normal")
+                self.response_text_area.delete("1.0", END)
+                self.response_text_area.insert(END, response_text)
+                self.response_text_area.see(END)
+                self.response_text_area.config(state="disabled")
+            
+            if auto_close or only_timer:
+                self.root.after(self.response_display_duration.get(), self._clear_response_area)
+
+    def _clear_response_area(self):
+        self.response_text_area.config(state="normal")
+        self.response_text_area.delete("1.0", END)
+        self.response_text_area.config(state="disabled")
 
     async def run_ai_search(self, query: str):
         return await ai_search(query)
