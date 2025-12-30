@@ -5,15 +5,25 @@ import uuid
 from . import local_summarizer
 from .clients import get_chroma_client, get_gemini_client
 from google.genai import types
-
+from sentence_transformers import SentenceTransformer
 import google.generativeai as genai_async
 import os
-
-GEMINI_EMBEDDING=os.environ.get("GEMINI_EMBEDDING")
 
 # Configure the async client
 if os.environ.get("GOOGLE_API_KEY"):
     genai_async.configure(api_key=os.environ.get("GOOGLE_API_KEY"))
+
+# グローバルにEmbeddingモデルを保持
+_embedding_model = None
+
+def get_embedding_model():
+    """Embeddingモデルを取得（初回呼び出し時にロード）"""
+    global _embedding_model
+    if _embedding_model is None:
+        model_name = "cl-nagoya/sup-simcse-ja-base"
+        logging.info(f"Loading local embedding model: {model_name}")
+        _embedding_model = SentenceTransformer(model_name)
+    return _embedding_model
 
 class MemoryAccessError(Exception):
     """メモリーへのアクセス中にエラーが発生した場合に発生する例外"""
@@ -41,6 +51,10 @@ class MemoryManager:
                 }
             )
             logging.info(f"コレクションの準備ができました: '{self.collection_name}'")
+            
+            # 初期化時にモデルをロードしておく
+            get_embedding_model()
+            
         except Exception as e:
             logging.critical(f"MemoryManagerの初期化中に致命的なエラーが発生しました: {e}", exc_info=True)
             raise
@@ -69,10 +83,8 @@ class MemoryManager:
             return {}
 
     def add_or_update_memory(self, key, value, type=None, user=None):
-        """メモリーを追加または更新する"""
+        """メモリーを追加または更新する（ローカルEmbeddingを使用）"""
         try:
-            embedding_model = GEMINI_EMBEDDING
-            
             document = ""
             metadata = {}
 
@@ -88,18 +100,9 @@ class MemoryManager:
             if user:
                 metadata['user'] = user
 
-            embedding_response = self.gemini_client.models.embed_content(
-                model=embedding_model,
-                contents=[document],
-                config=types.EmbedContentConfig(
-                    task_type="retrieval_document",
-                    output_dimensionality=768
-                )
-            )
-            if not (embedding_response and embedding_response.embeddings):
-                logging.warning(f"メモリーの保存中にEmbeddingの生成に失敗しました: {key}")
-                return
-            embedding = embedding_response.embeddings[0].values
+            # ローカルでEmbedding生成
+            model = get_embedding_model()
+            embedding = model.encode(document).tolist()
 
             existing_data = self.collection.get(ids=[key], include=['metadatas'])
             if existing_data and existing_data['metadatas'] and existing_data['metadatas'][0]:
@@ -132,7 +135,7 @@ class MemoryManager:
             return False
 
     def save_event_to_chroma_sync(self, event_data: dict) -> None:
-        """セッションイベントをChromaDBに同期的に保存する"""
+        """セッションイベントをChromaDBに同期的に保存する（ローカルEmbeddingを使用）"""
         logging.debug(f"ChromaDBへの同期イベント保存を開始: {event_data}")
         try:
             event_id = str(uuid.uuid4())
@@ -143,21 +146,9 @@ class MemoryManager:
                 'timestamp': event_data.get('timestamp')
             }
 
-            embedding_model = GEMINI_EMBEDDING
-            
-            embedding_response = self.gemini_client.models.embed_content(
-                model=embedding_model,
-                contents=[content],
-                config=types.EmbedContentConfig(
-                    task_type="retrieval_document",
-                    output_dimensionality=768
-                )
-            )
-
-            if not (embedding_response and embedding_response.embeddings):
-                logging.error(f"同期イベントのEmbedding生成に失敗しました: {event_id}")
-                return
-            embedding = embedding_response.embeddings[0].values
+            # ローカルでEmbedding生成
+            model = get_embedding_model()
+            embedding = model.encode(content).tolist()
 
             self.collection.upsert(
                 ids=[event_id],
@@ -172,11 +163,13 @@ class MemoryManager:
     def query_collection(self, query_texts=None, query_embeddings=None, n_results=5, where=None):
         """コレクションに対してクエリを実行する"""
         try:
-            # テキストとエンベディングのどちらか一方が提供されていることを確認
-            if (query_texts is None and query_embeddings is None) or (query_texts is not None and query_embeddings is not None):
-                raise ValueError("query_textsまたはquery_embeddingsのどちらか一方を指定する必要があります。")
-            
-            return self.collection.query(query_texts=query_texts, query_embeddings=query_embeddings, n_results=n_results, where=where)
+            # テキストが提供された場合はローカルでEmbedding化する
+            if query_texts:
+                model = get_embedding_model()
+                query_embeddings = model.encode(query_texts).tolist()
+                query_texts = None # embeddingsを優先
+
+            return self.collection.query(query_embeddings=query_embeddings, n_results=n_results, where=where)
         except Exception as e:
             logging.error(f"コレクションのクエリ中にエラーが発生しました: {e}", exc_info=True)
             return None

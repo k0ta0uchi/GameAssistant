@@ -50,14 +50,16 @@ load_dotenv()
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
 GEMINI_PRO_MODEL = os.environ.get("GEMINI_PRO_MODEL")
-GEMINI_EMBEDDING = os.environ.get("GEMINI_EMBEDDING")
 USER_ID_PRIVATE = os.environ.get("USER_ID_PRIVATE")
 USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
 
 class GeminiSession:
     def __init__(
-        self, app, custom_instruction: str | None = None, settings_manager=None
+        self,
+        app,
+        custom_instruction: str | None = None,
+        settings_manager=None,
     ):
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")
@@ -83,8 +85,6 @@ class GeminiSession:
                 )
             )
 
-        self.embedding_model = GEMINI_EMBEDDING
-
         self.memory_manager = MemoryManager(collection_name="memories")
         local_summarizer.initialize_llm()
 
@@ -109,7 +109,7 @@ class GeminiSession:
         # --- バックグラウンドでの要約・保存タスクをキューに追加 ---
         summarize_task = {
             "type": "summarize_and_save",
-            "future": None,  # 結果は待たない
+            "future": None,
             "data": {
                 "prompt": prompt,
                 "user_id": target_user_id,
@@ -118,26 +118,15 @@ class GeminiSession:
         }
         self.app.db_save_queue.put(summarize_task)
 
-        # --- DBからの過去の会話履歴の取得（タスク依頼） ---
-        # --- DBからの過去の会話履歴の取得（タスク依頼） ---
-        query_embedding_response = self.client.models.embed_content(
-            model=self.embedding_model,
-            contents=[prompt],
-            config=types.EmbedContentConfig(
-                task_type="retrieval_query",
-                output_dimensionality=768
-            ),
-        )
-        query_embedding = query_embedding_response.embeddings[0].values
-
+        # --- DBからの過去の会話履歴の取得（タスク依頼 / ローカルEmbedding） ---
         query_future = Future()
         query_task = {
             "type": "query",
             "future": query_future,
             "data": {
-                "query_embeddings": [query_embedding],
+                "query_texts": [prompt], # テキストを渡すとMemoryManagerがローカルでベクトル化する
                 "n_results": 5,
-                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]},
+                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]}
             },
         }
         self.app.db_save_queue.put(query_task)
@@ -233,25 +222,15 @@ class GeminiSession:
         }
         self.app.db_save_queue.put(summarize_task)
 
-        # --- DBからの過去の会話履歴の取得（タスク依頼） ---
-        query_embedding_response = self.client.models.embed_content(
-            model=self.embedding_model,
-            contents=[prompt],
-            config=types.EmbedContentConfig(
-                task_type="retrieval_query",
-                output_dimensionality=768
-            ),
-        )
-        query_embedding = query_embedding_response.embeddings[0].values
-
+        # --- DBからの過去の会話履歴の取得（タスク依頼 / ローカルEmbedding） ---
         query_future = Future()
         query_task = {
             "type": "query",
             "future": query_future,
             "data": {
-                "query_embeddings": [query_embedding],
+                "query_texts": [prompt],
                 "n_results": 5,
-                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]},
+                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]}
             },
         }
         self.app.db_save_queue.put(query_task)
@@ -401,7 +380,8 @@ class GeminiService:
             return None
 
     def generate_blog_post(
-        self, conversation: list[dict[str, str]] | str
+        self,
+        conversation: list[dict[str, str]] | str
     ) -> Optional[str]:
         if not conversation:
             return None
@@ -424,7 +404,7 @@ class GeminiService:
             return
 
         try:
-            # Gemini Proモデルを明示的に指定
+            # Geminiモデルを使用（環境変数から取得）
             response = self.session.client.models.generate_content(
                 model=GEMINI_MODEL,
                 config=types.GenerateContentConfig(system_instruction=system_prompt),

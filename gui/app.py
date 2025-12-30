@@ -181,21 +181,33 @@ class GameAssistantApp:
                 future = task.get('future')
                 data = task.get('data')
 
+                # 後方互換性：'data'キーがない場合はtask全体をデータとみなす
+                if data is None and task_type is not None:
+                    data = task
+
                 try:
                     if task_type == 'query':
+                        if not data:
+                            raise ValueError("Query data is missing")
                         result = self.memory_manager.query_collection(**data)
                         if future:
                             future.set_result(result)
                     
                     elif task_type == 'summarize_and_save':
+                        if not data:
+                            raise ValueError("Summarize data is missing")
                         self.memory_manager.summarize_and_add_memory(**data)
                         if future:
-                            future.set_result(True) # 完了を通知
+                            future.set_result(True)
                     
-                    else: # デフォルトは通常のイベント保存
+                    elif task_type == 'save' or task_type is not None:
+                        # 'save'タイプ、または直接データが投げ込まれた場合
                         self.memory_manager.save_event_to_chroma_sync(data)
                         if future:
-                            future.set_result(True) # 完了を通知
+                            future.set_result(True)
+                    
+                    else:
+                        logging.warning(f"未知のDBタスクタイプです: {task_type}")
                 
                 except Exception as e:
                     logging.error(f"DBタスク '{task_type}' の処理中にエラー: {e}", exc_info=True)
@@ -760,7 +772,7 @@ class GameAssistantApp:
                 'content': prompt,
                 'timestamp': datetime.now().isoformat()
             }
-            self.db_save_queue.put(event_data)
+            self.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
 
             session_history = None
             if self.session_manager.is_session_active():
