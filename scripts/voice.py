@@ -23,19 +23,14 @@ RANDOM_NOD = [
     "2.wav",
 ]
 
+_gemini_session_for_tts = None
+
 def generate_speech_data(text, speaker_id=46, core_version=None):
     """
     与えられたテキストを音声データに変換する。
     設定に応じてVOICEVOXまたはGemini TTSを使用する。
-
-    Args:
-        text (str): 音声に変換するテキスト。
-        speaker_id (int): 話者ID。デフォルトは1。
-        core_version (str, optional): core_version。デフォルトはNone。
-    
-    Returns:
-        bytes: WAV形式の音声データ。エラーの場合はNone。
     """
+    global _gemini_session_for_tts
     try:
         with open('settings.json', 'r', encoding="utf-8") as f:
             settings = json.load(f)
@@ -44,8 +39,9 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
         tts_engine = "voicevox"
 
     if tts_engine == "gemini":
-        gemini_session = GeminiSession()
-        pcm_data = gemini_session.generate_speech(text)
+        if _gemini_session_for_tts is None:
+            _gemini_session_for_tts = GeminiSession()
+        pcm_data = _gemini_session_for_tts.generate_speech(text)
         if pcm_data:
             # PCMデータをWAV形式に変換
             wav_data = io.BytesIO()

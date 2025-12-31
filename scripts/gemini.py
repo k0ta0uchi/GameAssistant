@@ -56,7 +56,7 @@ USER_ID_PUBLIC = os.environ.get("USER_ID_PUBLIC")
 
 class GeminiSession:
     def __init__(
-        self, app, custom_instruction: str | None = None, settings_manager=None
+        self, app=None, custom_instruction: str | None = None, settings_manager=None
     ):
         if not GEMINI_MODEL:
             raise ValueError("GEMINI_MODEL is not set.")

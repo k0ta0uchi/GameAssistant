@@ -17,11 +17,18 @@ if os.environ.get("GOOGLE_API_KEY"):
 _embedding_model = None
 
 def get_embedding_model():
-    """Embeddingモデルを取得（初回呼び出し時にロード）"""
+    """Embeddingモデルを取得（ローカルパスを優先）"""
     global _embedding_model
     if _embedding_model is None:
-        model_name = "cl-nagoya/sup-simcse-ja-base"
-        logging.info(f"Loading local embedding model: {model_name}")
+        # まずプロジェクト内の models フォルダを確認
+        local_path = "./models/sup-simcse-ja-base"
+        if os.path.exists(local_path):
+            model_name = local_path
+            logging.info(f"Loading local embedding model from: {model_name}")
+        else:
+            model_name = "cl-nagoya/sup-simcse-ja-base"
+            logging.info(f"Local model not found. Downloading from HF: {model_name}")
+        
         _embedding_model = SentenceTransformer(model_name)
     return _embedding_model
 
