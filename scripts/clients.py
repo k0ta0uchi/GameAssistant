@@ -30,31 +30,34 @@ def _get_chroma_settings() -> Settings:
     return Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_dir)
 
 def get_chroma_client() -> Any:
-    os.environ['CHROMA_TELEMETRY_DISABLED'] = 'true'
     """
     新しい Chroma の永続クライアントを使う（PersistentClient）。
-    - 既存の古いデータがある場合は chroma-migrate が必要（下記参照）。
-    - PersistentClient のシグネチャが環境により変わるため type ignore を付ける。
+    テレメトリを完全に無効化してエラーを防止します。
     """
+    os.environ['CHROMA_TELEMETRY_DISABLED'] = 'true'
     global _chroma_client
     if _chroma_client is None:
         persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "chromadb")
 
-        # 1) まず PersistentClient を使ってローカル永続化を試す（一般的で簡単）
+        # テレメトリを無効化した設定
+        settings = Settings(
+            anonymized_telemetry=False,
+            is_persistent=True
+        )
+
         try:
-            # ここは chromadb.PersistentClient(path=...) の形式が安定してる例が多い
-            settings = Settings(is_persistent=True, anonymized_telemetry=False)
+            # PersistentClient に settings を明示的に渡す
             _chroma_client = chromadb.PersistentClient(path=persist_dir, settings=settings)
-            logger.info("Using chromadb.PersistentClient (path=%s)", persist_dir)
+            logger.info("Using chromadb.PersistentClient (path=%s) with telemetry disabled", persist_dir)
             return _chroma_client
         except Exception as e:
             logger.warning("PersistentClient construction failed: %s", e)
 
         # 2) fallback: 簡易 client（in-memory / ephemeral）
         try:
-            settings = Settings(is_persistent=False, anonymized_telemetry=False)
+            settings = Settings(anonymized_telemetry=False, is_persistent=False)
             _chroma_client = chromadb.Client(settings=settings)
-            logger.info("Using ephemeral chromadb.Client() as fallback")
+            logger.info("Using ephemeral chromadb.Client() as fallback with telemetry disabled")
             return _chroma_client
         except Exception as e:
             logger.exception("Failed to construct chromadb client fallback: %s", e)
