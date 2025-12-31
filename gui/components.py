@@ -299,15 +299,34 @@ class MemoryWindow(tk.Toplevel):
         self.clear_entries()
 
     def delete_memory(self):
-        key = self.key_entry.get()
-        if not key:
-            print("削除するキーを指定してください。")
+        selected_items = self.memory_listbox.selection()
+        if not selected_items:
+            # リストボックスで選択されていない場合、入力欄のキーを削除試行（従来互換）
+            key = self.key_entry.get()
+            if not key:
+                print("削除するメモリーを選択してください。")
+                return
+            if self.memory_manager.delete_memory(key):
+                self.load_memories_to_listbox()
+                self.clear_entries()
+            else:
+                print("指定されたキーのメモリーが見つかりません。")
             return
-        if self.memory_manager.delete_memory(key):
-            self.load_memories_to_listbox()
-            self.clear_entries()
-        else:
-            print("指定されたキーのメモリーが見つかりません。")
+
+        # 複数選択削除
+        deleted_count = 0
+        for item_id in selected_items:
+            item = self.memory_listbox.item(item_id)
+            values = item['values']
+            # valuesの2番目（インデックス1）がキー
+            key = values[1]
+            
+            if self.memory_manager.delete_memory(key):
+                deleted_count += 1
+        
+        print(f"{deleted_count} 件のメモリーを削除しました。")
+        self.load_memories_to_listbox()
+        self.clear_entries()
 
     def clear_entries(self):
         self.key_entry.config(state='normal')

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Union
@@ -114,19 +115,13 @@ class SessionManager:
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
                 logging.info(f"Twitchメッセージを保存しました: {event}")
-                logging.debug("Calling save_event_to_chroma for twitch_chat...")
                 event_data = {
                     'type': 'twitch_chat',
                     'source': author_name,
                     'content': content,
                     'timestamp': event.timestamp.isoformat()
                 }
-                save_task = {
-                    'type': 'save',
-                    'data': event_data,
-                    'future': None
-                }
-                self.app.db_save_queue.put(save_task)
+                self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
 
     def continuous_recording_thread(self):
         while not self._stop_event.is_set():
@@ -139,7 +134,6 @@ class SessionManager:
 
     def get_session_history(self):
         if not self.session_memory:
-            logging.debug("get_session_history - セッションメモリがありません。")
             return ""
         history = ""
         for event in self.session_memory.events:
@@ -149,10 +143,6 @@ class SessionManager:
                 history += f"{event.author}: {event.content}\n"
             elif isinstance(event, GeminiResponse):
                 history += f"Assistant: {event.content}\n"
-        
-        logging.debug("--- get_session_history ---")
-        logging.debug(history)
-        logging.debug("------------------------------------")
         return history
 
     def get_session_conversation(self) -> list[dict[str, str]]:
@@ -168,50 +158,65 @@ class SessionManager:
         return conversation
 
     def wait_for_hotword_thread(self):
+        """キーワード待機と、検出後の録音・認識を直列に実行するスレッド"""
         while not self._stop_event.is_set():
+            audio_file = f"prompt_recording_{int(time.time())}.wav"
+            # ここで録音が完了するまでブロック
             result = wait_for_keyword(
                 device_index=self.app.device_index,
                 update_callback=self.app.update_level_meter,
-                audio_file_path=self.app.audio_file_path,
+                audio_file_path=audio_file,
                 stop_event=self._stop_event
             )
-            if result:
+            if result and not self._stop_event.is_set():
                 play_random_nod()
-                logging.info("ホットワードを検出しました。プロンプトの録音を開始します。")
-                screenshot_path = self.app.capture_service.capture_window()
-                task = TranscriptionTask(priority=1, audio_file_path=self.app.audio_file_path, is_prompt=True, screenshot_path=screenshot_path)
-                self.transcription_queue.put(task)
+                logging.info("ホットワード検出後の録音が完了しました。直列で文字起こしを開始します。")
+                
+                # ウィンドウキャプチャ
+                screenshot_path = None
+                if self.app.selected_window:
+                    screenshot_path = self.app.capture_service.capture_window()
+                
+                # 文字起こし（同じスレッドで実行）
+                text = recognize_speech(audio_file)
+                
+                # 結果の処理
+                self._handle_transcription_result(text, is_prompt=True, audio_file_path=audio_file, screenshot_path=screenshot_path)
 
     def transcription_worker(self):
+        """背景の雑談録音などを処理するワーカースレッド"""
         while not self._stop_event.is_set() or not self.transcription_queue.empty():
             try:
                 task = self.transcription_queue.get(timeout=1)
                 text = recognize_speech(task.audio_file_path)
-                if text and text.strip() != "ごめん" and self.session_memory:
-                    event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=task.is_prompt)
-                    self.session_memory.events.append(event)
-                    logging.info(f"音声を保存しました: {event}")
-                    event_data = {
-                        'type': 'user_speech',
-                        'source': self.app.user_name.get(),
-                        'content': text,
-                        'timestamp': event.timestamp.isoformat()
-                    }
-                    save_task = {
-                        'type': 'save',
-                        'data': event_data,
-                        'future': None
-                    }
-                    self.app.db_save_queue.put(save_task)
-                    if task.is_prompt:
-                        session_history = self.get_session_history()
-                        self.app.process_prompt(text, session_history, task.screenshot_path)
-                # Clean up the audio file
-                try:
-                    if os.path.exists(task.audio_file_path):
-                        os.remove(task.audio_file_path)
-                except Exception as e:
-                    logging.error(f"Error removing audio file: {e}", exc_info=True)
+                self._handle_transcription_result(text, is_prompt=task.is_prompt, audio_file_path=task.audio_file_path, screenshot_path=task.screenshot_path)
                 self.transcription_queue.task_done()
             except queue.Empty:
                 continue
+
+    def _handle_transcription_result(self, text, is_prompt, audio_file_path, screenshot_path=None):
+        """文字起こし結果をメモリに保存し、必要に応じてAI応答を開始する"""
+        if text and text.strip() != "ごめん" and self.session_memory:
+            event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=is_prompt)
+            self.session_memory.events.append(event)
+            logging.info(f"音声を保存しました: {event}")
+            
+            event_data = {
+                'type': 'user_speech',
+                'source': self.app.user_name.get(),
+                'content': text,
+                'timestamp': event.timestamp.isoformat()
+            }
+            self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
+            
+            if is_prompt:
+                session_history = self.get_session_history()
+                # AI応答処理を開始（これは別スレッドで動く）
+                self.app.process_prompt(text, session_history, screenshot_path)
+        
+        # 音声ファイルの削除
+        try:
+            if os.path.exists(audio_file_path):
+                os.remove(audio_file_path)
+        except Exception as e:
+            logging.error(f"Error removing audio file: {e}")
