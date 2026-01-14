@@ -56,37 +56,42 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
         base_url = "http://localhost:50021"
 
         # 1. クエリ作成APIを呼び出す
-        # textをURLエンコード
         encoded_text = urllib.parse.quote(text)
         query_url = f"{base_url}/audio_query?text={encoded_text}&speaker={speaker_id}"
         if core_version:
             query_url += f"&core_version={core_version}"
 
         try:
-            response = requests.post(query_url)
-            response.raise_for_status()  # エラーレスポンスをチェック
+            response = requests.post(query_url, timeout=3) # タイムアウトを設定
+            response.raise_for_status()
             query_data = response.json()
-        except requests.exceptions.RequestException as e:
-            print(f"クエリ作成APIエラー: {e}")
-            return
-        except json.JSONDecodeError as e:
-            print(f"クエリ作成APIからのJSONデコードエラー: {e}")
-            return
+            
+            # 2. 音声合成APIを呼び出す
+            synthesis_url = f"{base_url}/synthesis?speaker={speaker_id}"
+            if core_version:
+                synthesis_url += f"&core_version={core_version}"
 
-        # 2. 音声合成APIを呼び出す
-        synthesis_url = f"{base_url}/synthesis?speaker={speaker_id}"
-        if core_version:
-            synthesis_url += f"&core_version={core_version}"
+            response = requests.post(synthesis_url, headers={"Content-Type": "application/json"}, data=json.dumps(query_data), timeout=10)
+            response.raise_for_status()
+            return response.content
 
-        try:
-            response = requests.post(synthesis_url, headers={"Content-Type": "application/json"}, data=json.dumps(query_data))
-            response.raise_for_status()  # エラーレスポンスをチェック
-            wav_data = response.content
-        except requests.exceptions.RequestException as e:
-            print(f"音声合成APIエラー: {e}")
-            return None
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            print(f"VOICEVOX接続エラーのため、Gemini TTSにフォールバックします: {e}")
+            # Gemini TTS で再試行
+            if _gemini_session_for_tts is None:
+                _gemini_session_for_tts = GeminiSession()
+            pcm_data = _gemini_session_for_tts.generate_speech(text)
+            if pcm_data:
+                wav_data = io.BytesIO()
+                with wave.open(wav_data, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    wf.writeframes(pcm_data)
+                wav_data.seek(0)
+                return wav_data.read()
 
-        return wav_data
+    return None
 
 def text_to_speech_kokoro(text):
     """
