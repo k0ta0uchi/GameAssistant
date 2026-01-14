@@ -31,8 +31,8 @@ def _load_api_keys():
     global _api_keys
     if not _api_keys:
         raw_keys = os.environ.get("GOOGLE_API_KEY", "")
-        # カンマ区切りで分割し、空の要素を排除
-        _api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+        # カンマ区切りで分割し、空白や不自然なクォーテーションを除去
+        _api_keys = [k.strip().strip("'").strip('"') for k in raw_keys.split(",") if k.strip()]
     return _api_keys
 
 def get_gemini_client(force_refresh=False):
@@ -48,7 +48,9 @@ def get_gemini_client(force_refresh=False):
 
     if _gemini_client is None or force_refresh:
         current_key = keys[_current_key_index]
-        logger.info(f"Initializing Gemini client with key index {_current_key_index}")
+        # セキュリティのため最初と最後の4文字だけ表示
+        masked_key = f"{current_key[:4]}...{current_key[-4:]}" if len(current_key) > 8 else "****"
+        logger.info(f"Initializing Gemini client with key index {_current_key_index} (Key: {masked_key})")
         _gemini_client = genai.Client(api_key=current_key)
     
     return _gemini_client
@@ -210,14 +212,22 @@ class TwitchTokenManager:
             logger.exception("Failed to delete_token for %s", user_id)
             return False
 
-def get_gemini_client():
+def get_gemini_client(force_refresh=False):
     """
     Gemini APIクライアントのシングルトンインスタンスを返す。
+    force_refresh=True の場合、現在のインデックスのキーでクライアントを再生成する。
     """
-    global _gemini_client
-    if _gemini_client is None:
-        google_api_key = os.environ.get("GOOGLE_API_KEY")
-        if not google_api_key:
-            raise ValueError("GOOGLE_API_KEY is not set in the environment.")
-        _gemini_client = genai.Client(api_key=google_api_key)
+    global _gemini_client, _current_key_index
+    keys = _load_api_keys()
+    
+    if not keys:
+        raise ValueError("GOOGLE_API_KEY is not set in the environment.")
+
+    if _gemini_client is None or force_refresh:
+        current_key = keys[_current_key_index]
+        # セキュリティのため最初と最後の4文字だけ表示
+        masked_key = f"{current_key[:4]}...{current_key[-4:]}" if len(current_key) > 8 else "****"
+        logger.info(f"Initializing Gemini client with key index {_current_key_index} (Key: {masked_key})")
+        _gemini_client = genai.Client(api_key=current_key)
+    
     return _gemini_client

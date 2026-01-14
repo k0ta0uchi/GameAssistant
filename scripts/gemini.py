@@ -115,14 +115,20 @@ class GeminiSession:
         memory_type: str = "app",
         memory_user_id: str | None = None,
     ):
-        while True: # リトライループ
+        while True:
             try:
                 return self._generate_content_internal(prompt, image_path, is_private, memory_type, memory_user_id)
             except Exception as e:
-                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self._handle_quota_error():
-                    time.sleep(1)
-                    continue # 次のキーで再試行
-                raise e
+                error_msg = str(e)
+                # 429 (クォータ) または 400 (不正キー) エラー時に切り替え
+                if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
+                    if self._handle_quota_error():
+                        time.sleep(1)
+                        continue # 次のキーで再試行
+                
+                # 致命的なエラー、または全キー消費
+                logging.error(f"Final error in generate_content: {e}", exc_info=True)
+                return "申し訳ありません、エラーが発生しましただわん。"
 
     def _generate_content_internal(
         self,
@@ -226,11 +232,8 @@ class GeminiSession:
 
             return response_text
         except Exception as e:
-            # クォータエラー以外のエラーは呼び出し元へ投げる
-            if "429" in str(e) or "ResourceExhausted" in str(e):
-                raise e # 呼び出し元のループで処理される
-            print(f"An error occurred during content generation: {e}")
-            return "申し訳ありません、エラーが発生しましただわん。"
+            # ここでは例外を処理せず、外側の generate_content でリトライ判定を行う
+            raise e
 
     def generate_content_stream(
         self,
@@ -245,9 +248,13 @@ class GeminiSession:
                 yield from self._generate_content_stream_internal(prompt, image_path, is_private, memory_type, memory_user_id)
                 return
             except Exception as e:
-                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self._handle_quota_error():
-                    time.sleep(1)
-                    continue
+                error_msg = str(e)
+                if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
+                    if self._handle_quota_error():
+                        time.sleep(1)
+                        continue
+                
+                logging.error(f"Final error in generate_content_stream: {e}", exc_info=True)
                 yield "申し訳ありません、エラーが発生しましただわん。"
                 return
 
@@ -345,10 +352,8 @@ class GeminiSession:
             )
 
         except Exception as e:
-            if "429" in str(e) or "ResourceExhausted" in str(e):
-                raise e
-            print(f"An error occurred during content generation: {e}")
-            yield "申し訳ありません、エラーが発生しましただわん。"
+            # ここでは例外を処理せず、外側の generate_content_stream でリトライ判定を行う
+            raise e
 
     def generate_speech(self, text: str, voice_name: str = "Laomedeia"):
         try:
@@ -462,17 +467,18 @@ class GeminiService:
 
         full_prompt = f"# 会話履歴\n{conversation_text}"
 
-        if not GEMINI_MODEL:
-            return
+        target_model = GEMINI_PRO_MODEL if GEMINI_PRO_MODEL else GEMINI_MODEL
+        if not target_model:
+            return None
 
         max_retries = 5
         base_delay = 10 # 最初の待機時間（秒）
 
         for attempt in range(max_retries):
             try:
-                logging.info(f"ブログ記事の生成を試行中... (試行 {attempt + 1}/{max_retries})")
+                logging.info(f"ブログ記事の生成を試行中... (モデル: {target_model}, 試行 {attempt + 1}/{max_retries})")
                 response = self.session.client.models.generate_content(
-                    model=GEMINI_MODEL,
+                    model=target_model,
                     config=types.GenerateContentConfig(system_instruction=system_prompt),
                     contents=full_prompt,
                 )
@@ -481,13 +487,14 @@ class GeminiService:
                 else:
                     logging.warning("ブログ記事の生成応答が空でした。")
             except Exception as e:
-                # 429 エラー時はキーの切り替えを試みる
-                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self.session._handle_quota_error():
-                    time.sleep(1)
-                    continue # 切り替えたキーで再試行
+                # 429 (クォータ) または 400 (不正なキー) エラー時はキーの切り替えを試みる
+                error_msg = str(e)
+                if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
+                    if self.session._handle_quota_error():
+                        time.sleep(1)
+                        continue # 切り替えたキーで再試行
 
                 # それ以外、または全キー消費時は指数バックオフ
-                error_msg = str(e)
                 if "429" in error_msg or "Too Many Requests" in error_msg.lower() or "ResourceExhausted" in error_msg:
                     delay = base_delay * (2 ** attempt)
                     logging.warning(f"レート制限(429)を検出しました。{delay}秒後に再試行します... エラー: {e}")
