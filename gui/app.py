@@ -34,7 +34,29 @@ from scripts.settings import SettingsManager
 from scripts.record import AudioService
 from scripts.capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
-from .components import OutputRedirector, GeminiResponseWindow, MemoryWindow
+from .components import GeminiResponseWindow, MemoryWindow
+import subprocess
+
+class LoggingStream:
+    """stdout/stderr を logging に変換するストリーム"""
+    def __init__(self, level):
+        self.level = level
+        self.buffer = ""
+
+    def write(self, message):
+        if message:
+            self.buffer += message
+            if "\n" in self.buffer:
+                lines = self.buffer.split("\n")
+                for line in lines[:-1]:
+                    if line.strip():
+                        logging.log(self.level, line.rstrip())
+                self.buffer = lines[-1]
+
+    def flush(self):
+        if self.buffer.strip():
+            logging.log(self.level, self.buffer.rstrip())
+            self.buffer = ""
 
 class GameAssistantApp:
     def __init__(self, root):
@@ -858,6 +880,10 @@ class GameAssistantApp:
         root_logger.addHandler(stream_handler)
         root_logger.addHandler(file_handler)
         root_logger.setLevel(logging.DEBUG)
+
+        # 標準出力・標準エラーを logging にリダイレクト
+        sys.stdout = LoggingStream(logging.INFO)
+        sys.stderr = LoggingStream(logging.ERROR)
 
     def _process_log_queue(self):
         try:

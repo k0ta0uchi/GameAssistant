@@ -7,14 +7,8 @@ import numpy as np
 import logging
 from faster_whisper import WhisperModel
 
-
 class StreamTranscriber:
-    def __init__(
-        self,
-        model_size="kotoba-tech/kotoba-whisper-v2.0-faster",
-        device="cuda",
-        compute_type="int8",
-    ):
+    def __init__(self, model_size="kotoba-tech/kotoba-whisper-v2.0-faster", device="cuda", compute_type="int8"):
         """
         VRAM 1GB前後。Porcupineと併用するため高精度モデルを採用。
         """
@@ -29,9 +23,7 @@ class StreamTranscriber:
         else:
             logging.info(f"Local model not found. Downloading from HF: {model_size}")
 
-        logging.info(
-            f"Initializing Faster-Whisper ({model_size}, {device}, {compute_type})..."
-        )
+        logging.info(f"Initializing Faster-Whisper ({model_size}, {device}, {compute_type})...")
         self.model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
         self.audio_queue = queue.Queue()
@@ -90,7 +82,7 @@ class StreamTranscriber:
                         # テキストが更新されたらPartial通知
                         self.callback(current_text, is_final=False)
                         self.last_partial_text = current_text
-                        self.silence_start_time = time.time()  # 最終更新時刻をリセット
+                        self.silence_start_time = time.time() # 最終更新時刻をリセット
                     else:
                         # テキストはあるが変化していない（＝話し終わりの可能性）
                         if self.silence_start_time is None:
@@ -103,12 +95,10 @@ class StreamTranscriber:
                 # 確定判定: 最終更新から一定時間経過したらFinalとする
                 if self.last_partial_text and self.silence_start_time:
                     if time.time() - self.silence_start_time > self.SILENCE_THRESHOLD:
-                        print(f"[DEBUG] Finalize by silence: {self.last_partial_text}")
+                        logging.info(f"Finalize by silence: {self.last_partial_text}")
                         self.callback(self.last_partial_text, is_final=True)
                         self.last_partial_text = ""
-                        self.audio_buffer = np.array(
-                            [], dtype=np.float32
-                        )  # バッファクリア
+                        self.audio_buffer = np.array([], dtype=np.float32) # バッファクリア
                         self.silence_start_time = None
 
                 time.sleep(0.2)

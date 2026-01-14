@@ -5,33 +5,6 @@ from datetime import datetime
 import threading
 
 
-class OutputRedirector:
-    """print文をテキストボックスにリダイレクトするクラス"""
-    def __init__(self, widget):
-        self.widget = widget
-        self.widget.tag_config("error", foreground="red")
-        self.widget.tag_config("warning", foreground="yellow")
-        self.widget.tag_config("success", foreground="green")
-        self.widget.tag_config("info", foreground="cyan")
-
-    def write(self, str):
-        tag = None
-        if "エラー" in str or "error" in str.lower():
-            tag = "error"
-        elif "警告" in str or "warning" in str.lower():
-            tag = "warning"
-        elif "成功" in str or "success" in str.lower() or "完了" in str:
-            tag = "success"
-        elif "***" in str:
-            tag = "info"
-
-        self.widget.insert(END, str, tag)
-        self.widget.see(END)
-
-    def flush(self):
-        pass
-
-
 class GeminiResponseWindow(tk.Toplevel):
     def __init__(self, parent, response_text, duration=10000):
         super().__init__(parent)
