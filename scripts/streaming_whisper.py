@@ -45,7 +45,7 @@ class StreamTranscriber:
 
         # 沈黙検知用
         self.silence_start_time = None
-        self.SILENCE_THRESHOLD = 0.7  # 1秒の沈黙で確定とみなす
+        self.SILENCE_THRESHOLD = 1.0  # 1秒の沈黙で確定とみなす
 
     def add_audio(self, audio_chunk):
         self.audio_queue.put(audio_chunk)

@@ -397,6 +397,15 @@ class GameAssistantApp:
         )
         self.response_text_area.pack(fill=X, padx=5, pady=5)
 
+        # --- ASR (音声認識結果) 表示エリア ---
+        self.asr_frame = ttk.Labelframe(right_frame, text="認識されたテキスト", style="info.TLabelframe")
+        self.asr_frame.pack(fill=X, pady=(0, 10))
+        
+        self.asr_text_area = ttk.ScrolledText(
+            self.asr_frame, height=4, font=("Arial", 11), wrap=WORD, state="disabled"
+        )
+        self.asr_text_area.pack(fill=X, padx=5, pady=5)
+
         self.meter_container = ttk.Frame(right_frame)
         self.meter_container.pack(fill=X, pady=(0, 10))
         self.level_meter = ttk.Progressbar(
@@ -702,6 +711,36 @@ class GameAssistantApp:
             os.remove(self.screenshot_file_path)
         
         # ストリーミング版ではボタン復帰処理は不要
+
+    def update_asr_display(self, text, is_final=False):
+        """音声認識結果をGUIに表示する"""
+        self.asr_text_area.config(state="normal")
+        
+        if is_final:
+            # 1. 確定時: 前回の Partial 表示（>>> で始まる行など）があれば消す
+            # 面倒なので、一度全削除して「確定済みリスト」を再描画する方式が最も確実
+            if not hasattr(self, 'asr_history'):
+                self.asr_history = []
+            
+            self.asr_history.append(text)
+            # 履歴が増えすぎたら古いものを消す（直近10件など）
+            if len(self.asr_history) > 10:
+                self.asr_history.pop(0)
+            
+            # 再描画
+            self.asr_text_area.delete("1.0", END)
+            for line in self.asr_history:
+                self.asr_text_area.insert(END, line + "\n")
+        else:
+            # 2. 認識中: 確定済みテキストの後に、一時的に現在のテキストを表示
+            self.asr_text_area.delete("1.0", END)
+            if hasattr(self, 'asr_history'):
+                for line in self.asr_history:
+                    self.asr_text_area.insert(END, line + "\n")
+            self.asr_text_area.insert(END, ">>> " + text)
+        
+        self.asr_text_area.see(END)
+        self.asr_text_area.config(state="disabled")
 
     def open_memory_window(self):
         """メモリー管理ウィンドウを開く"""

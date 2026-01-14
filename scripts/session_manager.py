@@ -116,9 +116,8 @@ class SessionManager:
         """Whisperからの認識結果"""
         if not text: return
 
-        # UIへのリアルタイム字幕表示
-        # app.py 側でスレッドセーフに更新
-        self.app.root.after(0, lambda: self._update_subtitle(text, is_final))
+        # UIへのリアルタイム表示
+        self.app.root.after(0, lambda: self.app.update_asr_display(text, is_final))
 
         if not is_final:
             return
@@ -139,18 +138,6 @@ class SessionManager:
 
         # 通常の会話ログとして保存
         self._save_user_speech(text, is_prompt=False)
-
-    def _update_subtitle(self, text, is_final):
-        """GUIのログウィンドウに字幕のように表示する（一時的）"""
-        # 簡易的にログウィンドウの最後を書き換える演出
-        # 実際には専用の字幕ラベルを作ったほうが綺麗だが、今はログウィンドウを活用
-        if not is_final:
-            # 入力中の表示（色を変えるなどできればベスト）
-            # self.app.log_textbox... (複雑になるので一旦ログ出力のみにするか、専用ラベル推奨)
-            pass
-        else:
-            # 確定したらログに出す
-            self.app._update_log_with_partial_response(f"User: {text}\n")
 
     def _process_as_prompt(self, text):
         """テキストをプロンプトとしてAIに送信する"""
