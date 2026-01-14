@@ -98,7 +98,8 @@ class SessionManager:
     def _on_wake_word(self):
         """Porcupineが「ねえぐり」を検知した時の処理"""
         logging.info("【Porcupine】ウェイクワード検知！プロンプト待機モードへ移行します。")
-        play_random_nod()
+        # 頷き音を別スレッドで再生
+        threading.Thread(target=voice.play_random_nod, daemon=True).start()
         self.is_collecting_prompt = True
         
         # 検知から1.5秒間は、直前のノイズや「ねえぐり」自身の残響を拾わないように無視する
@@ -141,6 +142,10 @@ class SessionManager:
 
     def _process_as_prompt(self, text):
         """テキストをプロンプトとしてAIに送信する"""
+        logging.info(f"AIへのプロンプトを検出: {text}")
+        # ユーザーの発話を受け取った合図として頷き音を再生
+        threading.Thread(target=voice.play_random_nod, daemon=True).start()
+        
         self._save_user_speech(text, is_prompt=True)
         
         screenshot_path = getattr(self.app, 'cached_screenshot', None)

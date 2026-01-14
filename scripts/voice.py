@@ -2,12 +2,7 @@ import requests
 import json
 import wave
 import threading
-
-stop_playback_event = threading.Event()
-
-def request_stop_playback():
-    """音声再生の停止をリクエストする。"""
-    stop_playback_event.set()
+import os
 import io
 import pyaudio
 import urllib.parse
@@ -16,6 +11,12 @@ from kokoro import KPipeline
 import soundfile as sf
 import torch
 from scripts.gemini import GeminiSession
+
+stop_playback_event = threading.Event()
+
+def request_stop_playback():
+    """音声再生の停止をリクエストする。"""
+    stop_playback_event.set()
 
 RANDOM_NOD = [
     "0.wav",
@@ -62,7 +63,7 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
             query_url += f"&core_version={core_version}"
 
         try:
-            response = requests.post(query_url, timeout=3) # タイムアウトを設定
+            response = requests.post(query_url, timeout=3)
             response.raise_for_status()
             query_data = response.json()
             
@@ -77,7 +78,6 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
 
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             print(f"VOICEVOX接続エラーのため、Gemini TTSにフォールバックします: {e}")
-            # Gemini TTS で再試行
             if _gemini_session_for_tts is None:
                 _gemini_session_for_tts = GeminiSession()
             pcm_data = _gemini_session_for_tts.generate_speech(text)
@@ -98,45 +98,34 @@ def text_to_speech_kokoro(text):
     Kokoro TTSを用いてテキストから音声を生成し、再生する。
     """
     pipeline = KPipeline(lang_code='j')
-    
     generator = pipeline(text, voice='jf_alpha')
-    
-    # 音声データを一時ファイルに保存し、それを読み込んでplay_wav_dataに渡す
     all_audio = []
     for i, (gs, ps, audio) in enumerate(generator):
-        print(i, gs, ps)
         if audio is not None:
             all_audio.extend(audio)
 
     sf.write('temp_recording.wav', all_audio, 24000)
-
-    # WAVファイルを読み込み、バイナリデータとしてplay_wav_dataに渡す
     with open('temp_recording.wav', 'rb') as f:
         wav_data = f.read()
-    
     play_wav_data(wav_data)
 
 
 def play_wav_data(wav_data):
     """
     WAVデータを再生する。
-    再生中に stop_playback_event がセットされたら停止する。
-
-    Args:
-        wav_data (bytes): WAVデータ。
     """
-    stop_playback_event.clear()  # 再生開始時に停止フラグをリセット
+    # 再生開始時に停止フラグを強制リセット
+    stop_playback_event.clear()
     try:
         wf = wave.open(io.BytesIO(wav_data), 'rb')
-        p = pyaudio.PyAudio()
+        p_audio = pyaudio.PyAudio()
 
-        stream = p.open(format=p.get_format_from_width(wf.getsampwidth()),
+        stream = p_audio.open(format=p_audio.get_format_from_width(wf.getsampwidth()),
                         channels=wf.getnchannels(),
                         rate=wf.getframerate(),
                         output=True)
 
         data = wf.readframes(1024)
-
         while data:
             if stop_playback_event.is_set():
                 print("音声再生を中断しました。")
@@ -146,7 +135,7 @@ def play_wav_data(wav_data):
 
         stream.stop_stream()
         stream.close()
-        p.terminate()
+        p_audio.terminate()
 
     except wave.Error as e:
         print(f"WAVデータエラー: {e}")
@@ -155,20 +144,35 @@ def play_wav_data(wav_data):
 
 def play_random_nod():
     """
-    RANDOM_NODからランダムにWAVファイルを選び、再生する。
+    wav/nod ディレクトリからランダムにWAVファイルを選び、再生する。
     """
     try:
-        filename = random.choice(RANDOM_NOD)
-        filepath = f"wav/nod/{filename}"  # RANDOM_NODディレクトリにあると仮定
+        # パスを確実に取得
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        nod_dir = os.path.join(base_dir, "wav", "nod")
+        
+        if not os.path.exists(nod_dir):
+            # fallback to current working directory
+            nod_dir = os.path.join(os.getcwd(), "wav", "nod")
+
+        if not os.path.exists(nod_dir):
+            print(f"nod directory not found: {nod_dir}")
+            return
+
+        files = [f for f in os.listdir(nod_dir) if f.endswith(".wav")]
+        if not files:
+            print("No wav files in nod directory.")
+            return
+
+        filename = random.choice(files)
+        filepath = os.path.join(nod_dir, filename)
 
         with open(filepath, 'rb') as f:
             wav_data = f.read()
             play_wav_data(wav_data)
 
-    except FileNotFoundError:
-        print(f"ファイルが見つかりません: {filepath}")
     except Exception as e:
-        print(f"エラーが発生しました: {e}")
+        print(f"Error in play_random_nod: {e}")
 
 def play_wav_file(filepath):
     """
@@ -178,16 +182,7 @@ def play_wav_file(filepath):
         with open(filepath, 'rb') as f:
             wav_data = f.read()
             play_wav_data(wav_data)
-
     except FileNotFoundError:
         print(f"ファイルが見つかりません: {filepath}")
     except Exception as e:
         print(f"エラーが発生しました: {e}")
-
-if __name__ == '__main__':
-    text = '''
-        Kokoro（/kˈOkəɹO/）は、8200万のパラメータを持つオープンウェイトTTSモデルです。軽量なアーキテクチャにもかかわらず、大幅に高速かつコスト効率が良い一方で、より大規模なモデルに匹敵する品質を提供します。Apacheライセンスの重みを持つKokoro（/kˈOkəɹO/）は、本番環境から個人プロジェクトまで、あらゆる場所にデプロイできます。
-        '''
-    text_to_speech_kokoro(text) # デフォルト設定で実行
-    #text_to_speech(text, speaker_id=2) # speaker_id を指定して実行
-    #text_to_speech(text, speaker_id=1, core_version="0.14.5") # core_versionを指定して実行
