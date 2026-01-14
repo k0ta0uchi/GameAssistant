@@ -92,7 +92,7 @@ class GameAssistantApp:
         self.screenshot_file_path = os.path.abspath("temp_screenshot.png")
         self.image = None
 
-        keyboard.add_hotkey("ctrl+shift+f2", self.audio_service.toggle_recording)
+        keyboard.add_hotkey("ctrl+shift+f2", self.toggle_session)
         logging.info("ホットキー (Ctrl+Shift+F2) が登録されました。")
 
         self._process_log_queue()
@@ -449,12 +449,17 @@ class GameAssistantApp:
         self.stop_session_button.pack(side=LEFT, padx=5)
         self.stop_session_button.pack_forget()
 
-        self.record_button = ttk.Button(self.record_container, text="録音開始", style="success.TButton", command=self.audio_service.toggle_recording)
-        self.record_button.pack(side=LEFT, padx=5)
+        # ストリーミング版では個別の録音ボタンは不要なため削除
+        # self.record_button = ...
+        # self.record_wait_button = ...
 
-        self.record_wait_button = ttk.Button(self.record_container, text="録音待機", style="success.TButton", command=self.audio_service.toggle_record_waiting)
-        self.record_wait_button.pack(side=LEFT, padx=5)
 
+    def toggle_session(self):
+        """セッションの開始/停止を切り替える"""
+        if self.session_manager.is_session_active():
+            self.stop_session()
+        else:
+            self.start_session()
 
     def start_session(self):
         self.session_manager.start_session()
@@ -537,13 +542,7 @@ class GameAssistantApp:
         logging.info("ウィンドウリストを更新しました。")
 
     def update_record_buttons_state(self, event=None):
-        if self.use_image.get() and self.selected_window is None:
-            self.record_button.config(state="disabled")
-            self.record_wait_button.config(state="disabled")
-            logging.info("画像利用がオンですが、ウィンドウが選択されていないため録音ボタンを無効化しました。")
-        else:
-            self.record_button.config(state="normal")
-            self.record_wait_button.config(state="normal")
+        pass # ストリーミング版ではボタン状態の管理は不要
 
     def update_level_meter(self, volume):
         level = int(volume / 100)
@@ -590,8 +589,6 @@ class GameAssistantApp:
             try: self.playback_queue.get_nowait()
             except queue.Empty: break
 
-        self.audio_service.start_monitoring_stop_word()
-        
         # チャットログへの表示（初期空文字）
         if not self.show_response_in_new_window.get():
             self.root.after(0, lambda: self._update_log_with_partial_response("Gemini: ", is_start=True))
@@ -636,7 +633,6 @@ class GameAssistantApp:
         except Exception as e:
             logging.error(f"Gemini対話中にエラー: {e}", exc_info=True)
         finally:
-            self.audio_service.stop_monitoring_stop_word()
             self.root.after(0, self.finalize_response_processing)
 
     def _update_log_with_partial_response(self, text, is_start=False):
@@ -704,14 +700,8 @@ class GameAssistantApp:
             os.remove(self.audio_file_path)
         if os.path.exists(self.screenshot_file_path):
             os.remove(self.screenshot_file_path)
-        if self.audio_service.record_waiting:
-            self.record_wait_button.config(text="録音待機中", style="danger.TButton")
-            self.audio_service.record_waiting_thread = threading.Thread(target=self.audio_service.wait_for_keyword_thread)
-            self.audio_service.record_waiting_thread.start()
-        self.record_button.config(text="録音開始", style="success.TButton", state="normal")
-        self.record_wait_button.config(state="normal")
-        if not self.audio_service.record_waiting:
-            self.record_wait_button.config(text="録音待機", style="success.TButton")
+        
+        # ストリーミング版ではボタン復帰処理は不要
 
     def open_memory_window(self):
         """メモリー管理ウィンドウを開く"""

@@ -3,16 +3,16 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Union
 import uuid
-import os
 import threading
-import time
-import queue
 import logging
+import re
+import time
 from scripts.twitch_bot import TwitchService
 from twitchio import ChatMessage as TwitchChatMessage
-from scripts.record import AudioService, wait_for_keyword
-from scripts.whisper import recognize_speech
+from scripts.record import AudioService
+from scripts.streaming_whisper import StreamTranscriber
 from scripts.voice import play_random_nod
+import scripts.voice as voice
 
 @dataclass
 class TwitchMessage:
@@ -29,16 +29,6 @@ class UserSpeech:
     priority: int = 10
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
-
-@dataclass
-class TranscriptionTask:
-    priority: int
-    audio_file_path: str
-    is_prompt: bool = False
-    screenshot_path: str = None
-
-    def __lt__(self, other):
-        return self.priority < other.priority
 
 @dataclass
 class GeminiResponse:
@@ -60,31 +50,44 @@ class SessionManager:
         self.session_memory = None
         self.twitch_service = twitch_service
         self.twitch_service.message_callback = self.handle_twitch_message
+        
         self.audio_service = AudioService(app)
-        self.transcription_queue = queue.PriorityQueue()
+        self.transcriber = StreamTranscriber(
+            model_size="kotoba-tech/kotoba-whisper-v2.0-faster",
+            compute_type="int8"
+        )
+        
         self._stop_event = threading.Event()
+        
+        # プロンプト処理用の状態管理
+        self.is_collecting_prompt = False
+        self.prompt_cooldown_until = 0.0 # この時刻まではプロンプトとして受け付けない
 
     def is_session_active(self):
         return self.session_running
 
     def start_session(self):
-        logging.info("セッションを開始します。")
+        logging.info("セッション（ハイブリッド認識）を開始します。")
         self.session_running = True
         self.session_memory = SessionMemory()
         self.twitch_service.connect_twitch_bot()
-        self._stop_event.clear()
-        self.recording_thread = threading.Thread(target=self.continuous_recording_thread)
-        self.recording_thread.start()
-        self.hotword_thread = threading.Thread(target=self.wait_for_hotword_thread)
-        self.hotword_thread.start()
-        self.transcription_thread = threading.Thread(target=self.transcription_worker)
-        self.transcription_thread.start()
+        
+        self.transcriber.start(self._on_transcription_result)
+        
+        self.audio_service.add_listener(self.transcriber.add_audio)
+        self.audio_service.start_stream(
+            wake_word_callback=self._on_wake_word,
+            stop_word_callback=self._on_stop_word
+        )
 
     def stop_session(self):
         logging.info("セッションを停止します。")
         self.session_running = False
         self.twitch_service.disconnect_twitch_bot()
-        self._stop_event.set()
+        
+        self.audio_service.stop_stream()
+        self.transcriber.stop()
+        
         if self.session_memory:
             self.session_memory.end_time = datetime.now()
             session_history = self.get_session_history()
@@ -92,49 +95,103 @@ class SessionManager:
             if summary:
                 self.app.memory_manager.add_or_update_memory(self.session_memory.session_id, summary, type='session_summary')
 
+    def _on_wake_word(self):
+        """Porcupineが「ねえぐり」を検知した時の処理"""
+        logging.info("【Porcupine】ウェイクワード検知！プロンプト待機モードへ移行します。")
+        play_random_nod()
+        self.is_collecting_prompt = True
+        
+        # 検知から1.5秒間は、直前のノイズや「ねえぐり」自身の残響を拾わないように無視する
+        self.prompt_cooldown_until = time.time() + 1.5
+        
+        if self.app.selected_window:
+            self.app.cached_screenshot = self.app.capture_service.capture_window()
+
+    def _on_stop_word(self):
+        """Porcupineが「ストップ」を検知した時の処理"""
+        logging.info("【Porcupine】ストップワード検知！再生を中断します。")
+        voice.request_stop_playback()
+
+    def _on_transcription_result(self, text, is_final):
+        """Whisperからの認識結果"""
+        if not text: return
+
+        # UIへのリアルタイム字幕表示
+        # app.py 側でスレッドセーフに更新
+        self.app.root.after(0, lambda: self._update_subtitle(text, is_final))
+
+        if not is_final:
+            return
+
+        logging.info(f"[Whisper Final] {text}")
+
+        # プロンプト待機モード中の場合
+        if self.is_collecting_prompt:
+            # クールダウン中かチェック
+            if time.time() < self.prompt_cooldown_until:
+                logging.info(f"クールダウン中のため無視: {text}")
+                return
+
+            logging.info(f"プロンプトとして処理: {text}")
+            self._process_as_prompt(text)
+            self.is_collecting_prompt = False
+            return
+
+        # 通常の会話ログとして保存
+        self._save_user_speech(text, is_prompt=False)
+
+    def _update_subtitle(self, text, is_final):
+        """GUIのログウィンドウに字幕のように表示する（一時的）"""
+        # 簡易的にログウィンドウの最後を書き換える演出
+        # 実際には専用の字幕ラベルを作ったほうが綺麗だが、今はログウィンドウを活用
+        if not is_final:
+            # 入力中の表示（色を変えるなどできればベスト）
+            # self.app.log_textbox... (複雑になるので一旦ログ出力のみにするか、専用ラベル推奨)
+            pass
+        else:
+            # 確定したらログに出す
+            self.app._update_log_with_partial_response(f"User: {text}\n")
+
+    def _process_as_prompt(self, text):
+        """テキストをプロンプトとしてAIに送信する"""
+        self._save_user_speech(text, is_prompt=True)
+        
+        screenshot_path = getattr(self.app, 'cached_screenshot', None)
+        if not screenshot_path and self.app.selected_window:
+            screenshot_path = self.app.capture_service.capture_window()
+        self.app.cached_screenshot = None
+        
+        session_history = self.get_session_history()
+        self.app.process_prompt(text, session_history, screenshot_path)
+
+    def _save_user_speech(self, text, is_prompt):
+        if not self.session_memory: return
+        
+        event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=is_prompt)
+        self.session_memory.events.append(event)
+        
+        event_data = {
+            'type': 'user_speech',
+            'source': self.app.user_name.get(),
+            'content': text,
+            'timestamp': event.timestamp.isoformat()
+        }
+        self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
+
     def handle_twitch_message(self, message: Union[TwitchChatMessage, object]):
-        logging.debug(f"handle_twitch_message received: {message}")
         if self.session_memory:
-            author_name = ""
-            content = ""
-            if hasattr(message, 'author') and message.author:
-                author_name = message.author.name
-            elif hasattr(message, 'chatter') and message.chatter:
-                author_name = message.chatter.name
-
-            if hasattr(message, 'content'):
-                content = message.content
-            elif hasattr(message, 'text'):
-                content = message.text
-            elif hasattr(message, 'message') and hasattr(message.message, 'text'):
-                content = message.message.text
-
-            logging.debug(f"Extracted author: {author_name}, content: {content}")
-
+            author_name = getattr(message, 'author', getattr(message, 'chatter', None))
+            if author_name: author_name = author_name.name
+            content = getattr(message, 'content', getattr(message, 'text', ""))
             if author_name and content:
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
-                logging.info(f"Twitchメッセージを保存しました: {event}")
-                event_data = {
-                    'type': 'twitch_chat',
-                    'source': author_name,
-                    'content': content,
-                    'timestamp': event.timestamp.isoformat()
-                }
-                self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
-
-    def continuous_recording_thread(self):
-        while not self._stop_event.is_set():
-            audio_file = f"temp_recording_{int(time.time())}.wav"
-            self.audio_service.record_chunk(30, audio_file, self.app.update_level_meter)
-            if self._stop_event.is_set():
-                break
-            task = TranscriptionTask(priority=10, audio_file_path=audio_file)
-            self.transcription_queue.put(task)
+                self.app.db_save_queue.put({'type': 'save', 'data': {
+                    'type': 'twitch_chat', 'source': author_name, 'content': content, 'timestamp': event.timestamp.isoformat()
+                }, 'future': None})
 
     def get_session_history(self):
-        if not self.session_memory:
-            return ""
+        if not self.session_memory: return ""
         history = ""
         for event in self.session_memory.events:
             if isinstance(event, TwitchMessage):
@@ -146,9 +203,7 @@ class SessionManager:
         return history
 
     def get_session_conversation(self) -> list[dict[str, str]]:
-        if not self.session_memory:
-            return []
-        
+        if not self.session_memory: return []
         conversation = []
         for event in self.session_memory.events:
             if isinstance(event, UserSpeech):
@@ -156,67 +211,3 @@ class SessionManager:
             elif isinstance(event, GeminiResponse):
                 conversation.append({"role": "Assistant", "content": event.content})
         return conversation
-
-    def wait_for_hotword_thread(self):
-        """キーワード待機と、検出後の録音・認識を直列に実行するスレッド"""
-        while not self._stop_event.is_set():
-            audio_file = f"prompt_recording_{int(time.time())}.wav"
-            # ここで録音が完了するまでブロック
-            result = wait_for_keyword(
-                device_index=self.app.device_index,
-                update_callback=self.app.update_level_meter,
-                audio_file_path=audio_file,
-                stop_event=self._stop_event
-            )
-            if result and not self._stop_event.is_set():
-                play_random_nod()
-                logging.info("ホットワード検出後の録音が完了しました。直列で文字起こしを開始します。")
-                
-                # ウィンドウキャプチャ
-                screenshot_path = None
-                if self.app.selected_window:
-                    screenshot_path = self.app.capture_service.capture_window()
-                
-                # 文字起こし（同じスレッドで実行）
-                text = recognize_speech(audio_file)
-                
-                # 結果の処理
-                self._handle_transcription_result(text, is_prompt=True, audio_file_path=audio_file, screenshot_path=screenshot_path)
-
-    def transcription_worker(self):
-        """背景の雑談録音などを処理するワーカースレッド"""
-        while not self._stop_event.is_set() or not self.transcription_queue.empty():
-            try:
-                task = self.transcription_queue.get(timeout=1)
-                text = recognize_speech(task.audio_file_path)
-                self._handle_transcription_result(text, is_prompt=task.is_prompt, audio_file_path=task.audio_file_path, screenshot_path=task.screenshot_path)
-                self.transcription_queue.task_done()
-            except queue.Empty:
-                continue
-
-    def _handle_transcription_result(self, text, is_prompt, audio_file_path, screenshot_path=None):
-        """文字起こし結果をメモリに保存し、必要に応じてAI応答を開始する"""
-        if text and text.strip() != "ごめん" and self.session_memory:
-            event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=is_prompt)
-            self.session_memory.events.append(event)
-            logging.info(f"音声を保存しました: {event}")
-            
-            event_data = {
-                'type': 'user_speech',
-                'source': self.app.user_name.get(),
-                'content': text,
-                'timestamp': event.timestamp.isoformat()
-            }
-            self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
-            
-            if is_prompt:
-                session_history = self.get_session_history()
-                # AI応答処理を開始（これは別スレッドで動く）
-                self.app.process_prompt(text, session_history, screenshot_path)
-        
-        # 音声ファイルの削除
-        try:
-            if os.path.exists(audio_file_path):
-                os.remove(audio_file_path)
-        except Exception as e:
-            logging.error(f"Error removing audio file: {e}")

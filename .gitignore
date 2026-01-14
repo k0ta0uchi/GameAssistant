@@ -12,6 +12,7 @@ GameAssistant.spec
 run.ps1
 
 chromadb/
+models/
 output.mp3
 temp_*
 

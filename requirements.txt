@@ -21,6 +21,9 @@ twitchio==3.1.0
 pvporcupine
 mss==10.1.0
 sentence-transformers
+panda3d-gltf
+faster-whisper
+webrtcvad
 fugashi
 unidic_lite
 torchaudio
