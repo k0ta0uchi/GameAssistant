@@ -8,7 +8,7 @@ from google.genai import types
 from io import BytesIO
 import mimetypes
 import wave
-from .clients import get_gemini_client
+from .clients import get_gemini_client, switch_to_next_api_key
 from . import local_summarizer
 from .memory import MemoryManager
 from .prompts import BLOG_WRITER_SYSTEM_PROMPT, SESSION_SUMMARIZE_PROMPT, TTS_STYLE_INSTRUCTION
@@ -85,7 +85,46 @@ class GeminiSession:
         self.memory_manager = MemoryManager(collection_name="memories")
         local_summarizer.initialize_llm()
 
+    def _handle_quota_error(self) -> bool:
+        """
+        クォータエラー時にAPIキーを切り替え、メッセージを発話する。
+        切り替えに成功した場合は True, すべて使い切った場合は False を返す。
+        """
+        logging.warning("Gemini API Quota exhausted. Attempting to switch API key...")
+        
+        if switch_to_next_api_key():
+            self.client = get_gemini_client() # クライアントを更新
+            msg = "クォータを使い切りました、次のAPIキーを使うので待ってね"
+            logging.info(msg)
+            # GUI経由で発話（もし可能なら）
+            if self.app:
+                self.app.tts_queue.put(msg)
+            return True
+        else:
+            msg = "クォータをすべて使い切りました"
+            logging.error(msg)
+            if self.app:
+                self.app.tts_queue.put(msg)
+            return False
+
     def generate_content(
+        self,
+        prompt: str,
+        image_path: str | None = None,
+        is_private: bool = True,
+        memory_type: str = "app",
+        memory_user_id: str | None = None,
+    ):
+        while True: # リトライループ
+            try:
+                return self._generate_content_internal(prompt, image_path, is_private, memory_type, memory_user_id)
+            except Exception as e:
+                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self._handle_quota_error():
+                    time.sleep(1)
+                    continue # 次のキーで再試行
+                raise e
+
+    def _generate_content_internal(
         self,
         prompt: str,
         image_path: str | None = None,
@@ -123,7 +162,7 @@ class GeminiSession:
             "data": {
                 "query_texts": [prompt],
                 "n_results": 5,
-                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]},
+                "where": {"$and": [{"type": memory_type}, {"user": target_user_id}]}
             },
         }
         self.app.db_save_queue.put(query_task)
@@ -187,10 +226,32 @@ class GeminiSession:
 
             return response_text
         except Exception as e:
+            # クォータエラー以外のエラーは呼び出し元へ投げる
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                raise e # 呼び出し元のループで処理される
             print(f"An error occurred during content generation: {e}")
             return "申し訳ありません、エラーが発生しましただわん。"
 
     def generate_content_stream(
+        self,
+        prompt: str,
+        image_path: str | None = None,
+        is_private: bool = True,
+        memory_type: str = "app",
+        memory_user_id: str | None = None,
+    ):
+        while True:
+            try:
+                yield from self._generate_content_stream_internal(prompt, image_path, is_private, memory_type, memory_user_id)
+                return
+            except Exception as e:
+                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self._handle_quota_error():
+                    time.sleep(1)
+                    continue
+                yield "申し訳ありません、エラーが発生しましただわん。"
+                return
+
+    def _generate_content_stream_internal(
         self,
         prompt: str,
         image_path: str | None = None,
@@ -284,6 +345,8 @@ class GeminiSession:
             )
 
         except Exception as e:
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                raise e
             print(f"An error occurred during content generation: {e}")
             yield "申し訳ありません、エラーが発生しましただわん。"
 
@@ -315,6 +378,8 @@ class GeminiSession:
                 print("Speech generation response is empty or invalid.")
                 return None
         except Exception as e:
+            # 音声合成でもクォータエラーが起きる可能性があるが、
+            # ここではシンプルに None を返す（メインの生成ほど重要ではないため）
             print(f"An error occurred during speech generation: {e}")
             return None
 
@@ -416,15 +481,20 @@ class GeminiService:
                 else:
                     logging.warning("ブログ記事の生成応答が空でした。")
             except Exception as e:
-                # 429 Too Many Requests やその他のエラーをキャッチ
+                # 429 エラー時はキーの切り替えを試みる
+                if ("429" in str(e) or "ResourceExhausted" in str(e)) and self.session._handle_quota_error():
+                    time.sleep(1)
+                    continue # 切り替えたキーで再試行
+
+                # それ以外、または全キー消費時は指数バックオフ
                 error_msg = str(e)
                 if "429" in error_msg or "Too Many Requests" in error_msg.lower() or "ResourceExhausted" in error_msg:
-                    delay = base_delay * (2 ** attempt) # 指数バックオフ
+                    delay = base_delay * (2 ** attempt)
                     logging.warning(f"レート制限(429)を検出しました。{delay}秒後に再試行します... エラー: {e}")
                     time.sleep(delay)
                 else:
                     logging.error(f"ブログ記事の生成中に致命的なエラーが発生しました: {e}", exc_info=True)
-                    break # 429以外はリトライせずに終了
+                    break
 
         logging.error("最大リトライ回数に達したため、ブログ記事の生成を断念しました。")
         return None

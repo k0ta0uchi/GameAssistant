@@ -24,10 +24,49 @@ _chroma_client: Optional[Any] = None
 
 # グローバル変数としてクライアントインスタンスを保持
 _gemini_client = None
+_api_keys = []
+_current_key_index = 0
 
-def _get_chroma_settings() -> Settings:
-    persist_dir = os.environ.get("CHROMA_PERSIST_DIR", "chromadb")
-    return Settings(chroma_db_impl="duckdb+parquet", persist_directory=persist_dir)
+def _load_api_keys():
+    global _api_keys
+    if not _api_keys:
+        raw_keys = os.environ.get("GOOGLE_API_KEY", "")
+        # カンマ区切りで分割し、空の要素を排除
+        _api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
+    return _api_keys
+
+def get_gemini_client(force_refresh=False):
+    """
+    Gemini APIクライアントのシングルトンインスタンスを返す。
+    force_refresh=True の場合、現在のインデックスのキーでクライアントを再生成する。
+    """
+    global _gemini_client, _current_key_index
+    keys = _load_api_keys()
+    
+    if not keys:
+        raise ValueError("GOOGLE_API_KEY is not set in the environment.")
+
+    if _gemini_client is None or force_refresh:
+        current_key = keys[_current_key_index]
+        logger.info(f"Initializing Gemini client with key index {_current_key_index}")
+        _gemini_client = genai.Client(api_key=current_key)
+    
+    return _gemini_client
+
+def switch_to_next_api_key():
+    """
+    次のAPIキーに切り替える。
+    すべてのキーを使い切った（一周した）場合は False を返す。
+    """
+    global _current_key_index, _gemini_client
+    keys = _load_api_keys()
+    
+    if _current_key_index + 1 < len(keys):
+        _current_key_index += 1
+        get_gemini_client(force_refresh=True)
+        return True
+    
+    return False
 
 def get_chroma_client() -> Any:
     """
