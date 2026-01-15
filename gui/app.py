@@ -154,19 +154,34 @@ class GameAssistantApp:
                 self.tts_queue.task_done()
                 continue
 
-            sentence = item
-            try:
-                if voice.stop_playback_event.is_set():
-                    continue
+            # 長すぎる文はさらに分割して VOICEVOX の負荷を減らす
+            sentences = []
+            if len(item) > 100:
+                # 読点などで分割
+                sentences = [s.strip() for s in re.split(r'([、,])', item) if s.strip()]
+                # 分割記号を前の文に結合
+                merged_sentences = []
+                for i in range(0, len(sentences)-1, 2):
+                    merged_sentences.append(sentences[i] + sentences[i+1])
+                if len(sentences) % 2 == 1:
+                    merged_sentences.append(sentences[-1])
+                sentences = merged_sentences if merged_sentences else [item]
+            else:
+                sentences = [item]
 
-                logging.info(f"TTS先行合成開始: {sentence}")
-                wav_data = voice.generate_speech_data(sentence)
-                if wav_data:
-                    self.playback_queue.put(wav_data)
-            except Exception as e:
-                logging.error(f"TTS合成ワーカーでエラー: {e}")
-            finally:
-                self.tts_queue.task_done()
+            for sub_sentence in sentences:
+                try:
+                    if voice.stop_playback_event.is_set():
+                        break
+
+                    logging.info(f"TTS先行合成開始: {sub_sentence}")
+                    wav_data = voice.generate_speech_data(sub_sentence)
+                    if wav_data:
+                        self.playback_queue.put(wav_data)
+                except Exception as e:
+                    logging.error(f"TTS合成ワーカーでエラー: {e}")
+            
+            self.tts_queue.task_done()
 
     def _tts_playback_worker(self):
         """合成済み音声を順次再生するスレッド"""
@@ -689,11 +704,14 @@ class GameAssistantApp:
             self.root.after(0, self.reset_buttons_after_cancel)
             return
 
-        if "検索" in prompt or "けんさく" in prompt:
-            search_keyword = prompt
-            search_results = asyncio.run(self.run_ai_search(search_keyword))
+        if any(k in prompt for k in ["検索", "調べて", "教えて", "wiki"]):
+            # フィードバック音声
+            msg = "ウェブで調べてみるだわん！少々お待ちくださいだわん。"
+            self.tts_queue.put(msg)
+            
+            search_results = asyncio.run(ai_search(prompt))
             if search_results:
-                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
+                prompt += "\n\nWeb検索結果:\n" + "\n".join(search_results)
 
         image_path = self.screenshot_file_path if self.use_image.get() and os.path.exists(self.screenshot_file_path) else None
         session_history = self.session_manager.get_session_history() if self.session_manager.is_session_active() else None
@@ -718,11 +736,14 @@ class GameAssistantApp:
             logging.info("プロンプトが空のため、処理を中断します。")
             return
 
-        if "検索" in prompt or "けんさく" in prompt:
-            search_keyword = prompt
-            search_results = asyncio.run(self.run_ai_search(search_keyword))
+        if any(k in prompt for k in ["検索", "調べて", "教えて", "wiki"]):
+            # フィードバック音声
+            msg = "ウェブで調べてみるだわん！少々お待ちくださいだわん。"
+            self.tts_queue.put(msg)
+            
+            search_results = asyncio.run(ai_search(prompt))
             if search_results:
-                prompt += "\n\n検索結果:\n" + "\n".join(search_results)
+                prompt += "\n\nWeb検索結果:\n" + "\n".join(search_results)
 
         self.execute_gemini_interaction(prompt, screenshot_path, session_history)
 
@@ -787,16 +808,13 @@ class GameAssistantApp:
                 self.response_text_area.see(END)
                 self.response_text_area.config(state="disabled")
             
-            if auto_close or only_timer:
+            if auto_close:
                 self.root.after(self.response_display_duration.get(), self._clear_response_area)
 
     def _clear_response_area(self):
         self.response_text_area.config(state="normal")
         self.response_text_area.delete("1.0", END)
         self.response_text_area.config(state="disabled")
-
-    async def run_ai_search(self, query: str):
-        return await ai_search(query)
 
     def schedule_twitch_mention(self, author_name, prompt, channel):
         """Twitchのメンション処理をスレッドセーフにスケジュールする"""
