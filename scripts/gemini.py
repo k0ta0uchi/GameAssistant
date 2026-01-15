@@ -56,17 +56,19 @@ class GeminiSession:
         self.last_grounding_metadata = None
 
     def _handle_quota_error(self) -> bool:
+        """
+        クォータエラー時にAPIキーを切り替え、メッセージを表示する。
+        """
         logging.warning("Gemini API Quota exhausted. Attempting to switch API key...")
+        
         if switch_to_next_api_key():
-            self.client = get_gemini_client()
+            self.client = get_gemini_client() # クライアントを更新
             msg = "クォータを使い切りました、次のAPIキーを使うので待ってね"
             logging.info(msg)
-            if self.app: self.app.tts_queue.put(msg)
             return True
         else:
             msg = "クォータをすべて使い切りました"
             logging.error(msg)
-            if self.app: self.app.tts_queue.put(msg)
             return False
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
