@@ -127,9 +127,14 @@ class SessionManager:
 
         # プロンプト待機モード中の場合
         if self.is_collecting_prompt:
-            # クールダウン中かチェック
+            # クールダウン中かチェック（Nod音声の誤認識防止）
             if time.time() < self.prompt_cooldown_until:
-                logging.info(f"クールダウン中のため無視: {text}")
+                logging.info(f"クールダウン中のため無視（待機継続）: {text}")
+                return
+
+            # 空文字や極端に短いノイズを無視
+            if len(text.strip()) <= 1:
+                logging.info(f"テキストが短すぎるため無視（待機継続）: {text}")
                 return
 
             logging.info(f"プロンプトとして処理: {text}")

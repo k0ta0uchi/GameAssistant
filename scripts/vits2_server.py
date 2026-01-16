@@ -73,11 +73,21 @@ def scan_models():
                     "style_vec_path": style_vec_path,
                     "name": model_name
                 }
+                # 話者リストに追加（わんコメ等の外部アプリ互換性のため拡張）
                 speakers_info.append({
                     "name": model_name,
-                    "speaker_uuid": f"vits2-{model_name}",
-                    "styles": [{"name": "Normal", "id": speaker_id_counter}],
-                    "version": "1.0.0"
+                    "speaker_uuid": f"vits2-{model_name}", # 簡易的なUUID
+                    "styles": [
+                        {
+                            "name": "Normal", 
+                            "id": speaker_id_counter,
+                            "type": "talk" # 必須フィールド
+                        }
+                    ],
+                    "version": "1.0.0",
+                    "supported_features": {
+                        "permitted_synthesis_morphing": "ALL" # 必須フィールド
+                    }
                 })
                 speaker_id_counter += 1
 
@@ -182,11 +192,17 @@ async def synthesis(request: Request, speaker: int):
         text = query_data.get("text", "")
         speed_scale = query_data.get("speedScale", 1.0)
 
-        # ロードと推論を同期的に実行（FastAPIのスレッドプールで実行されるようにするため、
-        # ensure_model_loaded などを別関数に切り出すことも検討できますが、
-        # ここでは一番シンプルな形にします）
+        # ロードと推論を同期的に実行
         ensure_model_loaded(speaker)
+        
+        if speaker not in models:
+             raise RuntimeError(f"Speaker ID {speaker} not loaded.")
+             
         model = models[speaker]
+        
+        # デバッグログ：使用中のモデル名を確認
+        model_name = model_configs_cache.get(speaker, {}).get("name", "Unknown")
+        logging.info(f"合成に使用中のモデル: {model_name} (ID: {speaker})")
         
         sr, wav = model.infer(
             text=text,
