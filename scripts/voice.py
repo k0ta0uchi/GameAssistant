@@ -53,6 +53,32 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
                 wf.writeframes(pcm_data)
             wav_data.seek(0)
             return wav_data.read()
+    elif tts_engine == "style_bert_vits2":
+        # Style-Bert-VITS2 ブリッジサーバーを使用
+        base_url = "http://localhost:50021"
+        
+        # 選択されたモデル(speaker)を取得（デフォルトは0）
+        vits2_speaker_id = settings.get("vits2_speaker_id", 0)
+        
+        # 1. クエリ作成
+        encoded_text = urllib.parse.quote(text)
+        query_url = f"{base_url}/audio_query?text={encoded_text}&speaker={vits2_speaker_id}"
+        
+        try:
+            # タイムアウトを少し長めに設定
+            response = requests.post(query_url, timeout=10)
+            response.raise_for_status()
+            query_data = response.json()
+            
+            # 2. 音声合成
+            synthesis_url = f"{base_url}/synthesis?speaker={vits2_speaker_id}"
+            # 大型モデル向けにさらに長いタイムアウトを設定
+            response = requests.post(synthesis_url, json=query_data, timeout=60)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            print(f"Style-Bert-VITS2接続エラー: {e}")
+            return None
     else: # voicevox
         base_url = "http://localhost:50021"
 

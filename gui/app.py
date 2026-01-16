@@ -1,4 +1,4 @@
-from tkinter import font
+from tkinter import font, messagebox
 import ttkbootstrap as ttk
 import glob
 from ttkbootstrap.constants import (
@@ -36,6 +36,10 @@ from scripts.capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
 from .components import GeminiResponseWindow, MemoryWindow
 import subprocess
+
+import win32job
+import win32api
+import win32con
 
 class LoggingStream:
     """stdout/stderr を logging に変換するストリーム"""
@@ -87,6 +91,9 @@ class GameAssistantApp:
         self.show_response_in_new_window = ttk.BooleanVar(value=self.settings_manager.get("show_response_in_new_window", True))
         self.response_display_duration = ttk.IntVar(value=self.settings_manager.get("response_display_duration", 10000))
         self.tts_engine = ttk.StringVar(value=self.settings_manager.get("tts_engine", "voicevox"))
+        self.last_engine = self.tts_engine.get()
+        self.vits2_speaker_id = ttk.IntVar(value=self.settings_manager.get("vits2_speaker_id", 0))
+        self.vits2_server_process = None
         self.disable_thinking_mode = ttk.BooleanVar(value=self.settings_manager.get("disable_thinking_mode", False))
         self.user_name = ttk.StringVar(value=self.settings_manager.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings_manager.get("create_blog_post", False))
@@ -141,6 +148,13 @@ class GameAssistantApp:
         self.playback_worker_thread.start()
 
         self.current_response_window = None
+        
+        # 1. まずVITS2サーバーの起動判定（設定が VITS2 の場合のみ無許可で起動）
+        if self.tts_engine.get() == "style_bert_vits2":
+            self.start_vits2_server()
+        
+        # 2. 初期表示の更新（ダイアログなしでUIを構成）
+        self.on_tts_engine_change()
 
     def _tts_synthesis_worker(self):
         """文を音声データに変換する（先行合成）スレッド"""
@@ -256,6 +270,8 @@ class GameAssistantApp:
 
     def on_closing(self):
         self.cleanup_temp_files()
+        # VITS2サーバーを停止
+        self.stop_vits2_server()
         # DB保存スレッドを終了
         self.db_save_queue.put(None)
         self.db_worker_thread.join()
@@ -351,17 +367,27 @@ class GameAssistantApp:
         tts_frame = ttk.Frame(config_frame)
         tts_frame.pack(fill=X, pady=5)
         ttk.Label(tts_frame, text="TTSエンジン:").pack(side=LEFT)
-        voicevox_radio = ttk.Radiobutton(tts_frame, text="VOICEVOX", variable=self.tts_engine, value="voicevox", command=lambda: (self.settings_manager.set('tts_engine', self.tts_engine.get()), self.settings_manager.save(self.settings_manager.settings)))
+        voicevox_radio = ttk.Radiobutton(tts_frame, text="VOICEVOX", variable=self.tts_engine, value="voicevox", command=self.on_tts_engine_change)
         voicevox_radio.pack(side=LEFT, padx=5)
-        gemini_radio = ttk.Radiobutton(tts_frame, text="Gemini", variable=self.tts_engine, value="gemini", command=lambda: (self.settings_manager.set('tts_engine', self.tts_engine.get()), self.settings_manager.save(self.settings_manager.settings)))
+        gemini_radio = ttk.Radiobutton(tts_frame, text="Gemini", variable=self.tts_engine, value="gemini", command=self.on_tts_engine_change)
         gemini_radio.pack(side=LEFT, padx=5)
+        vits2_radio = ttk.Radiobutton(tts_frame, text="VITS2", variable=self.tts_engine, value="style_bert_vits2", command=self.on_tts_engine_change)
+        vits2_radio.pack(side=LEFT, padx=5)
 
+        # 先に thinking_mode 等を定義・pack しておく
         self.disable_thinking_mode_check = ttk.Checkbutton(
             config_frame, text="Thinkingモードをオフにする", variable=self.disable_thinking_mode,
             style="success-square-toggle",
             command=lambda: (self.settings_manager.set('disable_thinking_mode', self.disable_thinking_mode.get()), self.settings_manager.save(self.settings_manager.settings))
         )
         self.disable_thinking_mode_check.pack(fill=X, pady=5)
+
+        # その後で vits2_config_frame を作成（pack は後で before 指定で行う）
+        self.vits2_config_frame = ttk.Frame(config_frame)
+        ttk.Label(self.vits2_config_frame, text="VITS2モデル:").pack(side=LEFT)
+        self.vits2_model_dropdown = ttk.Combobox(self.vits2_config_frame, state=READONLY, width=20)
+        self.vits2_model_dropdown.pack(side=LEFT, padx=5)
+        self.vits2_model_dropdown.bind("<<ComboboxSelected>>", self.on_vits2_model_change)
 
         user_name_frame = ttk.Frame(config_frame)
         user_name_frame.pack(fill=X, pady=5)
@@ -919,6 +945,169 @@ class GameAssistantApp:
 
         for record in self.log_history:
             self._write_log(record, from_history=True)
+
+    def on_tts_engine_change(self):
+        engine = self.tts_engine.get()
+        
+        # 1. VITS2を選択した場合の処理（サーバー起動確認）
+        if engine == "style_bert_vits2" and self.vits2_server_process is None:
+            if messagebox.askokcancel("VITS2サーバーの起動", "Style-Bert-VITS2サーバーを起動しますか？\n(既にポート50021を使用しているアプリがある場合は競合します)"):
+                self.start_vits2_server()
+            else:
+                self.tts_engine.set(self.last_engine)
+                return
+
+        # 2. VITS2から他のエンジンに切り替える場合の処理（サーバー終了確認）
+        if self.last_engine == "style_bert_vits2" and engine != "style_bert_vits2" and self.vits2_server_process is not None:
+            if messagebox.askokcancel("VITS2サーバーの終了", "VITS2サーバーを終了して、他のTTSエンジンに切り替えますか？"):
+                self.stop_vits2_server()
+            else:
+                # キャンセルの場合は選択をVITS2に戻す
+                self.tts_engine.set("style_bert_vits2")
+                return
+
+        self.last_engine = engine
+        self.settings_manager.set('tts_engine', engine)
+        self.settings_manager.save(self.settings_manager.settings)
+        
+        if engine == "style_bert_vits2":
+            # 他の設定項目（Thinkingモード等）より上に表示されるよう
+            # tts_frame の直後に配置を維持。
+            self.vits2_config_frame.pack(fill=X, pady=5, before=self.disable_thinking_mode_check)
+            self.refresh_vits2_models()
+        else:
+            self.vits2_config_frame.pack_forget()
+
+    def on_vits2_model_change(self, event=None):
+        selected_name = self.vits2_model_dropdown.get()
+        if hasattr(self, 'vits2_speakers'):
+            for speaker in self.vits2_speakers:
+                if speaker['name'] == selected_name:
+                    speaker_id = speaker['styles'][0]['id']
+                    self.vits2_speaker_id.set(speaker_id)
+                    self.settings_manager.set('vits2_speaker_id', speaker_id)
+                    self.settings_manager.save(self.settings_manager.settings)
+                    logging.info(f"VITS2モデルを切り替えました: {selected_name} (ID: {speaker_id})")
+                    
+                    # サーバーにモデルのロードを事前リクエスト
+                    self.pre_load_vits2_model(speaker_id)
+                    break
+
+    def pre_load_vits2_model(self, speaker_id):
+        """サーバーに対してモデルの事前ロードをリクエストする"""
+        def _request():
+            try:
+                import requests
+                logging.info(f"VITS2モデルの事前ロードをリクエスト中 (ID: {speaker_id})...")
+                # 大型モデル対応のためタイムアウトを5分に延長
+                response = requests.post(f"http://localhost:50021/initialize?speaker={speaker_id}", timeout=300)
+                if response.status_code == 200:
+                    logging.info(f"VITS2モデルの事前ロードが完了しました (ID: {speaker_id})")
+                else:
+                    logging.error(f"VITS2事前ロードがエラーを返しました: {response.status_code}")
+            except Exception as e:
+                logging.error(f"VITS2事前ロードリクエストに失敗: {e}")
+        
+        threading.Thread(target=_request, daemon=True).start()
+
+    def refresh_vits2_models(self):
+        """VITS2サーバーからモデルリストを取得してドロップダウンを更新する（リトライ付き）"""
+        def _fetch():
+            import requests
+            max_retries = 15
+            for i in range(max_retries):
+                try:
+                    response = requests.get("http://localhost:50021/speakers", timeout=2)
+                    if response.status_code == 200:
+                        self.vits2_speakers = response.json()
+                        names = [s['name'] for s in self.vits2_speakers]
+                        logging.info(f"VITS2モデルリストを取得しました: {names}")
+                        self.root.after(0, lambda: self._update_vits2_dropdown(names))
+                        
+                        # 取得できたら、現在選択されているモデルの事前ロードをリクエスト
+                        self.pre_load_vits2_model(self.vits2_speaker_id.get())
+                        return
+                except Exception:
+                    pass
+                logging.debug(f"VITS2サーバーの待機中... ({i+1}/{max_retries})")
+                time.sleep(1)
+            logging.error("VITS2モデルリストの取得に失敗しました（タイムアウト）")
+        
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _update_vits2_dropdown(self, names):
+        self.vits2_model_dropdown['values'] = names
+        if names:
+            # 現在のspeaker_idに対応する名前を選択状態にする
+            current_id = self.vits2_speaker_id.get()
+            selected_name = names[0]
+            if hasattr(self, 'vits2_speakers'):
+                for s in self.vits2_speakers:
+                    if s['styles'][0]['id'] == current_id:
+                        selected_name = s['name']
+                        break
+            self.vits2_model_dropdown.set(selected_name)
+
+    def start_vits2_server(self):
+        """Style-Bert-VITS2 ブリッジサーバーを起動する"""
+        if self.vits2_server_process is None:
+            logging.info("VITS2サーバーを起動します...")
+            try:
+                # ジョブオブジェクトの作成（強制終了時の道連れ用）
+                self.vits2_job = win32job.CreateJobObject(None, "")
+                extended_info = win32job.QueryInformationJobObject(self.vits2_job, win32job.JobObjectExtendedLimitInformation)
+                extended_info['BasicLimitInformation']['LimitFlags'] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                win32job.SetInformationJobObject(self.vits2_job, win32job.JobObjectExtendedLimitInformation, extended_info)
+
+                # scripts/vits2_server.py を実行
+                # CREATE_BREAKAWAY_FROM_JOB を防ぐため flags=0 (デフォルト)
+                self.vits2_server_process = subprocess.Popen(
+                    [sys.executable, "scripts/vits2_server.py"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW # コンソールウィンドウを表示しない
+                )
+                
+                # プロセスをジョブに割り当て
+                win32job.AssignProcessToJobObject(self.vits2_job, self.vits2_server_process._handle)
+
+                # サーバーログを読み取るスレッドを開始
+                def log_reader(pipe):
+                    try:
+                        for line in iter(pipe.readline, ''):
+                            if line:
+                                logging.info(f"[VITS2 Server] {line.strip()}")
+                    except Exception: pass
+                    finally:
+                        try: pipe.close()
+                        except: pass
+                
+                threading.Thread(target=log_reader, args=(self.vits2_server_process.stdout,), daemon=True).start()
+                
+                # 起動待ち
+                time.sleep(3) 
+            except Exception as e:
+                logging.error(f"VITS2サーバーの起動に失敗: {e}")
+
+    def stop_vits2_server(self):
+        """VITS2サーバーを停止する"""
+        if self.vits2_server_process:
+            logging.info("VITS2サーバーを停止します...")
+            try:
+                # ジョブを閉じることでプロセスを確実に終了させる
+                self.vits2_server_process.terminate()
+                self.vits2_server_process.wait(timeout=2)
+            except Exception:
+                try: self.vits2_server_process.kill()
+                except: pass
+            finally:
+                self.vits2_server_process = None
+                if hasattr(self, 'vits2_job'):
+                    # ジョブオブジェクトのハンドルを閉じる（これでKILL_ON_JOB_CLOSEが発動）
+                    # 本来は CloseHandle ですが win32job ではオブジェクト削除でOK
+                    del self.vits2_job
 
     def _write_log(self, record, from_history=False):
         if not from_history:
