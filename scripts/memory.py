@@ -2,12 +2,19 @@ import json
 import logging
 import asyncio
 import uuid
+import os
+import torch
+
+# ONNX Runtime の競合とGPU競合を避けるための環境変数設定
+# ChromaDB (Embedding) が ONNX Runtime を使用する際、強制的に CPU を使わせる
+# os.environ["ORT_TENSORRT_UNAVAILABLE"] = "1"
+# os.environ["ORT_CUDA_UNAVAILABLE"] = "1"
+
 from . import local_summarizer
 from .clients import get_chroma_client, get_gemini_client
 from google.genai import types
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai_async
-import os
 
 # Configure the async client
 if os.environ.get("GOOGLE_API_KEY"):
@@ -22,14 +29,18 @@ def get_embedding_model():
     if _embedding_model is None:
         # pkshatech/GLuCoSE-base-ja を使用
         local_path = "./models/GLuCoSE-base-ja"
+        
+        # GPUが利用可能ならCUDAを使用
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
         if os.path.exists(local_path):
             model_name = local_path
-            logging.info(f"Loading local embedding model from: {model_name}")
+            logging.info(f"Loading local embedding model from: {model_name} (device={device})")
         else:
             model_name = "pkshatech/GLuCoSE-base-ja"
-            logging.info(f"Local model not found. Downloading from HF: {model_name}")
+            logging.info(f"Local model not found. Downloading from HF: {model_name} (device={device})")
         
-        _embedding_model = SentenceTransformer(model_name)
+        _embedding_model = SentenceTransformer(model_name, device=device)
     return _embedding_model
 
 class MemoryAccessError(Exception):
@@ -48,8 +59,11 @@ class MemoryManager:
             self.collection_name = collection_name
 
             logging.info(f"Getting or creating collection '{self.collection_name}' with HNSW parameters.")
+            # embedding_function=None を指定して、ChromaDBデフォルトのONNXモデルロードを阻止する
+            # ※ データの追加・検索時には必ず自前で embeddings を計算して渡す必要がある
             self.collection = self.chroma_client.get_or_create_collection(
                 name=self.collection_name,
+                embedding_function=None,
                 metadata={
                     "hnsw:space": "l2",
                     "hnsw:M": 16,

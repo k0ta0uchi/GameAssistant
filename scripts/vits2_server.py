@@ -128,21 +128,26 @@ def ensure_model_loaded(speaker_id: int):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.info(f"モデル '{conf['name']}' を {device} にロード中...")
         
-        model = TTSModel(
-            model_path=conf["model_path"],
-            config_path=conf["config_path"],
-            style_vec_path=conf["style_vec_path"],
-            device=device
-        )
-
-        # 高速化: torch.compile (PyTorch 2.0+ 且つ CUDA の場合)
-        if hasattr(torch, "compile") and device == "cuda":
-            try:
-                logging.info("モデルを最適化中 (torch.compile)...")
-                model.model = torch.compile(model.model)
-                logging.info("最適化が有効になりました。")
-            except Exception as e:
-                logging.warning(f"モデルの最適化に失敗: {e}")
+        try:
+            model = TTSModel(
+                model_path=conf["model_path"],
+                config_path=conf["config_path"],
+                style_vec_path=conf["style_vec_path"],
+                device=device
+            )
+            
+            # torch.compile (PyTorch 2.0+ & CUDA)
+            if hasattr(torch, "compile") and device == "cuda":
+                try:
+                    logging.info("モデル最適化中 (torch.compile)...")
+                    # TTSModel 内部の Generator (net_g) をコンパイル
+                    model.net_g = torch.compile(model.net_g)
+                    logging.info("最適化が有効になりました。")
+                except Exception as e:
+                    logging.warning(f"最適化失敗（スキップ）: {e}")
+        except Exception as e:
+            logging.error(f"モデルロード中にエラーが発生しました: {e}")
+            raise e
 
         # Warm-up (初回の推論遅延を防止)
         try:
