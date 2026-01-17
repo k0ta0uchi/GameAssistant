@@ -1061,13 +1061,16 @@ class GameAssistantApp:
 
                 # scripts/vits2_server.py を実行
                 # CREATE_BREAKAWAY_FROM_JOB を防ぐため flags=0 (デフォルト)
+                # プロセス優先度を「高」に設定して、メイン負荷時も音声再生を安定させる
+                creation_flags = subprocess.CREATE_NO_WINDOW | win32con.HIGH_PRIORITY_CLASS
+                
                 self.vits2_server_process = subprocess.Popen(
                     [sys.executable, "scripts/vits2_server.py"],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
-                    creationflags=subprocess.CREATE_NO_WINDOW # コンソールウィンドウを表示しない
+                    creationflags=creation_flags
                 )
                 
                 # プロセスをジョブに割り当て
