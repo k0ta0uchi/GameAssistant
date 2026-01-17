@@ -214,8 +214,8 @@ async def synthesis(request: Request, speaker: int):
             language=Languages.JP,
             speaker_id=0,
             sdp_ratio=0.0,      # リズムを固定して噛み・崩れを防止
-            noise_scale=0.5,    # ノイズを抑えてクリアな声に
-            noise_scale_w=0.9,  # 抑揚の強さ（デフォルト付近で維持）
+            noise=0.5,          # ノイズを抑えてクリアな声に
+            noise_w=0.9,        # 抑揚の強さ（デフォルト付近で維持）
             length=(1.0 / speed_scale) * 1.1 if speed_scale > 0 else 1.1 # 1.1倍に
         )
         
