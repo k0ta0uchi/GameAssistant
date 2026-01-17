@@ -68,17 +68,28 @@ class SessionManager:
 
     def start_session(self):
         logging.info("セッション（ハイブリッド認識）を開始します。")
-        self.session_running = True
-        self.session_memory = SessionMemory()
-        self.twitch_service.connect_twitch_bot()
-        
-        self.transcriber.start(self._on_transcription_result)
-        
-        self.audio_service.add_listener(self.transcriber.add_audio)
-        self.audio_service.start_stream(
-            wake_word_callback=self._on_wake_word,
-            stop_word_callback=self._on_stop_word
-        )
+        try:
+            self.session_running = True
+            self.session_memory = SessionMemory()
+            logging.debug("SessionMemory initialized.")
+            
+            logging.debug("Starting Twitch connection...")
+            self.twitch_service.connect_twitch_bot()
+            
+            logging.debug("Starting StreamTranscriber...")
+            self.transcriber.start(self._on_transcription_result)
+            
+            self.audio_service.add_listener(self.transcriber.add_audio)
+            
+            logging.debug("Starting AudioService stream...")
+            self.audio_service.start_stream(
+                wake_word_callback=self._on_wake_word,
+                stop_word_callback=self._on_stop_word
+            )
+            logging.info("セッション開始処理が完了しました。")
+        except Exception as e:
+            logging.error(f"セッション開始中にエラーが発生しました: {e}", exc_info=True)
+            self.stop_session()
 
     def stop_session(self):
         logging.info("セッションを停止します。")

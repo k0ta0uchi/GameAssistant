@@ -12,10 +12,15 @@ import chromadb
 REDIRECT_URI = "https://k0ta0uchi.github.io/GameAssistant/auth.html"
 SCOPES = "chat:read chat:edit moderator:read:followers user:read:chat user:write:chat user:bot channel:bot"
 
+class DummyEmbeddingFunction:
+    def __call__(self, input):
+        return [[0.0] * 384 for _ in input]
+
 # --- ChromaDBクライアントの初期化 ---
 chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
 token_collection = chroma_client.get_or_create_collection(
     name="user_tokens",
+    embedding_function=DummyEmbeddingFunction(),
     metadata={
         "hnsw:space": "l2",
         "hnsw:M": 16,

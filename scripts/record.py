@@ -134,28 +134,30 @@ class AudioService:
                     idx_stop = self.stop_porcupine.process(pcm)
                     if idx_stop >= 0 and self.stop_word_detected_callback:
                         self.stop_word_detected_callback()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.error(f"Porcupine processing error: {e}", exc_info=True)
 
         # 2. Whisper処理 (float32 numpy)
-        # リスナーには Whisper 用の形式で渡す
-        audio_float = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
-        
-        # デバッグ: リスナー数を表示（初回のみ、または一定間隔で）
-        # if len(self.listeners) > 0 and frame_count % 100 == 0:
-        #     print(f"[DEBUG] Sending audio to {len(self.listeners)} listeners")
-
-        for listener in self.listeners:
-            try:
-                listener(audio_float)
-            except Exception:
-                pass
+        try:
+            # リスナーには Whisper 用の形式で渡す
+            audio_float = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
+            
+            for listener in self.listeners:
+                try:
+                    listener(audio_float)
+                except Exception as e:
+                    logging.error(f"Audio listener error: {e}", exc_info=True)
+        except Exception as e:
+             logging.error(f"Audio conversion error: {e}", exc_info=True)
         
         # 3. レベルメーター (GUI更新)
         # メインスレッド以外からのGUI操作になるため、App側でafter等を使うか、ここで簡単な計算だけする
         # （ここではシンプルに値を渡す）
-        vol = np.abs(np.frombuffer(in_data, dtype=np.int16)).mean()
-        self.app.update_level_meter(vol)
+        try:
+            vol = np.abs(np.frombuffer(in_data, dtype=np.int16)).mean()
+            self.app.update_level_meter(vol)
+        except Exception as e:
+            logging.error(f"Level meter update error: {e}", exc_info=True)
 
         return (in_data, pyaudio.paContinue)
 

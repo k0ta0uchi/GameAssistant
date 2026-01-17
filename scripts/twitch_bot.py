@@ -22,6 +22,10 @@ import time
 import chromadb
 from . import twitch_auth
 
+class DummyEmbeddingFunction:
+    def __call__(self, input):
+        return [[0.0] * 384 for _ in input]
+
 async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[str, str]], Any]:
     """
     ChromaDBをセットアップします。
@@ -29,6 +33,7 @@ async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[st
     tokens = []
     token_collection = chroma_client.get_or_create_collection(
     name="user_tokens",
+    embedding_function=DummyEmbeddingFunction(),
     metadata={
         "hnsw:space": "l2",
         "hnsw:M": 16,
@@ -259,16 +264,24 @@ class TwitchService:
         threading.Thread(target=self.run_connect_twitch_bot, daemon=True).start()
 
     def run_connect_twitch_bot(self):
-        self.twitch_bot_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.twitch_bot_loop)
-        self.twitch_bot_loop.run_until_complete(self.async_connect_twitch_bot())
+        logging.info("Twitchボット接続スレッドを開始します (run_connect_twitch_bot)")
+        try:
+            self.twitch_bot_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.twitch_bot_loop)
+            self.twitch_bot_loop.run_until_complete(self.async_connect_twitch_bot())
 
-        if self.twitch_bot:
-            self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
-            self.twitch_thread.start()
-            self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
+            if self.twitch_bot:
+                logging.info("Twitchボットインスタンスが作成されました。実行スレッドを開始します。")
+                self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
+                self.twitch_thread.start()
+                self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
+            else:
+                logging.warning("Twitchボットインスタンスの作成に失敗したため、実行スレッドは開始されません。")
+        except Exception as e:
+            logging.error(f"Twitchボット接続スレッドで致命的なエラーが発生しました: {e}", exc_info=True)
 
     async def async_connect_twitch_bot(self):
+        logging.info("Twitchボットへの非同期接続処理を開始します (async_connect_twitch_bot)")
         client_id = self.app.twitch_client_id.get()
         client_secret = self.app.twitch_client_secret.get()
         
@@ -277,26 +290,40 @@ class TwitchService:
             logging.error("ボットのIDが設定ファイルに見つかりません。認証コードでボットのトークンを登録してください。")
             return
 
+        logging.debug(f"ボットトークンの有効性を確認しています... Bot ID: {bot_id}")
         if not await twitch_auth.ensure_bot_token_valid(client_id, client_secret, bot_id):
+            logging.error("ボットトークンの有効性確認に失敗しました。")
             return
 
+        logging.debug("DBからボットトークンを取得しています...")
         bot_token_info = await twitch_auth.get_token_from_db(bot_id)
         if not bot_token_info or 'token' not in bot_token_info:
             logging.error("DBからボットのトークンを取得できませんでした。")
             return
         bot_token = bot_token_info['token']
 
-        logging.info("Twitchボットに接続しています...")
+        logging.info("Twitchボットインスタンスを初期化しています...")
         try:
-            token_collection = chromadb.PersistentClient(path="./chroma_tokens_data").get_or_create_collection(
-        name="user_tokens",
-        metadata={
-            "hnsw:space": "l2",
-            "hnsw:M": 16,
-            "hnsw:construction_ef": 256,
-            "hnsw:ef": 256
-        }
-    )
+            logging.debug("ChromaDBクライアントを初期化しています (path='./chroma_tokens_data')...")
+            # DBパスの絶対パスを表示して確認
+            import os
+            abs_path = os.path.abspath("./chroma_tokens_data")
+            logging.debug(f"ChromaDB Path: {abs_path}")
+            
+            chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
+            logging.debug("ChromaDBクライアント初期化完了。コレクションを取得/作成します...")
+            
+            token_collection = chroma_client.get_or_create_collection(
+                name="user_tokens",
+                embedding_function=DummyEmbeddingFunction(),
+                metadata={
+                    "hnsw:space": "l2",
+                    "hnsw:M": 16,
+                    "hnsw:construction_ef": 256,
+                    "hnsw:ef": 256
+                }
+            )
+            logging.debug("ChromaDBコレクション取得完了。TwitchBotクラスをインスタンス化します...")
             
             self.twitch_bot = TwitchBot(
                 token=bot_token,
@@ -309,9 +336,10 @@ class TwitchService:
                 message_callback=self.message_callback,
                 mention_callback=self.mention_callback,
             )
+            logging.info("TwitchBotインスタンス化に成功しました。")
 
         except Exception as e:
-            logging.error(f"Twitchへの接続に失敗しました: {e}", exc_info=True)
+            logging.error(f"Twitchへの接続初期化中にエラーが発生しました: {e}", exc_info=True)
             self.twitch_bot = None
 
     def disconnect_twitch_bot(self):
