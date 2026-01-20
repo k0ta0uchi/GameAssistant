@@ -136,28 +136,53 @@ def text_to_speech_kokoro(text):
     play_wav_data(wav_data)
 
 
-def play_wav_data(wav_data):
+def play_wav_data(wav_data, volume=1.0):
     """
     WAVデータを再生する。
+    volume: 0.0 〜 1.0 (またはそれ以上) の倍率
     """
     # 再生開始時に停止フラグを強制リセット
     stop_playback_event.clear()
     try:
+        import numpy as np
+        
         wf = wave.open(io.BytesIO(wav_data), 'rb')
+        sample_width = wf.getsampwidth()
+        channels = wf.getnchannels()
+        rate = wf.getframerate()
+        
         p_audio = pyaudio.PyAudio()
-
-        stream = p_audio.open(format=p_audio.get_format_from_width(wf.getsampwidth()),
-                        channels=wf.getnchannels(),
-                        rate=wf.getframerate(),
+        stream = p_audio.open(format=p_audio.get_format_from_width(sample_width),
+                        channels=channels,
+                        rate=rate,
                         output=True)
 
-        data = wf.readframes(1024)
+        # チャンクごとに処理
+        chunk_size = 1024
+        data = wf.readframes(chunk_size)
+        
         while data:
             if stop_playback_event.is_set():
                 print("音声再生を中断しました。")
                 break
+            
+            # 音量調整が必要な場合 (1.0以外)
+            if volume != 1.0:
+                # バイナリデータを数値配列に変換
+                if sample_width == 2: # 16-bit
+                    audio_array = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                    audio_array *= volume
+                    # オーバーフロー防止
+                    audio_array = np.clip(audio_array, -32768, 32767)
+                    data = audio_array.astype(np.int16).tobytes()
+                elif sample_width == 1: # 8-bit
+                    audio_array = np.frombuffer(data, dtype=np.uint8).astype(np.float32)
+                    audio_array = (audio_array - 128) * volume + 128
+                    audio_array = np.clip(audio_array, 0, 255)
+                    data = audio_array.astype(np.uint8).tobytes()
+
             stream.write(data)
-            data = wf.readframes(1024)
+            data = wf.readframes(chunk_size)
 
         stream.stop_stream()
         stream.close()

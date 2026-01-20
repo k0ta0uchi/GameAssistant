@@ -213,7 +213,9 @@ class GameAssistantApp:
             wav_data = item
             try:
                 if not voice.stop_playback_event.is_set():
-                    voice.play_wav_data(wav_data)
+                    # TTSの音量をnod（頷き音声）に合わせるため調整 (例: 0.5倍)
+                    # nod音源の音量が小さい場合、ここを調整してください
+                    voice.play_wav_data(wav_data, volume=0.5)
             except Exception as e:
                 logging.error(f"TTS再生ワーカーでエラー: {e}")
             finally:
