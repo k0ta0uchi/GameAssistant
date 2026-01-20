@@ -159,7 +159,7 @@ class GeminiSession:
             config = types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget))
             full_response_text = ""
             for response in self.client.models.generate_content_stream(model=GEMINI_MODEL, contents=self.history, config=config):
-                chunk_text = response.text
+                chunk_text = response.text or ""
                 full_response_text += chunk_text
                 yield chunk_text
             self.history.append(types.Content(role="model", parts=[types.Part(text=full_response_text)]))
