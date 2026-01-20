@@ -78,6 +78,16 @@ class AudioService:
 
         # PyAudioストリーム開始
         device_index = self.app.device_index
+        
+        # デバイスインデックスの検証
+        if device_index is not None:
+            try:
+                info = p.get_device_info_by_index(device_index)
+                logging.info(f"Opening audio stream on device: {info.get('name')} (Index: {device_index})")
+            except Exception:
+                logging.warning(f"Invalid device index: {device_index}. Using default device.")
+                device_index = None
+
         try:
             self.stream = p.open(
                 rate=SAMPLE_RATE,
@@ -92,6 +102,23 @@ class AudioService:
             logging.info("Audio stream started (Shared).")
         except Exception as e:
             logging.error(f"PyAudio Error: {e}")
+            # デフォルトデバイスでの再試行
+            if device_index is not None:
+                try:
+                    logging.info("Retrying with default input device...")
+                    self.stream = p.open(
+                        rate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        format=FORMAT,
+                        input=True,
+                        frames_per_buffer=CHUNK,
+                        input_device_index=None,
+                        stream_callback=self._audio_callback
+                    )
+                    self.stream.start_stream()
+                    logging.info("Audio stream started on default device (Shared).")
+                except Exception as retry_e:
+                    logging.error(f"PyAudio Retry Error: {retry_e}")
 
     def stop_stream(self):
         self.is_running = False

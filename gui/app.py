@@ -95,6 +95,8 @@ class GameAssistantApp:
         self.vits2_speaker_id = ttk.IntVar(value=self.settings_manager.get("vits2_speaker_id", 0))
         self.vits2_server_process = None
         self.disable_thinking_mode = ttk.BooleanVar(value=self.settings_manager.get("disable_thinking_mode", False))
+        # デフォルトは large (高精度)
+        self.asr_engine = ttk.StringVar(value=self.settings_manager.get("asr_engine", "large"))
         self.user_name = ttk.StringVar(value=self.settings_manager.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings_manager.get("create_blog_post", False))
 
@@ -375,6 +377,14 @@ class GameAssistantApp:
         gemini_radio.pack(side=LEFT, padx=5)
         vits2_radio = ttk.Radiobutton(tts_frame, text="VITS2", variable=self.tts_engine, value="style_bert_vits2", command=self.on_tts_engine_change)
         vits2_radio.pack(side=LEFT, padx=5)
+
+        asr_engine_frame = ttk.Frame(config_frame)
+        asr_engine_frame.pack(fill=X, pady=5)
+        ttk.Label(asr_engine_frame, text="認識エンジン:").pack(side=LEFT)
+        large_radio = ttk.Radiobutton(asr_engine_frame, text="Whisper (Large)", variable=self.asr_engine, value="large", command=lambda: (self.settings_manager.set('asr_engine', 'large'), self.settings_manager.save(self.settings_manager.settings)))
+        large_radio.pack(side=LEFT, padx=5)
+        tiny_radio = ttk.Radiobutton(asr_engine_frame, text="Whisper (Tiny)", variable=self.asr_engine, value="tiny", command=lambda: (self.settings_manager.set('asr_engine', 'tiny'), self.settings_manager.save(self.settings_manager.settings)))
+        tiny_radio.pack(side=LEFT, padx=5)
 
         # 先に thinking_mode 等を定義・pack しておく
         self.disable_thinking_mode_check = ttk.Checkbutton(

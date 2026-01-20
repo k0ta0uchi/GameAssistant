@@ -52,10 +52,10 @@ class SessionManager:
         self.twitch_service.message_callback = self.handle_twitch_message
         
         self.audio_service = AudioService(app)
-        self.transcriber = StreamTranscriber(
-            model_size="kotoba-tech/kotoba-whisper-v2.0-faster",
-            compute_type="int8"
-        )
+        
+        # 初期状態ではエンジンを作成せず、start_session時に作成する
+        self.transcriber = None
+        self.asr_engine_type = None
         
         self._stop_event = threading.Event()
         
@@ -69,14 +69,38 @@ class SessionManager:
     def start_session(self):
         logging.info("セッション（ハイブリッド認識）を開始します。")
         try:
+            # 既存のtranscriberがあれば確実に停止する
+            if self.transcriber:
+                logging.info("Stopping existing transcriber instance...")
+                try:
+                    self.transcriber.stop()
+                except Exception as e:
+                    logging.warning(f"Error stopping old transcriber: {e}")
+                self.transcriber = None
+
             self.session_running = True
             self.session_memory = SessionMemory()
             logging.debug("SessionMemory initialized.")
             
+            # 設定からエンジンを選択して作成
+            self.asr_engine_type = self.app.asr_engine.get()
+            logging.info(f"Using ASR Engine Mode: {self.asr_engine_type}")
+            
+            model_size = "kotoba-tech/kotoba-whisper-v2.0-faster" # Default (Large)
+            if self.asr_engine_type == "tiny":
+                # 軽量モデル (Faster-Whisper Tiny)
+                model_size = "tiny"
+                logging.info("Selected Tiny model for lightweight performance.")
+            
+            self.transcriber = StreamTranscriber(
+                model_size=model_size,
+                compute_type="int8"
+            )
+
             logging.debug("Starting Twitch connection...")
             self.twitch_service.connect_twitch_bot()
             
-            logging.debug("Starting StreamTranscriber...")
+            logging.debug(f"Starting ASR Engine ({model_size})...")
             self.transcriber.start(self._on_transcription_result)
             
             self.audio_service.add_listener(self.transcriber.add_audio)
@@ -97,7 +121,11 @@ class SessionManager:
         self.twitch_service.disconnect_twitch_bot()
         
         self.audio_service.stop_stream()
-        self.transcriber.stop()
+        
+        if self.transcriber:
+            self.audio_service.remove_listener(self.transcriber.add_audio)
+            self.transcriber.stop()
+            self.transcriber = None
         
         if self.session_memory:
             self.session_memory.end_time = datetime.now()
@@ -134,7 +162,7 @@ class SessionManager:
         if not is_final:
             return
 
-        logging.info(f"[Whisper Final] {text}")
+        logging.info(f"[ASR Final] {text}")
 
         # プロンプト待機モード中の場合
         if self.is_collecting_prompt:
