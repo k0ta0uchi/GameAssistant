@@ -123,7 +123,7 @@ class MemoryManager:
 
             # ローカルでEmbedding生成
             model = get_embedding_model()
-            embedding = model.encode(document).tolist()
+            embedding = model.encode(document, show_progress_bar=False).tolist()
 
             existing_data = self.collection.get(ids=[key], include=['metadatas'])
             if existing_data and existing_data['metadatas'] and existing_data['metadatas'][0]:
@@ -169,7 +169,7 @@ class MemoryManager:
 
             # ローカルでEmbedding生成
             model = get_embedding_model()
-            embedding = model.encode(content).tolist()
+            embedding = model.encode(content, show_progress_bar=False).tolist()
 
             self.collection.upsert(
                 ids=[event_id],
@@ -187,7 +187,7 @@ class MemoryManager:
             # テキストが提供された場合はローカルでEmbedding化する
             if query_texts:
                 model = get_embedding_model()
-                query_embeddings = model.encode(query_texts).tolist()
+                query_embeddings = model.encode(query_texts, show_progress_bar=False).tolist()
                 query_texts = None # embeddingsを優先
 
             return self.collection.query(query_embeddings=query_embeddings, n_results=n_results, where=where)

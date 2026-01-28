@@ -1148,8 +1148,31 @@ class GameAssistantApp:
         }
         self.log_textbox.config(state="normal")
         
-        msg = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} {log_level_emojis.get(record.levelname, ' ')} [{record.levelname}] {record.getMessage()}\n"
+        msg_content = record.getMessage()
+        levelname = record.levelname
         
-        self.log_textbox.insert(END, msg, record.levelname)
+        # 特定のノイズログ（EmbeddingのBatch処理など）をERRORからINFO扱い（色は白/デフォルト）に変更
+        # ChromaDBやSentenceTransformersが出す不要なERRORログ対策
+        if levelname == 'ERROR' and any(k in msg_content for k in ['Embedding', 'Batch', 'onnx', 'cudnn', 'Batches:']):
+            levelname = 'INFO'
+            # 絵文字もINFOに合わせるか、あるいは警告色にするか。ここでは白くしたいのでINFO相当にする
+            # ただし、元がERRORであることを知りたい場合は残すが、ユーザー要望は「変えてほしい」「白く」
+        
+        # タグの決定（色指定のため）
+        tag_name = levelname
+        
+        # INFOレベルの色を青(#007bff)から、より見やすい色（またはデフォルト）に変更したい場合
+        # ここでは特定のログだけタグを外してデフォルト色（白/黒）にする
+        if levelname == 'INFO' and any(k in msg_content for k in ['Embedding', 'Batch', 'Batches:']):
+             tag_name = 'DEFAULT' # タグ設定なし＝デフォルト色
+
+        msg = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} {log_level_emojis.get(record.levelname, ' ')} [{record.levelname}] {msg_content}\n"
+        
+        # tag_nameが定義されている場合のみ適用
+        if tag_name == 'DEFAULT':
+            self.log_textbox.insert(END, msg)
+        else:
+            self.log_textbox.insert(END, msg, tag_name)
+            
         self.log_textbox.see(END)
         self.log_textbox.config(state="disabled")
