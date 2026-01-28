@@ -170,15 +170,15 @@ async def ai_search(query):
     try:
         embedding_model = get_embedding_model()
         
-            # クエリのベクトル化 (ユーザーの意図を汲むため元のクエリを使用)
-            query_vec = embedding_model.encode(query, show_progress_bar=False)
-            
-            # ドキュメント（スニペット）のベクトル化
-            # title + description を連結
-            docs_text = [f"{item.get('title', '')} {item.get('description', '')}" for item in raw_results]
-            docs_vecs = embedding_model.encode(docs_text, show_progress_bar=False) # バッチ処理
-            
-            # 類似度計算        # reshape(1, -1) で2次元配列にする
+        # クエリのベクトル化 (ユーザーの意図を汲むため元のクエリを使用)
+        query_vec = embedding_model.encode(query, show_progress_bar=False)
+        
+        # ドキュメント（スニペット）のベクトル化
+        # title + description を連結
+        docs_text = [f"{item.get('title', '')} {item.get('description', '')}" for item in raw_results]
+        docs_vecs = embedding_model.encode(docs_text, show_progress_bar=False) # バッチ処理
+        
+        # 類似度計算        # reshape(1, -1) で2次元配列にする
         similarities = cosine_similarity(query_vec.reshape(1, -1), docs_vecs)[0]
         
         scored_results = []
