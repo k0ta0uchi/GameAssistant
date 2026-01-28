@@ -13,6 +13,7 @@ from scripts.record import AudioService
 from scripts.streaming_whisper import StreamTranscriber
 from scripts.voice import play_random_nod
 import scripts.voice as voice
+from scripts.auto_commentary import AutoCommentaryService
 
 @dataclass
 class TwitchMessage:
@@ -57,6 +58,8 @@ class SessionManager:
         self.transcriber = None
         self.asr_engine_type = None
         
+        self.auto_commentary_service = AutoCommentaryService(app, self)
+
         self._stop_event = threading.Event()
         
         # プロンプト処理用の状態管理
@@ -110,6 +113,10 @@ class SessionManager:
                 wake_word_callback=self._on_wake_word,
                 stop_word_callback=self._on_stop_word
             )
+            
+            # 自立型ツッコミサービスの開始
+            self.auto_commentary_service.start()
+            
             logging.info("セッション開始処理が完了しました。")
         except Exception as e:
             logging.error(f"セッション開始中にエラーが発生しました: {e}", exc_info=True)
@@ -117,6 +124,11 @@ class SessionManager:
 
     def stop_session(self):
         logging.info("セッションを停止します。")
+        
+        # 自立型ツッコミサービスの停止
+        if hasattr(self, 'auto_commentary_service'):
+            self.auto_commentary_service.stop()
+
         self.session_running = False
         self.twitch_service.disconnect_twitch_bot()
         

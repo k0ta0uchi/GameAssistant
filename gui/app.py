@@ -99,6 +99,7 @@ class GameAssistantApp:
         self.asr_engine = ttk.StringVar(value=self.settings_manager.get("asr_engine", "large"))
         self.user_name = ttk.StringVar(value=self.settings_manager.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings_manager.get("create_blog_post", False))
+        self.enable_auto_commentary = ttk.BooleanVar(value=self.settings_manager.get("enable_auto_commentary", False))
 
         self.twitch_bot_username = ttk.StringVar(value=self.settings_manager.get("twitch_bot_username", ""))
         self.twitch_client_id = ttk.StringVar(value=self.settings_manager.get("twitch_client_id", ""))
@@ -414,6 +415,13 @@ class GameAssistantApp:
             command=lambda: (self.settings_manager.set('create_blog_post', self.create_blog_post.get()), self.settings_manager.save(self.settings_manager.settings))
         )
         self.create_blog_post_check.pack(fill=X, pady=5)
+
+        self.enable_auto_commentary_check = ttk.Checkbutton(
+            config_frame, text="自発的コメントを有効にする", variable=self.enable_auto_commentary,
+            style="success-square-toggle",
+            command=lambda: (self.settings_manager.set('enable_auto_commentary', self.enable_auto_commentary.get()), self.settings_manager.save(self.settings_manager.settings))
+        )
+        self.enable_auto_commentary_check.pack(fill=X, pady=5)
 
         twitch_frame = ttk.Frame(left_frame)
         twitch_frame.pack(fill=X, pady=(0, 15))
