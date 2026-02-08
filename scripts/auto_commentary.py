@@ -5,6 +5,7 @@ import random
 import logging
 import asyncio
 import os
+import re
 from datetime import datetime
 from scripts.prompts import AUTO_COMMENTARY_PROMPT
 
@@ -23,9 +24,19 @@ class AutoCommentaryService:
         self.min_interval = 300  # 5分
         self.max_interval = 600  # 10分
         
+        # アクティビティ管理
+        self.last_activity_time = time.time()
+        
         # リトライ管理
         self.retry_count = 0
         self.max_retries = 3
+
+    def notify_activity(self):
+        """
+        アクティビティ（ユーザーの発話、TTS再生終了など）を通知し、タイマーをリセットする。
+        """
+        self.last_activity_time = time.time()
+        logging.debug("AutoCommentary timer reset due to activity.")
 
     def start(self):
         """サービスの開始"""
@@ -40,6 +51,7 @@ class AutoCommentaryService:
         logging.info("Starting AutoCommentaryService...")
         self.is_running = True
         self._stop_event.clear()
+        self.last_activity_time = time.time()
         self._schedule_next_commentary()
 
     def stop(self):
@@ -63,7 +75,7 @@ class AutoCommentaryService:
         if interval is None:
             interval = random.randint(self.min_interval, self.max_interval)
         
-        logging.info(f"📅 Next auto-commentary scheduled in {interval} seconds.")
+        logging.info(f"📅 Next auto-commentary scheduled in {interval} seconds of silence.")
         
         self.timer_thread = threading.Thread(
             target=self._wait_and_execute, 
@@ -73,18 +85,29 @@ class AutoCommentaryService:
         self.timer_thread.start()
 
     def _wait_and_execute(self, interval):
-        """指定時間待機して実行を試みる"""
-        logging.debug(f"AutoCommentary timer started: {interval}s")
+        """指定された『沈黙時間』が経過するまで待機して実行を試みる"""
+        logging.debug(f"AutoCommentary silence timer started: {interval}s")
         
-        # stop_eventを使って待機（中断可能にする）
-        if self._stop_event.wait(timeout=interval):
-            logging.debug("AutoCommentary timer cancelled.")
+        while self.is_running and not self._stop_event.is_set():
+            now = time.time()
+            elapsed = now - self.last_activity_time
+            
+            if elapsed >= interval:
+                # 規定の沈黙時間が経過
+                logging.debug(f"Silence interval ({interval}s) reached. Trying to execute...")
+                break
+            
+            # 残り時間を計算して待機（最大1秒間隔でチェック）
+            remaining = interval - elapsed
+            wait_time = min(1.0, remaining)
+            
+            if self._stop_event.wait(timeout=wait_time):
+                logging.debug("AutoCommentary timer cancelled.")
+                return
+
+        if not self.is_running or self._stop_event.is_set():
             return
 
-        if not self.is_running:
-            return
-
-        logging.debug("AutoCommentary timer finished. Trying to execute...")
         self._try_execute_commentary()
 
     def _try_execute_commentary(self):
@@ -111,11 +134,12 @@ class AutoCommentaryService:
 
     def _is_user_speaking(self):
         """
-        ユーザーが話しているか判定。
-        現在はAudioService側に直接のフラグがないため、将来の拡張用。
+        ユーザーが現在話している最中（確定前のテキストがある状態）か判定。
         """
-        # 安全のため現在はFalse（常に許可）を返すが、
-        # 将来的にはマイク入力レベルなどを参照して判定する。
+        if hasattr(self.session_manager, 'transcriber') and self.session_manager.transcriber:
+            # 確定前のテキストがある = ユーザーが話している最中
+            if getattr(self.session_manager.transcriber, 'last_partial_text', ""):
+                return True
         return False 
 
     def _retry_later(self):
@@ -173,10 +197,15 @@ class AutoCommentaryService:
                 logging.info(f"🗣️ Auto-Commentary generated: {response}")
                 
                 # TTSキューへ投入して発話させる
-                self.app.tts_queue.put(response)
+                # 読点などで分割して投入（長い文対策）
+                sentences = [s.strip() for s in re.split(r'[。！？\n]', response) if s.strip()]
+                for sentence in sentences:
+                    self.app.tts_queue.put(sentence)
+                self.app.tts_queue.put("END_MARKER")
                 
                 # GUIに表示する（メインスレッドで実行）
-                self.app.root.after(0, lambda: self.app.show_gemini_response(response, auto_close=True))
+                # auto_close=False にし、TTS終了時に App 側でタイマーを開始させる
+                self.app.root.after(0, lambda: self.app.show_gemini_response(response, auto_close=False))
                 
                 # チャットログにも追記（メインスレッドで実行）
                 if not self.app.show_response_in_new_window.get():

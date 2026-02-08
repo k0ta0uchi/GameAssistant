@@ -210,6 +210,11 @@ class GameAssistantApp:
             if item == "END_MARKER":
                 logging.info("すべての再生が完了しました。")
                 self.root.after(0, lambda: self.show_gemini_response(None, auto_close=True, only_timer=True))
+                
+                # オートコメンタリーのタイマーをリセット（沈黙時間のカウント開始）
+                if hasattr(self, 'session_manager') and hasattr(self.session_manager, 'auto_commentary_service'):
+                    self.session_manager.auto_commentary_service.notify_activity()
+                
                 self.playback_queue.task_done()
                 continue
 
