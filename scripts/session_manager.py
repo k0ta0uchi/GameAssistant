@@ -176,10 +176,6 @@ class SessionManager:
 
         logging.info(f"[ASR Final] {text}")
         
-        # オートコメンタリーのタイマーをリセット
-        if hasattr(self, 'auto_commentary_service'):
-            self.auto_commentary_service.notify_activity()
-
         # プロンプト待機モード中の場合
         if self.is_collecting_prompt:
             # クールダウン中かチェック（Nod音声の誤認識防止）
@@ -236,10 +232,6 @@ class SessionManager:
             if author_name: author_name = author_name.name
             content = getattr(message, 'content', getattr(message, 'text', ""))
             if author_name and content:
-                # オートコメンタリーのタイマーをリセット
-                if hasattr(self, 'auto_commentary_service'):
-                    self.auto_commentary_service.notify_activity()
-                
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
                 self.app.db_save_queue.put({'type': 'save', 'data': {
