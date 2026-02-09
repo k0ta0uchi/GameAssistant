@@ -220,12 +220,22 @@ class MemoryWindow(tk.Toplevel):
             values = item['values']
             timestamp, _, type_val, user, comment = values
 
-            if type_val in ['user_prompt', 'ai_response']:
-                # タイムスタンプとユーザー情報を使って会話形式の文字列を作成
-                conversation_parts.append(f"{user} ({timestamp}):\n{comment}")
+            # 選択されたすべてのタイプをブログ生成のソースとして含める
+            # 表示ラベルを調整
+            label = user
+            if type_val == 'twitch_chat':
+                label = f"Twitch Viewer: {user}"
+            elif type_val == 'ai_response':
+                label = "AI"
+            elif type_val == 'auto_commentary':
+                label = "AI (Auto)"
+            elif type_val == 'user_speech' or type_val == 'user_prompt':
+                label = f"User: {user}"
+            
+            conversation_parts.append(f"[{timestamp}] {label}: {comment}")
         
         if not conversation_parts:
-            print("ブログを生成するための会話が見つかりませんでした。（user_promptまたはai_responseタイプのメモリを選択してください）")
+            print("ブログを生成するためのデータが見つかりませんでした。")
             return
 
         conversation = "\n\n".join(conversation_parts)
