@@ -8,6 +8,7 @@ import os
 import re
 from datetime import datetime
 from scripts.prompts import AUTO_COMMENTARY_PROMPT
+import scripts.voice as voice
 
 class AutoCommentaryService:
     """
@@ -19,11 +20,11 @@ class AutoCommentaryService:
         self.is_running = False
         self.timer_thread = None
         self._stop_event = threading.Event()
-
+        
         # 実行間隔の設定（秒）
         self.min_interval = 300  # 5分
         self.max_interval = 600  # 10分
-
+        
         # リトライ管理
         self.retry_count = 0
         self.max_retries = 3
@@ -32,7 +33,7 @@ class AutoCommentaryService:
         """サービスの開始"""
         if self.is_running:
             return
-
+        
         # 設定で無効なら起動しない
         if not hasattr(self.app, 'enable_auto_commentary') or not self.app.enable_auto_commentary.get():
             logging.info("AutoCommentaryService is disabled in settings.")
@@ -47,7 +48,7 @@ class AutoCommentaryService:
         """サービスの停止"""
         if not self.is_running:
             return
-
+            
         logging.info("Stopping AutoCommentaryService...")
         self.is_running = False
         self._stop_event.set()
@@ -63,9 +64,9 @@ class AutoCommentaryService:
             logging.info(f"📅 Next auto-commentary scheduled in {interval} seconds.")
         else:
             logging.info(f"🔄 Retrying auto-commentary in {interval} seconds...")
-
+        
         self.timer_thread = threading.Thread(
-            target=self._wait_and_execute,
+            target=self._wait_and_execute, 
             args=(interval,),
             daemon=True
         )
@@ -83,23 +84,27 @@ class AutoCommentaryService:
 
     def _try_execute_commentary(self):
         """コメント生成と再生の実行を試みる（割り込み防止チェック付き）"""
-        if not self.is_running:
+        if not self.is_running: 
             return
 
-        # 1. ユーザー発話中チェック
-        if self._is_user_speaking():
-            logging.info("✋ User is speaking. Delaying commentary...")
+        # 実行前の初期チェック
+        if self._is_busy():
+            logging.info("✋ System is busy. Delaying commentary...")
             self._retry_later()
             return
-
-        # 2. AI発話中チェック（キューが空でない場合を含む）
-        if not self.app.playback_queue.empty() or not self.app.tts_queue.empty():
-             logging.info("✋ AI is currently speaking or queue is not empty. Delaying commentary...")
-             self._retry_later()
-             return
-
+        
         # 実行
         self._generate_and_speak()
+
+    def _is_busy(self):
+        """ユーザーが話しているか、AIが話しているか判定。"""
+        # ユーザー発話中チェック
+        if self._is_user_speaking():
+            return True
+        # AI発話中チェック（キューが空でない場合を含む）
+        if not self.app.playback_queue.empty() or not self.app.tts_queue.empty():
+            return True
+        return False
 
     def _is_user_speaking(self):
         """
@@ -108,7 +113,7 @@ class AutoCommentaryService:
         if hasattr(self.session_manager, 'transcriber') and self.session_manager.transcriber:
             if getattr(self.session_manager.transcriber, 'last_partial_text', ""):
                 return True
-        return False
+        return False 
 
     def _retry_later(self):
         """少し待って再試行（最大リトライ数まで）"""
@@ -118,22 +123,20 @@ class AutoCommentaryService:
             self.retry_count = 0
             self._schedule_next_commentary()
         else:
-            delay = 5  # 5秒後に再試行
+            delay = 15  # 15秒後に再試行
             self._schedule_next_commentary(interval=delay)
 
     def _generate_and_speak(self):
         """Geminiにリクエストしてツッコミを生成・再生する"""
-        self.retry_count = 0 # リセット
-
         logging.info("🎬 Generating auto-commentary...")
-
+        
         screenshot_path = None
         if self.app.selected_window:
             try:
                 screenshot_path = self.app.capture_service.capture_window()
             except Exception as e:
                 logging.warning(f"Failed to take screenshot: {e}")
-
+        
         history = self.session_manager.get_session_history()
         prompt = AUTO_COMMENTARY_PROMPT
         if history:
@@ -142,6 +145,7 @@ class AutoCommentaryService:
             prompt += "\n\n(会話履歴: なし)"
 
         try:
+            # Geminiリクエスト（ここでの待機中に状況が変わる可能性がある）
             response = self.app.gemini_service.ask(
                 prompt=prompt,
                 image_path=screenshot_path,
@@ -150,27 +154,40 @@ class AutoCommentaryService:
                 session_history=None
             )
 
-            if response:
-                logging.info(f"🗣️ Auto-Commentary generated: {response}")
+            # 生成後の最終チェック
+            if not self.is_running or self._is_busy():
+                logging.info("✋ System became busy during generation. Delaying commentary...")
+                self._retry_later()
+                return
 
+            if response and "申し訳ありません、エラーが発生しました" not in response:
+                self.retry_count = 0 # 成功したのでリセット
+                logging.info(f"🗣️ Auto-Commentary generated: {response}")
+                
+                # 割り込みフラグをクリア
+                voice.stop_playback_event.clear()
+                
                 # TTSキューへ投入（文分割）
                 sentences = [s.strip() for s in re.split(r'[。！？\n]', response) if s.strip()]
-                for sentence in sentences:
-                    self.app.tts_queue.put(sentence)
-                self.app.tts_queue.put("END_MARKER")
-
-                # GUI表示（タイマーはTTS終了時に任せる）
-                self.app.root.after(0, lambda: self.app.show_gemini_response(response, auto_close=False))
-
-                if not self.app.show_response_in_new_window.get():
-                    self.app.root.after(0, lambda: self.app._update_log_with_partial_response(f"\n(Auto): {response}", is_start=True))
+                if sentences:
+                    for sentence in sentences:
+                        self.app.tts_queue.put(sentence)
+                    self.app.tts_queue.put("END_MARKER")
+                
+                    # GUI表示
+                    self.app.root.after(0, lambda: self.app.show_gemini_response(response, auto_close=False))
+                    
+                    if not self.app.show_response_in_new_window.get():
+                        self.app.root.after(0, lambda: self.app._update_log_with_partial_response(f"\n(Auto): {response}", is_start=True))
+                else:
+                    logging.warning("⚠️ Auto-Commentary sentences were empty.")
             else:
-                logging.warning("⚠️ Auto-Commentary response was empty.")
-
+                logging.warning(f"⚠️ Auto-Commentary response was empty or error: {response}")
+                
         except Exception as e:
             logging.error(f"Error in auto-commentary generation: {e}")
 
-        # 次回スケジュール
+        # 次回スケジュール（通常サイクル）
         self._schedule_next_commentary()
 
     def notify_activity(self):
