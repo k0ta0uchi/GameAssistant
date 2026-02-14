@@ -173,12 +173,14 @@ class GameAssistantApp:
         """ゲーミングAIアシスタント風のカスタムスタイルを定義"""
         # メイン背景
         self.style.configure("TFrame", background="#0F0F23")
+        self.style.configure("TLabel", background="#0F0F23")
+        
         # カード（Labelframe）
         self.style.configure("Card.TLabelframe", background="#1a1a3a", bordercolor="#7C3AED")
         self.style.configure("Card.TLabelframe.Label", font=("Chakra Petch", 10, "bold"), foreground="#A78BFA", background="#1a1a3a")
         
         # ステータスラベル用
-        self.style.configure("Status.TLabel", font=("Chakra Petch", 10, "bold"), foreground="#475569")
+        self.style.configure("Status.TLabel", font=("Chakra Petch", 10, "bold"), foreground="#475569", background="#0F0F23")
         self.style.configure("Status.Asr.TLabel", foreground="#00d2ff") # Neon Blue
         self.style.configure("Status.Gemini.TLabel", foreground="#A78BFA") # Neon Purple
         self.style.configure("Status.Tts.TLabel", foreground="#F43F5E") # Neon Rose
@@ -253,6 +255,13 @@ class GameAssistantApp:
         self.auto_commentary_bar.pack(fill=X, pady=(2, 0))
         self.auto_commentary_label = ttk.Label(self.asr_container, text="Silence Timer", font=("Chakra Petch", 7), foreground="#475569")
         self.auto_commentary_label.pack(anchor="e")
+
+        # スクリーンショット・プレビューエリア (追加)
+        self.image_frame = ttk.Frame(self.content_area, height=200, style="TFrame")
+        self.image_frame.pack(fill=X, pady=(0, 10))
+        self.image_frame.pack_propagate(False)
+        self.image_label = ttk.Label(self.image_frame, style="TLabel")
+        self.image_label.pack(expand=True)
 
         # ログエリア
         self._create_log_area(self.content_area)
