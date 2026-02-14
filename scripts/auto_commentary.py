@@ -25,6 +25,10 @@ class AutoCommentaryService:
         self.min_interval = 300  # 5分
         self.max_interval = 600  # 10分
         
+        # 進行管理用
+        self.current_interval = 0
+        self.start_time = 0
+        
         # リトライ管理
         self.retry_count = 0
         self.max_retries = 3
@@ -53,6 +57,15 @@ class AutoCommentaryService:
         self.is_running = False
         self._stop_event.set()
         self.timer_thread = None
+        self.current_interval = 0
+
+    def get_remaining_time(self):
+        """残り時間と現在のインターバルを返す（GUI用）"""
+        if not self.is_running or self.current_interval == 0:
+            return 0, 0
+        elapsed = time.time() - self.start_time
+        remaining = max(0, self.current_interval - elapsed)
+        return remaining, self.current_interval
 
     def _schedule_next_commentary(self, interval=None):
         """次のコメント実行をスケジュールする"""
@@ -64,6 +77,9 @@ class AutoCommentaryService:
             logging.info(f"📅 Next auto-commentary scheduled in {interval} seconds.")
         else:
             logging.info(f"🔄 Retrying auto-commentary in {interval} seconds...")
+        
+        self.current_interval = interval
+        self.start_time = time.time()
         
         self.timer_thread = threading.Thread(
             target=self._wait_and_execute, 
