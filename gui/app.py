@@ -181,18 +181,18 @@ class GameAssistantApp:
 
     def _create_audio_card(self, parent):
         card = ttk.Labelframe(parent, text="AUDIO", style="Card.TLabelframe", padding=8); card.pack(fill=X, pady=4)
-        ttk.Label(card, text="インプットデバイス:", background="#1a1a3a").pack(anchor="w")
+        ttk.Label(card, text="インプットデバイス:").pack(anchor="w")
         self.audio_dropdown = ttk.Combobox(card, textvariable=self.selected_device, values=self.audio_devices, state=READONLY); self.audio_dropdown.pack(fill=X, pady=4); self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
-        self.device_index_label = ttk.Label(card, text="Index: -", font=("TkDefaultFont", 8), background="#1a1a3a"); self.device_index_label.pack(anchor="w")
+        self.device_index_label = ttk.Label(card, text="Index: -", font=("TkDefaultFont", 8)); self.device_index_label.pack(anchor="w")
         self.level_meter = ttk.Progressbar(card, length=200, maximum=100, value=0, style="Asr.Horizontal.TProgressbar"); self.level_meter.pack(fill=X, pady=(8, 0))
 
     def _create_target_card(self, parent):
         card = ttk.Labelframe(parent, text="TARGET WINDOW", style="Card.TLabelframe", padding=8); card.pack(fill=X, pady=4)
-        ttk.Label(card, text="対象ウィンドウ:", background="#1a1a3a").pack(anchor="w")
+        ttk.Label(card, text="対象ウィンドウ:").pack(anchor="w")
         win_frame = ttk.Frame(card); win_frame.pack(fill=X)
         self.window_dropdown = ttk.Combobox(win_frame, textvariable=self.selected_window_title, values=self.windows, state=READONLY); self.window_dropdown.pack(side=LEFT, fill=X, expand=True); self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
         ttk.Button(win_frame, text="🔄", command=self.refresh_window_list, width=3).pack(side=LEFT, padx=2)
-        self.selected_window_label = ttk.Label(card, text="Selected: -", font=("TkDefaultFont", 8), background="#1a1a3a", wraplength=250); self.selected_window_label.pack(anchor="w", pady=2)
+        self.selected_window_label = ttk.Label(card, text="Selected: -", font=("TkDefaultFont", 8), wraplength=250); self.selected_window_label.pack(anchor="w", pady=2)
 
     def _create_status_dashboard(self, parent):
         self.status_frame = ttk.Frame(parent, padding=2); self.status_frame.pack(fill=X, pady=(0, 4))
@@ -204,7 +204,7 @@ class GameAssistantApp:
 
     def _create_log_area(self, parent):
         log_container = ttk.Labelframe(parent, text="LOGS", style="Card.TLabelframe"); log_container.pack(fill=BOTH, expand=True)
-        filter_frame = ttk.Frame(log_container, background="#1a1a3a"); filter_frame.pack(fill=X, padx=4, pady=2)
+        filter_frame = ttk.Frame(log_container); filter_frame.pack(fill=X, padx=4, pady=2)
         log_levels = {"DEBUG": "secondary", "INFO": "info", "WARNING": "warning", "ERROR": "danger"}
         self.log_filters = {}
         for level, bstyle in log_levels.items():
