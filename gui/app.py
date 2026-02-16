@@ -141,9 +141,23 @@ class GameAssistantApp:
         canvas.create_window((0, 0), window=self.sidebar_scrollable, anchor="nw", width=300); canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side=LEFT, fill=BOTH, expand=True); scroll.pack(side=RIGHT, fill=Y)
         self._create_audio_card(self.sidebar_scrollable); self._create_target_card(self.sidebar_scrollable)
+        
+        # アクションボタン (セッション開始/停止をここに追加)
         btns = ttk.Frame(self.sidebar_scrollable, padding=2); btns.pack(fill=X, pady=4)
+        
+        self.start_session_button = ttk.Button(btns, text="🚀 Start Session", style="success.TButton", command=self.start_session)
+        self.start_session_button.pack(fill=X, pady=2)
+        
+        self.stop_session_button = ttk.Button(btns, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session)
+        self.stop_session_button.pack(fill=X, pady=2)
+        self.stop_session_button.pack_forget()
+
+        self.sidebar_sep = ttk.Separator(self.sidebar_scrollable, orient="horizontal")
+        self.sidebar_sep.pack(fill=X, pady=5)
+        
         ttk.Button(btns, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
         ttk.Button(btns, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
+        
         self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=RIGHT, fill=BOTH, expand=True)
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
@@ -156,9 +170,6 @@ class GameAssistantApp:
         self.image_frame = ttk.Frame(self.content_area, style="TFrame"); self.image_frame.pack(fill=X, pady=(0, 4))
         self.image_label = ttk.Label(self.image_frame, style="TLabel"); self.image_label.pack(expand=True)
         self._create_log_area(self.content_area)
-        self.record_container = ttk.Frame(self.content_area); self.record_container.pack(fill=X, pady=4)
-        self.start_session_button = ttk.Button(self.record_container, text="🚀 セッションを開始", style="success.TButton", command=self.start_session); self.start_session_button.pack(side=LEFT, padx=4)
-        self.stop_session_button = ttk.Button(self.record_container, text="🛑 セッションを停止", style="danger.TButton", command=self.stop_session); self.stop_session_button.pack(side=LEFT, padx=4); self.stop_session_button.pack_forget()
 
     def _create_audio_card(self, parent):
         card = ttk.Labelframe(parent, text="AUDIO", style="Card.TLabelframe", padding=8); card.pack(fill=X, pady=4)
@@ -264,8 +275,17 @@ class GameAssistantApp:
     def toggle_session(self): 
         if self.session_manager.is_session_active(): self.stop_session()
         else: self.start_session()
-    def start_session(self): self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(side=LEFT, padx=4)
-    def stop_session(self): self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(side=LEFT, padx=4); (threading.Thread(target=self.generate_and_save_blog_post).start() if self.create_blog_post.get() else None)
+    def start_session(self):
+        self.session_manager.start_session()
+        self.start_session_button.pack_forget()
+        self.stop_session_button.pack(fill=X, pady=2, before=self.sidebar_sep)
+
+    def stop_session(self):
+        self.session_manager.stop_session()
+        self.stop_session_button.pack_forget()
+        self.start_session_button.pack(fill=X, pady=2, before=self.sidebar_sep)
+        if self.create_blog_post.get():
+            threading.Thread(target=self.generate_and_save_blog_post).start()
     def generate_and_save_blog_post(self, c=None):
         try:
             if c is None: c = self.session_manager.get_session_conversation()
