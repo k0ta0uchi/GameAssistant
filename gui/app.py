@@ -34,7 +34,7 @@ from scripts.settings import SettingsManager
 from scripts.record import AudioService
 from scripts.capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
-from .components import GeminiResponseWindow, MemoryWindow
+from .components import GeminiResponseWindow, MemoryWindow, SettingsWindow
 import subprocess
 import glob
 
@@ -218,15 +218,16 @@ class GameAssistantApp:
         self.sidebar_canvas.pack(side=LEFT, fill=BOTH, expand=True)
         self.sidebar_scrollbar.pack(side=RIGHT, fill=Y)
 
-        # 各カードの作成
+        # 配信中に頻繁に触る可能性があるカードのみサイドバーに残す
         self._create_audio_card(self.sidebar_scrollable)
-        self._create_engine_card(self.sidebar_scrollable)
         self._create_target_card(self.sidebar_scrollable)
-        self._create_config_card(self.sidebar_scrollable)
-        self._create_twitch_card(self.sidebar_scrollable)
         
-        # メモリーボタン
-        ttk.Button(self.sidebar_scrollable, text="📂 メモリー管理", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=20)
+        # アクションボタン
+        btn_container = ttk.Frame(self.sidebar_scrollable, padding=10)
+        btn_container.pack(fill=X, pady=10)
+        
+        ttk.Button(btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=5)
+        ttk.Button(btn_container, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=5)
 
         # 2. 右メインエリア (Status + Log)
         self.content_area = ttk.Frame(self.main_container)
@@ -256,7 +257,7 @@ class GameAssistantApp:
         self.auto_commentary_label = ttk.Label(self.asr_container, text="Silence Timer", font=("Chakra Petch", 7), foreground="#475569")
         self.auto_commentary_label.pack(anchor="e")
 
-        # スクリーンショット・プレビューエリア (追加)
+        # スクリーンショット・プレビューエリア
         self.image_frame = ttk.Frame(self.content_area, height=200, style="TFrame")
         self.image_frame.pack(fill=X, pady=(0, 10))
         self.image_frame.pack_propagate(False)
@@ -291,33 +292,6 @@ class GameAssistantApp:
         self.level_meter = ttk.Progressbar(card, length=200, maximum=100, value=0, style="Asr.Horizontal.TProgressbar")
         self.level_meter.pack(fill=X, pady=(10, 0))
 
-    def _create_engine_card(self, parent):
-        card = ttk.Labelframe(parent, text="AI ENGINES", style="Card.TLabelframe", padding=10)
-        card.pack(fill=X, pady=5)
-
-        ttk.Label(card, text="TTS Engine:").pack(anchor="w")
-        tts_frame = ttk.Frame(card)
-        tts_frame.pack(fill=X)
-        for engine in ["voicevox", "gemini", "style_bert_vits2"]:
-            label_text = "VITS2" if engine == "style_bert_vits2" else engine.upper()
-            ttk.Radiobutton(tts_frame, text=label_text, variable=self.tts_engine, value=engine, command=self.on_tts_engine_change).pack(side=LEFT, padx=2)
-
-        # VITS2モデル選択
-        self.vits2_config_frame = ttk.Frame(card)
-        ttk.Label(self.vits2_config_frame, text="VITS2 Model:").pack(anchor="w", pady=(5, 0))
-        self.vits2_model_dropdown = ttk.Combobox(self.vits2_config_frame, state=READONLY)
-        self.vits2_model_dropdown.pack(fill=X, pady=2)
-        self.vits2_model_dropdown.bind("<<ComboboxSelected>>", self.on_vits2_model_change)
-
-        ttk.Label(card, text="ASR Engine:").pack(anchor="w", pady=(10, 0))
-        asr_frame = ttk.Frame(card)
-        asr_frame.pack(fill=X)
-        ttk.Radiobutton(asr_frame, text="LARGE", variable=self.asr_engine, value="large").pack(side=LEFT, padx=5)
-        ttk.Radiobutton(asr_frame, text="TINY", variable=self.asr_engine, value="tiny").pack(side=LEFT, padx=5)
-
-        ttk.Checkbutton(card, text="Thinkingモードをオフ", variable=self.disable_thinking_mode, style="success-square-toggle",
-                       command=lambda: (self.settings_manager.set('disable_thinking_mode', self.disable_thinking_mode.get()), self.settings_manager.save(self.settings_manager.settings))).pack(anchor="w", pady=5)
-
     def _create_target_card(self, parent):
         card = ttk.Labelframe(parent, text="TARGET WINDOW", style="Card.TLabelframe", padding=10)
         card.pack(fill=X, pady=5)
@@ -332,70 +306,6 @@ class GameAssistantApp:
 
         self.selected_window_label = ttk.Label(card, text="Selected: -", font=("TkDefaultFont", 8), wraplength=250)
         self.selected_window_label.pack(anchor="w", pady=2)
-
-    def _create_config_card(self, parent):
-        card = ttk.Labelframe(parent, text="CONFIG", style="Card.TLabelframe", padding=10)
-        card.pack(fill=X, pady=5)
-
-        ttk.Checkbutton(card, text="画像を使用", variable=self.use_image, style="success-square-toggle",
-                       command=lambda: (self.settings_manager.set('use_image', self.use_image.get()), self.settings_manager.save(self.settings_manager.settings), self.update_record_buttons_state())).pack(anchor="w", pady=2)
-        ttk.Checkbutton(card, text="プライベート", variable=self.is_private, style="success-square-toggle",
-                       command=lambda: (self.settings_manager.set('is_private', self.is_private.get()), self.settings_manager.save(self.settings_manager.settings))).pack(anchor="w", pady=2)
-        ttk.Checkbutton(card, text="自発的コメント", variable=self.enable_auto_commentary, style="success-square-toggle",
-                       command=lambda: (self.settings_manager.set('enable_auto_commentary', self.enable_auto_commentary.get()), self.settings_manager.save(self.settings_manager.settings))).pack(anchor="w", pady=2)
-        ttk.Checkbutton(card, text="別窓で表示", variable=self.show_response_in_new_window, style="success-square-toggle",
-                       command=lambda: (self.settings_manager.set('show_response_in_new_window', self.show_response_in_new_window.get()), self.settings_manager.save(self.settings_manager.settings))).pack(anchor="w", pady=2)
-        
-        user_name_frame = ttk.Frame(card)
-        user_name_frame.pack(fill=X, pady=5)
-        ttk.Label(user_name_frame, text="ユーザー名:").pack(side=LEFT)
-        user_name_entry = ttk.Entry(user_name_frame, textvariable=self.user_name)
-        user_name_entry.pack(side=LEFT, fill=X, expand=True)
-        user_name_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('user_name', self.user_name.get()), self.settings_manager.save(self.settings_manager.settings)))
-
-        duration_frame = ttk.Frame(card)
-        duration_frame.pack(fill=X, pady=5)
-        ttk.Label(duration_frame, text="表示時間(ms):").pack(side=LEFT)
-        self.response_duration_entry = ttk.Entry(duration_frame, textvariable=self.response_display_duration, width=8)
-        self.response_duration_entry.pack(side=LEFT)
-        self.response_duration_entry.bind("<FocusOut>", lambda e: (self.settings_manager.set('response_display_duration', self.response_display_duration.get()), self.settings_manager.save(self.settings_manager.settings)))
-
-        self.create_blog_post_check = ttk.Checkbutton(
-            card, text="終了時にブログ作成", variable=self.create_blog_post,
-            style="success-square-toggle",
-            command=lambda: (self.settings_manager.set('create_blog_post', self.create_blog_post.get()), self.settings_manager.save(self.settings_manager.settings))
-        )
-        self.create_blog_post_check.pack(anchor="w", pady=2)
-
-    def _create_twitch_card(self, parent):
-        card = ttk.Labelframe(parent, text="TWITCH BOT", style="Card.TLabelframe", padding=10)
-        card.pack(fill=X, pady=5)
-
-        def _create_entry(label, var, show=None):
-            f = ttk.Frame(card)
-            f.pack(fill=X, pady=1)
-            ttk.Label(f, text=label, width=12).pack(side=LEFT)
-            e = ttk.Entry(f, textvariable=var, show=show)
-            e.pack(side=LEFT, fill=X, expand=True)
-            e.bind("<FocusOut>", lambda ev: (self.settings_manager.set(var._name, var.get()), self.settings_manager.save(self.settings_manager.settings)))
-
-        _create_entry("Bot User:", self.twitch_bot_username)
-        _create_entry("Bot ID:", self.twitch_bot_id)
-        _create_entry("Client ID:", self.twitch_client_id)
-        _create_entry("Client Secret:", self.twitch_client_secret, show="*")
-
-        auth_frame = ttk.Frame(card)
-        auth_frame.pack(fill=X, pady=5)
-        ttk.Label(auth_frame, text="認証コード:", width=12).pack(side=LEFT)
-        ttk.Entry(auth_frame, textvariable=self.twitch_auth_code).pack(side=LEFT, fill=X, expand=True)
-        
-        btn_frame = ttk.Frame(card)
-        btn_frame.pack(fill=X, pady=5)
-        ttk.Button(btn_frame, text="トークン登録", command=self.twitch_service.register_auth_code, style="success.TButton", width=10).pack(side=LEFT, expand=True, fill=X, padx=2)
-        ttk.Button(btn_frame, text="承認URL", command=self.twitch_service.copy_auth_url, style="info.TButton", width=10).pack(side=LEFT, expand=True, fill=X, padx=2)
-        
-        self.twitch_connect_button = ttk.Button(card, text="接続", command=self.twitch_service.toggle_twitch_connection, style="primary.TButton")
-        self.twitch_connect_button.pack(fill=X, pady=5)
 
     def _create_status_dashboard(self, parent):
         self.status_frame = ttk.Frame(parent, padding=10)
@@ -479,6 +389,10 @@ class GameAssistantApp:
             pass
         
         self.root.after(200, self._update_auto_commentary_bar_loop)
+
+    def open_settings_window(self):
+        """設定モーダルを開く"""
+        SettingsWindow(self.root, self)
 
     def _tts_synthesis_worker(self):
         """文を音声データに変換する（先行合成）スレッド"""
@@ -717,19 +631,6 @@ class GameAssistantApp:
             self.update_status('asr', True)
             # 一定時間後に消す
             self.root.after(500, lambda: self.update_status('asr', False))
-
-    def transcribe_audio(self):
-        logging.info("音声認識を開始します...")
-        try:
-            text = whisper.recognize_speech(self.audio_file_path)
-            if text:
-                logging.info(f"*** 認識されたテキスト: '{text}' ***")
-            else:
-                logging.warning("*** 音声は検出されましたが、テキストとして認識されませんでした。***")
-            return text
-        except Exception as e:
-            logging.error(f"音声認識エラー: {e}", exc_info=True)
-            return None
 
     def execute_gemini_interaction(self, prompt, image_path, session_history):
         """Geminiとの対話をストリーミングで実行し、表示・音声・保存を行う。"""
@@ -1065,14 +966,13 @@ class GameAssistantApp:
         self.settings_manager.save(self.settings_manager.settings)
         
         if engine == "style_bert_vits2":
-            # 他の設定項目（Thinkingモード等）より上に表示されるよう
-            # tts_frame の直後に配置を維持。
-            self.vits2_config_frame.pack(fill=X, pady=5, before=self.sidebar_scrollable.children.get('!labelframe2')) # 調整が必要
-            # 実際には _create_engine_card 内にあるので、そこの visibility を操作
-            self.vits2_config_frame.pack(fill=X, pady=5)
-            self.refresh_vits2_models()
+            # SettingsWindow が開いている場合は、そこにある vits2_config_frame を表示
+            if hasattr(self, 'vits2_config_frame'):
+                self.vits2_config_frame.pack(fill=X, pady=5)
+                self.refresh_vits2_models()
         else:
-            self.vits2_config_frame.pack_forget()
+            if hasattr(self, 'vits2_config_frame'):
+                self.vits2_config_frame.pack_forget()
 
     def on_vits2_model_change(self, event=None):
         selected_name = self.vits2_model_dropdown.get()
@@ -1132,6 +1032,8 @@ class GameAssistantApp:
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _update_vits2_dropdown(self, names):
+        if not hasattr(self, 'vits2_model_dropdown'):
+            return
         self.vits2_model_dropdown['values'] = names
         if names:
             # 現在のspeaker_idに対応する名前を選択状態にする
@@ -1228,7 +1130,7 @@ class GameAssistantApp:
         
         tag_name = levelname
         
-        # 特定のログだけデフォルト色に
+        # 特定のログだけタグを外してデフォルト色（白/黒）にする
         if levelname == 'INFO' and any(k in msg_content for k in ['Embedding', 'Batch', 'Batches:']):
              tag_name = 'DEFAULT'
 

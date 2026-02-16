@@ -53,8 +53,141 @@ class GeminiResponseWindow(tk.Toplevel):
         self.destroy()
 
 
-class MemoryWindow(tk.Toplevel):
-    def __init__(self, parent, app, memory_manager, gemini_service):
+class SettingsWindow(tk.Toplevel):
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app = app
+        self.title("GameAssistant Advanced Settings")
+        self.geometry("500x650")
+        self.transient(parent)
+        self.grab_set()
+
+        self.create_widgets()
+
+    def create_widgets(self):
+        main_frame = ttk.Frame(self, padding=15)
+        main_frame.pack(fill=BOTH, expand=True)
+
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.pack(fill=BOTH, expand=True)
+
+        self._create_engine_tab()
+        self._create_twitch_tab()
+        self._create_general_tab()
+
+    def _create_engine_tab(self):
+        tab = ttk.Frame(self.notebook, padding=15)
+        self.notebook.add(tab, text=" Engines ")
+
+        # TTS
+        ttk.Label(tab, text="TTS Engine:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        tts_frame = ttk.Frame(tab)
+        tts_frame.pack(fill=X, pady=(0, 10))
+        for engine in ["voicevox", "gemini", "style_bert_vits2"]:
+            label_text = "VITS2" if engine == "style_bert_vits2" else engine.upper()
+            ttk.Radiobutton(tts_frame, text=label_text, variable=self.app.tts_engine, value=engine, 
+                           command=self.app.on_tts_engine_change).pack(side=LEFT, padx=5)
+
+        # VITS2 Models (will be shown/hidden by app.on_tts_engine_change)
+        self.app.vits2_config_frame = ttk.Frame(tab)
+        ttk.Label(self.app.vits2_config_frame, text="VITS2 Model:").pack(anchor="w", pady=(5, 0))
+        self.app.vits2_model_dropdown = ttk.Combobox(self.app.vits2_config_frame, state="readonly")
+        self.app.vits2_model_dropdown.pack(fill=X, pady=2)
+        self.app.vits2_model_dropdown.bind("<<ComboboxSelected>>", self.app.on_vits2_model_change)
+        
+        # Initial visibility
+        if self.app.tts_engine.get() == "style_bert_vits2":
+            self.app.vits2_config_frame.pack(fill=X, pady=5)
+            self.app.refresh_vits2_models()
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+
+        # ASR
+        ttk.Label(tab, text="ASR Engine:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        asr_frame = ttk.Frame(tab)
+        asr_frame.pack(fill=X, pady=(0, 10))
+        ttk.Radiobutton(asr_frame, text="LARGE (High Accuracy)", variable=self.app.asr_engine, value="large").pack(anchor="w", pady=2)
+        ttk.Radiobutton(asr_frame, text="TINY (Lightweight)", variable=self.app.asr_engine, value="tiny").pack(anchor="w", pady=2)
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+
+        # Thinking Mode
+        ttk.Checkbutton(tab, text="Disable Thinking Mode (Faster response)", 
+                       variable=self.app.disable_thinking_mode, style="success-square-toggle",
+                       command=lambda: (self.app.settings_manager.set('disable_thinking_mode', self.app.disable_thinking_mode.get()), 
+                                      self.app.settings_manager.save(self.app.settings_manager.settings))).pack(anchor="w")
+
+    def _create_twitch_tab(self):
+        tab = ttk.Frame(self.notebook, padding=15)
+        self.notebook.add(tab, text=" Twitch ")
+
+        def _create_entry(label, var, show=None):
+            f = ttk.Frame(tab)
+            f.pack(fill=X, pady=5)
+            ttk.Label(f, text=label, width=15).pack(side=LEFT)
+            e = ttk.Entry(f, textvariable=var, show=show)
+            e.pack(side=LEFT, fill=X, expand=True)
+            # Use var._name or similar if SettingsManager needs keys
+            e.bind("<FocusOut>", lambda ev: (self.app.settings_manager.set(label.lower().replace(" ","_").replace(":",""), var.get()), 
+                                           self.app.settings_manager.save(self.app.settings_manager.settings)))
+
+        _create_entry("Bot Username:", self.app.twitch_bot_username)
+        _create_entry("Bot ID:", self.app.twitch_bot_id)
+        _create_entry("Client ID:", self.app.twitch_client_id)
+        _create_entry("Client Secret:", self.app.twitch_client_secret, show="*")
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+
+        ttk.Label(tab, text="Authentication:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        auth_frame = ttk.Frame(tab)
+        auth_frame.pack(fill=X, pady=10)
+        ttk.Entry(auth_frame, textvariable=self.app.twitch_auth_code).pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        ttk.Button(auth_frame, text="Register Token", command=self.app.twitch_service.register_auth_code, style="success.TButton").pack(side=LEFT)
+        
+        ttk.Button(tab, text="Copy Auth URL to Clipboard", command=self.app.twitch_service.copy_auth_url, style="info.TButton").pack(fill=X, pady=5)
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+
+        self.app.twitch_connect_button = ttk.Button(tab, text="Connect Twitch", 
+                                                   command=self.app.twitch_service.toggle_twitch_connection, 
+                                                   style="primary.TButton")
+        self.app.twitch_connect_button.pack(fill=X, pady=10)
+
+    def _create_general_tab(self):
+        tab = ttk.Frame(self.notebook, padding=15)
+        self.notebook.add(tab, text=" General ")
+
+        # Toggles
+        def _create_toggle(text, var, cmd=None):
+            if cmd is None:
+                cmd = lambda: (self.app.settings_manager.set(var._name, var.get()), 
+                              self.app.settings_manager.save(self.app.settings_manager.settings))
+            ttk.Checkbutton(tab, text=text, variable=var, style="success-square-toggle", command=cmd).pack(anchor="w", pady=5)
+
+        _create_toggle("Use Image (Vision)", self.app.use_image)
+        _create_toggle("Private Mode (No session history saving)", self.app.is_private)
+        _create_toggle("Enable Auto-Commentary", self.app.enable_auto_commentary)
+        _create_toggle("Show Response in New Window", self.app.show_response_in_new_window)
+        _create_toggle("Create Blog Post after session", self.app.create_blog_post)
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+
+        # Entries
+        f1 = ttk.Frame(tab)
+        f1.pack(fill=X, pady=5)
+        ttk.Label(f1, text="User Name:", width=20).pack(side=LEFT)
+        e1 = ttk.Entry(f1, textvariable=self.app.user_name)
+        e1.pack(side=LEFT, fill=X, expand=True)
+        e1.bind("<FocusOut>", lambda e: (self.app.settings_manager.set('user_name', self.app.user_name.get()), 
+                                       self.app.settings_manager.save(self.app.settings_manager.settings)))
+
+        f2 = ttk.Frame(tab)
+        f2.pack(fill=X, pady=5)
+        ttk.Label(f2, text="Display Duration (ms):", width=20).pack(side=LEFT)
+        e2 = ttk.Entry(f2, textvariable=self.app.response_display_duration)
+        e2.pack(side=LEFT, fill=X, expand=True)
+        e2.bind("<FocusOut>", lambda e: (self.app.settings_manager.set('response_display_duration', self.app.response_display_duration.get()), 
+                                       self.app.settings_manager.save(self.app.settings_manager.settings)))
         super().__init__(parent)
         self.app = app
         self.memory_manager = memory_manager
