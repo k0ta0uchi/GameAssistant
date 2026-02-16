@@ -69,17 +69,13 @@ class GameAssistantApp:
         self._setup_custom_styles()
         self.cleanup_temp_files()
         self.settings_manager = SettingsManager()
-        
-        # 1. 状態変数の初期化
         self._init_variables()
         
-        # 2. サービス群の初期化
         self.audio_service = AudioService(self)
         self.capture_service = CaptureService(self)
         self.memory_manager = MemoryManager()
         self.gemini_service = gemini.GeminiService(self, self.custom_instruction, self.settings_manager)
         
-        # TTSManager (フェーズ1: 抽出したサービス)
         self.tts_manager = TTSManager(
             on_playback_start=lambda: self.root.after(0, lambda: self.update_status('tts', True)),
             on_playback_end=self._on_tts_playback_finished
@@ -105,7 +101,6 @@ class GameAssistantApp:
         self._update_auto_commentary_bar_loop()
 
     def _init_variables(self):
-        """各種設定変数の初期化"""
         self.audio_devices = record.get_audio_device_names()
         self.selected_device = ttk.StringVar(value=self.settings_manager.get("audio_device", self.audio_devices[0] if self.audio_devices else ""))
         self.device_index = None
@@ -135,7 +130,6 @@ class GameAssistantApp:
         self.image = None
 
     def _on_tts_playback_finished(self, is_final):
-        """TTS再生終了時のコールバック"""
         if is_final:
             self.root.after(0, lambda: (
                 self.show_gemini_response(None, auto_close=True, only_timer=True),
@@ -158,15 +152,18 @@ class GameAssistantApp:
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
         self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 2))
-        self.sidebar_scrollable = ttk.Frame(self.sidebar); self.sidebar_scrollable.pack(fill=BOTH, expand=True)
-        self._create_audio_card(self.sidebar_scrollable); self._create_target_card(self.sidebar_scrollable)
-        btns = ttk.Frame(self.sidebar_scrollable, padding=2); btns.pack(fill=X, pady=4)
-        self.start_session_button = ttk.Button(btns, text="🚀 Start Session", style="success.TButton", command=self.start_session); self.start_session_button.pack(fill=X, pady=2)
-        self.stop_session_button = ttk.Button(btns, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session); self.stop_session_button.pack(fill=X, pady=2); self.stop_session_button.pack_forget()
-        self.sidebar_sep = ttk.Separator(self.sidebar_scrollable, orient="horizontal"); self.sidebar_sep.pack(fill=X, pady=5)
-        ttk.Button(btns, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
-        ttk.Button(btns, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
-        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 2))
+        self.sidebar_content = ttk.Frame(self.sidebar); self.sidebar_content.pack(fill=BOTH, expand=True)
+        self._create_audio_card(self.sidebar_content); self._create_target_card(self.sidebar_content)
+        
+        self.btn_container = ttk.Frame(self.sidebar_content, padding=2); self.btn_container.pack(fill=X, pady=4)
+        self.start_session_button = ttk.Button(self.btn_container, text="🚀 Start Session", style="success.TButton", command=self.start_session); self.start_session_button.pack(fill=X, pady=2)
+        self.stop_session_button = ttk.Button(self.btn_container, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session); self.stop_session_button.pack(fill=X, pady=2); self.stop_session_button.pack_forget()
+        
+        ttk.Separator(self.sidebar_content, orient="horizontal").pack(fill=X, pady=5)
+        ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
+        ttk.Button(self.btn_container, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
+        
+        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
         self.response_text_area = ttk.ScrolledText(self.response_frame, height=5, font=("Arial", 12), wrap=WORD, state="disabled"); self.response_text_area.pack(fill=X, padx=4, pady=4)
@@ -244,9 +241,9 @@ class GameAssistantApp:
         if self.session_manager.is_session_active(): self.stop_session()
         else: self.start_session()
     def start_session(self): 
-        self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(fill=X, pady=2, before=self.sidebar_sep)
+        self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(fill=X, pady=2)
     def stop_session(self): 
-        self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2, before=self.sidebar_sep)
+        self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2)
         if self.create_blog_post.get(): threading.Thread(target=self.generate_and_save_blog_post).start()
 
     def generate_and_save_blog_post(self, c=None):
@@ -339,9 +336,11 @@ class GameAssistantApp:
             if messagebox.askokcancel("VITS2", "VITS2サーバーを起動しますか？"): self.start_vits2_server()
             else: self.tts_engine.set(self.last_engine); return
         self.last_engine = eng; self.settings_manager.set('tts_engine', eng); self.settings_manager.save(self.settings_manager.settings)
-        if eng == "style_bert_vits2" and hasattr(self, 'vits2_config_frame'): self.vits2_config_frame.pack(fill=X, pady=4); self.refresh_vits2_models()
-        elif hasattr(self, 'vits2_config_frame'): self.vits2_config_frame.pack_forget()
+        if eng == "style_bert_vits2" and hasattr(self, 'vits2_config_frame') and self.vits2_config_frame.winfo_exists(): self.vits2_config_frame.pack(fill=X, pady=4); self.refresh_vits2_models()
+        elif hasattr(self, 'vits2_config_frame') and self.vits2_config_frame.winfo_exists(): self.vits2_config_frame.pack_forget()
+
     def on_vits2_model_change(self, e=None):
+        if not hasattr(self, 'vits2_model_dropdown') or not self.vits2_model_dropdown.winfo_exists(): return
         n = self.vits2_model_dropdown.get() 
         for s in getattr(self, 'vits2_speakers', []):
             if s['name'] == n:
@@ -363,7 +362,8 @@ class GameAssistantApp:
                 except: pass
                 time.sleep(1)
         threading.Thread(target=_f, daemon=True).start()
-    def _update_vits2_dropdown(self, n): (self.vits2_model_dropdown.config(values=n) if hasattr(self, 'vits2_model_dropdown') else None); (self.vits2_model_dropdown.set(n[0]) if n and hasattr(self, 'vits2_model_dropdown') else None)
+    def _update_vits2_dropdown(self, n):
+        if hasattr(self, 'vits2_model_dropdown') and self.vits2_model_dropdown.winfo_exists(): self.vits2_model_dropdown.config(values=n); self.vits2_model_dropdown.set(n[0] if n else "")
     def start_vits2_server(self):
         if self.vits2_server_process is None:
             try:
