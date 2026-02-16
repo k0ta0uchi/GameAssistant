@@ -83,7 +83,9 @@ class AppState:
         
         # Twitch関連
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
-        self.twitch_bot_id = ttk.StringVar(value=self.settings.get("bot_id", ""))
+        # 互換性のため bot_id もチェック
+        initial_bot_id = self.settings.get("twitch_bot_id") or self.settings.get("bot_id", "")
+        self.twitch_bot_id = ttk.StringVar(value=initial_bot_id)
         self.twitch_client_id = ttk.StringVar(value=self.settings.get("twitch_client_id", ""))
         self.twitch_client_secret = ttk.StringVar(value=self.settings.get("twitch_client_secret", ""))
         self.twitch_auth_code = ttk.StringVar()

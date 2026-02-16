@@ -246,7 +246,7 @@ class TwitchService:
                 
                 # 登録されたIDをBot IDとして設定・保存する
                 self.app.state.twitch_bot_id.set(user_id)
-                self.app.state.save('bot_id', user_id)
+                self.app.state.save('twitch_bot_id', user_id)
                 logging.info(f"Bot IDを {user_id} に設定し、保存しました。")
 
                 self.app.state.twitch_auth_code.set("")
