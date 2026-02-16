@@ -67,6 +67,11 @@ class GameAssistantApp:
         self.root.title("GameAssistant - AI Companion")
         self.root.geometry("1100x850")
         self._setup_custom_styles()
+        
+        # ログ機能を最優先で初期化 (起動直後のログをキャッチするため)
+        self.log_history = []
+        self._setup_logging()
+        
         self.cleanup_temp_files()
         self.settings_manager = SettingsManager()
         self._init_variables()
@@ -85,10 +90,8 @@ class GameAssistantApp:
         self.twitch_service = TwitchService(self, mention_callback=self.schedule_twitch_mention)
         self.session_manager = SessionManager(self, self.twitch_service)
         
-        self.twitch_connect_button = None # Placeholder for external access
-        self.log_history = []
+        self.twitch_connect_button = None # Placeholder
         self.create_widgets()
-        self._setup_logging()
 
         keyboard.add_hotkey("ctrl+shift+f2", self.toggle_session)
         self._process_log_queue()
@@ -155,16 +158,12 @@ class GameAssistantApp:
         self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 2))
         self.sidebar_content = ttk.Frame(self.sidebar); self.sidebar_content.pack(fill=BOTH, expand=True)
         self._create_audio_card(self.sidebar_content); self._create_target_card(self.sidebar_content)
-        
         self.btn_container = ttk.Frame(self.sidebar_content, padding=2); self.btn_container.pack(fill=X, pady=4)
         self.start_session_button = ttk.Button(self.btn_container, text="🚀 Start Session", style="success.TButton", command=self.start_session); self.start_session_button.pack(fill=X, pady=2)
         self.stop_session_button = ttk.Button(self.btn_container, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session); self.stop_session_button.pack(fill=X, pady=2); self.stop_session_button.pack_forget()
-        
-        ttk.Separator(self.sidebar_content, orient="horizontal").pack(fill=X, pady=5)
-        self.settings_btn = ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton")
-        self.settings_btn.pack(fill=X, pady=2)
+        self.sidebar_sep = ttk.Separator(self.sidebar_content, orient="horizontal"); self.sidebar_sep.pack(fill=X, pady=5)
+        self.settings_btn = ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton"); self.settings_btn.pack(fill=X, pady=2)
         ttk.Button(self.btn_container, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
-        
         self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
@@ -243,11 +242,9 @@ class GameAssistantApp:
         if self.session_manager.is_session_active(): self.stop_session()
         else: self.start_session()
     def start_session(self): 
-        self.session_manager.start_session(); self.start_session_button.pack_forget()
-        self.stop_session_button.pack(fill=X, pady=2, before=self.settings_btn)
+        self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(fill=X, pady=2, before=self.sidebar_sep if hasattr(self, 'sidebar_sep') else None)
     def stop_session(self): 
-        self.session_manager.stop_session(); self.stop_session_button.pack_forget()
-        self.start_session_button.pack(fill=X, pady=2, before=self.settings_btn)
+        self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2, before=self.sidebar_sep if hasattr(self, 'sidebar_sep') else None)
         if self.create_blog_post.get(): threading.Thread(target=self.generate_and_save_blog_post).start()
 
     def generate_and_save_blog_post(self, c=None):
@@ -379,4 +376,26 @@ class GameAssistantApp:
     def _write_log(self, record, from_history=False):
         if not from_history: self.log_history.append(record)
         if not self.log_filters.get(record.levelname, ttk.BooleanVar(value=True)).get(): return
-        self.log_textbox.config(state="normal"); msg = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} [{record.levelname}] {record.getMessage()}\n"; self.log_textbox.insert(END, msg, record.levelname); self.log_textbox.see(END); self.log_textbox.config(state="disabled")
+        
+        log_level_emojis = {'DEBUG': '⚙️', 'INFO': '🔵', 'WARNING': '🟡', 'ERROR': '🔴', 'CRITICAL': '🔥'}
+        msg_content = record.getMessage()
+        levelname = record.levelname
+        
+        # 不要なノイズログをINFOに格下げ
+        if levelname == 'ERROR' and any(k in msg_content for k in ['Embedding', 'Batch', 'onnx', 'cudnn', 'Batches:']):
+            levelname = 'INFO'
+        
+        tag_name = levelname
+        # 特定のログだけデフォルト色に
+        if levelname == 'INFO' and any(k in msg_content for k in ['Embedding', 'Batch', 'Batches:']):
+             tag_name = 'DEFAULT'
+
+        self.log_textbox.config(state="normal")
+        msg = f"{datetime.fromtimestamp(record.created).strftime('%H:%M:%S')} {log_level_emojis.get(record.levelname, ' ')} [{record.levelname}] {msg_content}\n"
+        
+        if tag_name == 'DEFAULT':
+            self.log_textbox.insert(END, msg)
+        else:
+            self.log_textbox.insert(END, msg, tag_name)
+            
+        self.log_textbox.see(END); self.log_textbox.config(state="disabled")
