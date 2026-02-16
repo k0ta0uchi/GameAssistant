@@ -135,18 +135,11 @@ class GameAssistantApp:
 
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
-        # 1. 左サイドバー (幅を300に微調整)
+        # 1. 左サイドバー
         self.sidebar = ttk.Frame(self.main_container, width=300); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 0)); self.sidebar.pack_propagate(False)
         
-        # スクロールバーを左(side=LEFT)に配置して、右側の隙間を消す
-        canvas = ttk.Canvas(self.sidebar, background="#0F0F23", highlightthickness=0)
-        scroll = ttk.Scrollbar(self.sidebar, orient=VERTICAL, command=canvas.yview)
-        scroll.pack(side=LEFT, fill=Y) # 左端へ
-        
-        self.sidebar_scrollable = ttk.Frame(canvas); self.sidebar_scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.sidebar_scrollable, anchor="nw", width=280) 
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        # スクロールバーとキャンバスを削除し、直接フレームを配置
+        self.sidebar_scrollable = ttk.Frame(self.sidebar); self.sidebar_scrollable.pack(fill=BOTH, expand=True)
         
         self._create_audio_card(self.sidebar_scrollable); self._create_target_card(self.sidebar_scrollable)
         
