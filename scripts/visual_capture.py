@@ -104,9 +104,9 @@ class CaptureService:
     def capture_window(self):
         print("ウィンドウをキャプチャします…")
         try:
-            capture_screen(self.app.selected_window, self.app.screenshot_file_path)
-            self.load_and_display_image(self.app.screenshot_file_path)
-            return self.app.screenshot_file_path
+            capture_screen(self.app.state.current_window, self.app.state.screenshot_file_path)
+            self.load_and_display_image(self.app.state.screenshot_file_path)
+            return self.app.state.screenshot_file_path
         except Exception as e:
             print(f"キャプチャできませんでした： {e}")
             return None
@@ -119,14 +119,14 @@ class CaptureService:
             image = Image.open(image_path)
             max_size = (400, 300)
             image.thumbnail(max_size)
-            self.app.image = ImageTk.PhotoImage(image)
+            self.app.state.image = ImageTk.PhotoImage(image)
             self.app.root.after(0, self.update_image_label)
         except Exception as e:
             print(f"画像処理エラー: {e}")
 
     def update_image_label(self):
-        if self.app.image:
-            self.app.image_label.config(image=self.app.image)
+        if self.app.state.image:
+            self.app.image_label.config(image=self.app.state.image)
 
 if __name__ == "__main__":
     # ウィンドウの一覧を表示し、ユーザーに選択させる

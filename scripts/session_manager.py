@@ -156,8 +156,8 @@ class SessionManager:
         # 検知から1.5秒間は、直前のノイズや「ねえぐり」自身の残響を拾わないように無視する
         self.prompt_cooldown_until = time.time() + 1.5
         
-        if self.app.selected_window:
-            self.app.cached_screenshot = self.app.capture_service.capture_window()
+        if self.app.state.current_window:
+            self.app.state.cached_screenshot = self.app.capture_service.capture_window()
 
     def _on_stop_word(self):
         """Porcupineが「ストップ」を検知した時の処理"""
@@ -204,10 +204,10 @@ class SessionManager:
         
         self._save_user_speech(text, is_prompt=True)
         
-        screenshot_path = getattr(self.app, 'cached_screenshot', None)
-        if not screenshot_path and self.app.selected_window:
+        screenshot_path = self.app.state.cached_screenshot
+        if not screenshot_path and self.app.state.current_window:
             screenshot_path = self.app.capture_service.capture_window()
-        self.app.cached_screenshot = None
+        self.app.state.cached_screenshot = None
         
         session_history = self.get_session_history()
         self.app.process_prompt(text, session_history, screenshot_path)
