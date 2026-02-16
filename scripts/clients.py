@@ -83,6 +83,7 @@ def get_chroma_client() -> Any:
         # テレメトリを無効化した設定
         settings = Settings(
             anonymized_telemetry=False,
+            telemetry_enabled=False,
             is_persistent=True
         )
 
@@ -96,7 +97,7 @@ def get_chroma_client() -> Any:
 
         # 2) fallback: 簡易 client（in-memory / ephemeral）
         try:
-            settings = Settings(anonymized_telemetry=False, is_persistent=False)
+            settings = Settings(anonymized_telemetry=False, telemetry_enabled=False, is_persistent=False)
             _chroma_client = chromadb.Client(settings=settings)
             logger.info("Using ephemeral chromadb.Client() as fallback with telemetry disabled")
             return _chroma_client
