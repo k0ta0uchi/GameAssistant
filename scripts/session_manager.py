@@ -176,6 +176,10 @@ class SessionManager:
 
         logging.info(f"[ASR Final] {text}")
         
+        # アクティビティ通知（自動ツッコミタイマーのリセット）
+        if hasattr(self, 'auto_commentary_service'):
+            self.auto_commentary_service.notify_activity()
+        
         # プロンプト待機モード中の場合
         if self.is_collecting_prompt:
             # クールダウン中かチェック（Nod音声の誤認識防止）

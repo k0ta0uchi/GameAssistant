@@ -80,6 +80,8 @@ class AppState:
         self.user_name = ttk.StringVar(value=self.settings.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings.get("create_blog_post", False))
         self.enable_auto_commentary = ttk.BooleanVar(value=self.settings.get("enable_auto_commentary", False))
+        self.auto_commentary_min = ttk.IntVar(value=self.settings.get("auto_commentary_min", 300))
+        self.auto_commentary_max = ttk.IntVar(value=self.settings.get("auto_commentary_max", 600))
         
         # Twitch関連
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
@@ -347,6 +349,17 @@ class GameAssistantApp:
                 self.response_text_area.config(state="normal"); self.response_text_area.delete("1.0", END); self.response_text_area.insert(END, t); self.response_text_area.see(END); self.response_text_area.config(state="disabled")
             if auto_close: self.root.after(self.state.response_display_duration.get(), self._clear_response_area)
     def _clear_response_area(self): self.response_text_area.config(state="normal"); self.response_text_area.delete("1.0", END); self.response_text_area.config(state="disabled")
+    
+    def append_log_text(self, message, tag="INFO"):
+        """ログエリアに直接テキストを追加する（自動ツッコミの履歴用など）"""
+        self.root.after(0, lambda: self._write_custom_log(message, tag))
+
+    def _write_custom_log(self, message, tag):
+        self.log_textbox.config(state="normal")
+        self.log_textbox.insert(END, f"{datetime.now().strftime('%H:%M:%S')} 🤖 {message}\n", tag)
+        self.log_textbox.see(END)
+        self.log_textbox.config(state="disabled")
+
     def schedule_twitch_mention(self, a, p, c): (asyncio.run_coroutine_threadsafe(self.handle_twitch_mention(a, p, c), self.twitch_service.twitch_bot_loop) if self.twitch_service.twitch_bot_loop else None)
     async def handle_twitch_mention(self, a, p, c):
         try:

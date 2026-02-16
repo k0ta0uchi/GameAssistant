@@ -161,6 +161,20 @@ class SettingsWindow(tk.Toplevel):
         _create_toggle("Use Image (Vision)", self.app.state.use_image, 'use_image')
         _create_toggle("Private Mode", self.app.state.is_private, 'is_private')
         _create_toggle("Enable Auto-Commentary", self.app.state.enable_auto_commentary, 'enable_auto_commentary')
+        
+        # Auto-Commentary Intervals
+        interval_frame = ttk.Frame(tab)
+        interval_frame.pack(fill=X, pady=2, padx=(25, 0))
+        ttk.Label(interval_frame, text="Interval (s) Min:").pack(side=LEFT)
+        e_min = ttk.Entry(interval_frame, textvariable=self.app.state.auto_commentary_min, width=10)
+        e_min.pack(side=LEFT, padx=5)
+        e_min.bind("<FocusOut>", lambda e: self.app.state.save('auto_commentary_min', self.app.state.auto_commentary_min.get()))
+        
+        ttk.Label(interval_frame, text="Max:").pack(side=LEFT)
+        e_max = ttk.Entry(interval_frame, textvariable=self.app.state.auto_commentary_max, width=10)
+        e_max.pack(side=LEFT, padx=5)
+        e_max.bind("<FocusOut>", lambda e: self.app.state.save('auto_commentary_max', self.app.state.auto_commentary_max.get()))
+
         _create_toggle("Show Response in New Window", self.app.state.show_response_in_new_window, 'show_response_in_new_window')
         _create_toggle("Create Blog Post after session", self.app.state.create_blog_post, 'create_blog_post')
 
