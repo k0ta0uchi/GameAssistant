@@ -231,7 +231,7 @@ class GameAssistantApp:
 
     def _create_log_area(self, parent):
         log_container = ttk.Labelframe(parent, text="LOGS", style="Card.TLabelframe"); log_container.pack(fill=BOTH, expand=True)
-        filter_frame = ttk.Frame(log_container, background="#1a1a3a"); filter_frame.pack(fill=X, padx=4, pady=2)
+        filter_frame = ttk.Frame(log_container); filter_frame.pack(fill=X, padx=4, pady=2)
         log_levels = {"DEBUG": "secondary", "INFO": "info", "WARNING": "warning", "ERROR": "danger"}
         self.log_filters = {}
         for level, bstyle in log_levels.items():
