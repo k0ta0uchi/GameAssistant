@@ -135,10 +135,10 @@ class GameAssistantApp:
 
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
-        # 1. 左サイドバー
-        self.sidebar = ttk.Frame(self.main_container, width=300); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 0)); self.sidebar.pack_propagate(False)
+        # 1. 左サイドバー (幅を320に拡幅)
+        self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 2))
         
-        # スクロールバーとキャンバスを削除し、直接フレームを配置
+        # 直接フレームを配置 (プロパゲートを有効にして内容物に合わせる)
         self.sidebar_scrollable = ttk.Frame(self.sidebar); self.sidebar_scrollable.pack(fill=BOTH, expand=True)
         
         self._create_audio_card(self.sidebar_scrollable); self._create_target_card(self.sidebar_scrollable)
@@ -156,8 +156,8 @@ class GameAssistantApp:
         ttk.Button(btns, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
         ttk.Button(btns, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
         
-        # 2. 右メインエリア (padxの左側を0に)
-        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
+        # 2. 右メインエリア (padxを調整して重なりを防止)
+        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(2, 2))
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
         self.response_text_area = ttk.ScrolledText(self.response_frame, height=5, font=("Arial", 12), wrap=WORD, state="disabled"); self.response_text_area.pack(fill=X, padx=4, pady=4)
