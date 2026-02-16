@@ -135,7 +135,7 @@ class GameAssistantApp:
 
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
-        self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(0, 4)); self.sidebar.pack_propagate(False)
+        self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 0)); self.sidebar.pack_propagate(False)
         canvas = ttk.Canvas(self.sidebar, background="#0F0F23", highlightthickness=0); scroll = ttk.Scrollbar(self.sidebar, orient=VERTICAL, command=canvas.yview)
         self.sidebar_scrollable = ttk.Frame(canvas); self.sidebar_scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=self.sidebar_scrollable, anchor="nw", width=300); canvas.configure(yscrollcommand=scroll.set)
@@ -158,7 +158,7 @@ class GameAssistantApp:
         ttk.Button(btns, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
         ttk.Button(btns, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
         
-        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=RIGHT, fill=BOTH, expand=True)
+        self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
         self.response_text_area = ttk.ScrolledText(self.response_frame, height=5, font=("Arial", 12), wrap=WORD, state="disabled"); self.response_text_area.pack(fill=X, padx=4, pady=4)
