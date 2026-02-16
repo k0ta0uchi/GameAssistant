@@ -68,7 +68,6 @@ class GameAssistantApp:
         self.root.geometry("1100x850")
         self._setup_custom_styles()
         
-        # ログ機能を最優先で初期化 (起動直後のログをキャッチするため)
         self.log_history = []
         self._setup_logging()
         
@@ -90,7 +89,7 @@ class GameAssistantApp:
         self.twitch_service = TwitchService(self, mention_callback=self.schedule_twitch_mention)
         self.session_manager = SessionManager(self, self.twitch_service)
         
-        self.twitch_connect_button = None # Placeholder
+        self.twitch_connect_button = None 
         self.create_widgets()
 
         keyboard.add_hotkey("ctrl+shift+f2", self.toggle_session)
@@ -258,9 +257,13 @@ class GameAssistantApp:
         except Exception as e: logging.error(f"Blog Error: {e}")
 
     def update_device_index(self, e=None):
-        n = self.selected_device.get(); self.device_index = self.get_device_index_from_name(n); self.device_index_label.config(text=f"Index: {self.device_index} - {n}"); self.settings_manager.set("audio_device", n); self.settings_manager.save(self.settings_manager.settings)
+        n = self.selected_device.get(); self.device_index = self.get_device_index_from_name(n)
+        logging.info(f"オーディオ入力デバイスを選択しました: {n} (Index: {self.device_index})")
+        self.device_index_label.config(text=f"Index: {self.device_index} - {n}"); self.settings_manager.set("audio_device", n); self.settings_manager.save(self.settings_manager.settings)
     def update_window(self, e=None):
-        t = self.selected_window_title.get(); self.selected_window = visual_capture.get_window_by_title(t); self.selected_window_label.config(text=f"Selected: {t if self.selected_window else '(Not Found)'}"); self.settings_manager.set("window", t); self.settings_manager.save(self.settings_manager.settings)
+        t = self.selected_window_title.get(); self.selected_window = visual_capture.get_window_by_title(t)
+        if self.selected_window: logging.info(f"対象ウィンドウを選択しました: {t}")
+        self.selected_window_label.config(text=f"Selected: {t if self.selected_window else '(Not Found)'}"); self.settings_manager.set("window", t); self.settings_manager.save(self.settings_manager.settings)
     def refresh_window_list(self): self.windows = visual_capture.list_available_windows(); self.window_dropdown['values'] = self.windows; self.update_window()
     def update_record_buttons_state(self, e=None): pass
     def update_level_meter(self, v):
@@ -270,7 +273,7 @@ class GameAssistantApp:
     def execute_gemini_interaction(self, p, i, h):
         self.root.after(0, lambda: self.update_status('gemini', True))
         try:
-            self.memory_manager.enqueue_save({'type': 'user_prompt', 'source': self.user_name.get(), 'content': p, 'timestamp': datetime.now().isoformat()})
+            self.memory_manager.enqueue_save({'type': 'save', 'data': {'type': 'user_prompt', 'source': self.user_name.get(), 'content': p, 'timestamp': datetime.now().isoformat()}})
             s, full = self.gemini_service.ask_stream(p, i, self.is_private.get(), session_history=h), ""
             for sent in gemini.split_into_sentences(s):
                 if voice.stop_playback_event.is_set(): break
@@ -381,13 +384,13 @@ class GameAssistantApp:
         msg_content = record.getMessage()
         levelname = record.levelname
         
-        # 不要なノイズログをINFOに格下げ
-        if levelname == 'ERROR' and any(k in msg_content for k in ['Embedding', 'Batch', 'onnx', 'cudnn', 'Batches:']):
+        # 不要なノイズログ（llama.cpp や ChromaDB）をINFOに格下げ
+        noise_keywords = ['Embedding', 'Batch', 'onnx', 'cudnn', 'Batches:', 'llama_', 'n_ctx', 'SWA cache']
+        if levelname == 'ERROR' and any(k in msg_content for k in noise_keywords):
             levelname = 'INFO'
         
         tag_name = levelname
-        # 特定のログだけデフォルト色に
-        if levelname == 'INFO' and any(k in msg_content for k in ['Embedding', 'Batch', 'Batches:']):
+        if levelname == 'INFO' and any(k in msg_content for k in noise_keywords):
              tag_name = 'DEFAULT'
 
         self.log_textbox.config(state="normal")
