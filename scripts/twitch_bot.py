@@ -45,6 +45,8 @@ async def setup_database(chroma_client: Any, bot_id: str) -> tuple[list[tuple[st
 
     if results and results['ids']:
         for i, user_id_str in enumerate(results['ids']):
+            # "bot" というIDはボット自身のトークンなので、ここではスキップ
+            
             metadata = results['metadatas'][i]
             token = metadata.get('token')
             refresh = metadata.get('refresh')
@@ -196,7 +198,7 @@ class TwitchService:
         self.mention_callback = mention_callback
 
     def copy_auth_url(self):
-        client_id = self.app.twitch_client_id.get()
+        client_id = self.app.state.twitch_client_id.get()
         if not client_id:
             logging.error("Twitch Client IDが設定されていません。")
             return
@@ -223,13 +225,13 @@ class TwitchService:
         loop.run_until_complete(self.async_register_auth_code())
 
     async def async_register_auth_code(self):
-        code = self.app.twitch_auth_code.get()
+        code = self.app.state.twitch_auth_code.get()
         if not code:
             logging.error("Twitch認証コードが入力されていません。")
             return
 
-        client_id = self.app.twitch_client_id.get()
-        client_secret = self.app.twitch_client_secret.get()
+        client_id = self.app.state.twitch_client_id.get()
+        client_secret = self.app.state.twitch_client_secret.get()
 
         if not all([client_id, client_secret]):
             logging.error("Twitch Client IDまたはClient Secretが設定されていません。")
@@ -243,12 +245,11 @@ class TwitchService:
                 logging.info(f"成功: ユーザーID {user_id} のトークンを登録しました。")
                 
                 # 登録されたIDをBot IDとして設定・保存する
-                self.app.twitch_bot_id.set(user_id)
-                self.app.settings_manager.set('twitch_bot_id', user_id)
-                self.app.settings_manager.save(self.app.settings_manager.settings)
+                self.app.state.twitch_bot_id.set(user_id)
+                self.app.state.save('bot_id', user_id)
                 logging.info(f"Bot IDを {user_id} に設定し、保存しました。")
 
-                self.app.twitch_auth_code.set("")
+                self.app.state.twitch_auth_code.set("")
             else:
                 logging.error("トークンの登録に失敗しました。")
         except Exception as e:
@@ -287,10 +288,10 @@ class TwitchService:
 
     async def async_connect_twitch_bot(self):
         logging.info("Twitchボットへの非同期接続処理を開始します (async_connect_twitch_bot)")
-        client_id = self.app.twitch_client_id.get()
-        client_secret = self.app.twitch_client_secret.get()
+        client_id = self.app.state.twitch_client_id.get()
+        client_secret = self.app.state.twitch_client_secret.get()
         
-        bot_id = self.app.twitch_bot_id.get()
+        bot_id = self.app.state.twitch_bot_id.get()
         if not bot_id:
             logging.error("ボットのIDが設定ファイルに見つかりません。認証コードでボットのトークンを登録してください。")
             return
@@ -336,7 +337,7 @@ class TwitchService:
                 client_secret=client_secret,
                 bot_id=bot_id,
                 owner_id=bot_id,
-                nick=self.app.twitch_bot_username.get(),
+                nick=self.app.state.twitch_bot_username.get(),
                 token_collection=token_collection,
                 message_callback=self.message_callback,
                 mention_callback=self.mention_callback,

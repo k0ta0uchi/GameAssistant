@@ -86,7 +86,7 @@ class SessionManager:
             logging.debug("SessionMemory initialized.")
             
             # 設定からエンジンを選択して作成
-            self.asr_engine_type = self.app.asr_engine.get()
+            self.asr_engine_type = self.app.state.asr_engine.get()
             logging.info(f"Using ASR Engine Mode: {self.asr_engine_type}")
             
             model_size = "kotoba-tech/kotoba-whisper-v2.0-faster" # Default (Large)
@@ -215,12 +215,12 @@ class SessionManager:
     def _save_user_speech(self, text, is_prompt):
         if not self.session_memory: return
         
-        event = UserSpeech(author=self.app.user_name.get(), content=text, is_prompt=is_prompt)
+        event = UserSpeech(author=self.app.state.user_name.get(), content=text, is_prompt=is_prompt)
         self.session_memory.events.append(event)
         
         event_data = {
             'type': 'user_speech',
-            'source': self.app.user_name.get(),
+            'source': self.app.state.user_name.get(),
             'content': text,
             'timestamp': event.timestamp.isoformat()
         }

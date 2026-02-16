@@ -39,7 +39,7 @@ class AutoCommentaryService:
             return
         
         # 設定で無効なら起動しない
-        if not hasattr(self.app, 'enable_auto_commentary') or not self.app.enable_auto_commentary.get():
+        if not self.app.state.enable_auto_commentary.get():
             logging.info("AutoCommentaryService is disabled in settings.")
             return
 
@@ -118,7 +118,7 @@ class AutoCommentaryService:
         if self._is_user_speaking():
             return True
         # AI発話中チェック（キューが空でない場合を含む）
-        if not self.app.playback_queue.empty() or not self.app.tts_queue.empty():
+        if not self.app.tts_manager.playback_queue.empty() or not self.app.tts_manager.tts_queue.empty():
             return True
         return False
 
@@ -147,7 +147,7 @@ class AutoCommentaryService:
         logging.info("🎬 Generating auto-commentary...")
         
         screenshot_path = None
-        if self.app.selected_window:
+        if self.app.state.current_window:
             try:
                 screenshot_path = self.app.capture_service.capture_window()
             except Exception as e:
@@ -165,7 +165,7 @@ class AutoCommentaryService:
             response = self.app.gemini_service.ask(
                 prompt=prompt,
                 image_path=screenshot_path,
-                is_private=self.app.is_private.get(),
+                is_private=self.app.state.is_private.get(),
                 memory_type='auto_commentary',
                 session_history=None
             )
@@ -187,13 +187,13 @@ class AutoCommentaryService:
                 sentences = [s.strip() for s in re.split(r'[。！？\n]', response) if s.strip()]
                 if sentences:
                     for sentence in sentences:
-                        self.app.tts_queue.put(sentence)
-                    self.app.tts_queue.put("END_MARKER")
+                        self.app.tts_manager.put_text(sentence)
+                    self.app.tts_manager.put_text("END_MARKER")
                 
                     # GUI表示
                     self.app.root.after(0, lambda: self.app.show_gemini_response(response, auto_close=False))
                     
-                    if not self.app.show_response_in_new_window.get():
+                    if not self.app.state.show_response_in_new_window.get():
                         self.app.root.after(0, lambda: self.app._update_log_with_partial_response(f"\n(Auto): {response}", is_start=True))
                 else:
                     logging.warning("⚠️ Auto-Commentary sentences were empty.")
@@ -207,7 +207,5 @@ class AutoCommentaryService:
         self._schedule_next_commentary()
 
     def notify_activity(self):
-        """
-        互換性のために残すが、現在は何もしない。
-        """
+        """互換性のために残すが現在は何もしない"""
         pass
