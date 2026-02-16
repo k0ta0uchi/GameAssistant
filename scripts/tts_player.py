@@ -1,139 +1,121 @@
-
-import pyaudio
-import pvporcupine
-import struct
-import wave
-import io
-import os
+# -*- coding: utf-8 -*-
 import threading
-from dotenv import load_dotenv
+import queue
+import logging
+import re
+import time
+import scripts.voice as voice
 
-load_dotenv()
-
-class TTSPlayer:
+class TTSManager:
     """
-    WAVデータを再生し、同時に「ストップ」ウェイクワードを監視して再生をキャンセルする機能を持つクラス。
+    音声合成(TTS)と再生のキュー管理、およびバックグラウンド実行を担うクラス。
+    gui/app.py から重いロジックを抽出。
     """
-    def __init__(self, pyaudio_instance, device_index=None):
-        """
-        Args:
-            pyaudio_instance: PyAudioのインスタンス。
-            device_index (int, optional): 使用するオーディオデバイスのインデックス。
-        """
-        self.pyaudio_instance = pyaudio_instance
-        self.device_index = device_index
-        self.stop_event = threading.Event()
-        self.porcupine = None
-        self.playback_stream = None
-        self.monitoring_stream = None
-        self.playback_thread = None
-        self.monitoring_thread = None
+    def __init__(self, on_playback_start=None, on_playback_end=None):
+        self.tts_queue = queue.Queue()
+        self.playback_queue = queue.Queue()
+        
+        # コールバック (UI更新用)
+        self.on_playback_start = on_playback_start
+        self.on_playback_end = on_playback_end
+        
+        self.is_running = False
+        self.threads = []
 
-    def play(self, wav_data):
-        """
-        音声データを再生し、ウェイクワードの監視を開始する。
-        再生が完了するか、キャンセルされるまでブロックする。
-        """
-        try:
-            self._initialize_porcupine()
+    def start(self):
+        """ワーカー開始"""
+        if self.is_running:
+            return
+        self.is_running = True
+        
+        t1 = threading.Thread(target=self._synthesis_worker, daemon=True, name="TTS-Synthesis")
+        t2 = threading.Thread(target=self._playback_worker, daemon=True, name="TTS-Playback")
+        
+        self.threads = [t1, t2]
+        for t in self.threads:
+            t.start()
+        logging.info("TTSManager workers started.")
 
-            self.playback_thread = threading.Thread(target=self._playback_loop, args=(wav_data,))
-            self.monitoring_thread = threading.Thread(target=self._monitor_stop_word)
+    def stop(self):
+        """ワーカー停止"""
+        self.is_running = False
+        self.tts_queue.put(None)
+        self.playback_queue.put(None)
+        # 進行中のキューをクリア
+        while not self.tts_queue.empty():
+            try: self.tts_queue.get_nowait()
+            except queue.Empty: break
+        while not self.playback_queue.empty():
+            try: self.playback_queue.get_nowait()
+            except queue.Empty: break
+        logging.info("TTSManager workers stopping.")
 
-            self.playback_thread.start()
-            self.monitoring_thread.start()
+    def put_text(self, text):
+        """合成待ちキューにテキストを投入"""
+        if text:
+            self.tts_queue.put(text)
 
-            self.playback_thread.join()
-            self.monitoring_thread.join()
+    def clear_queues(self):
+        """再生待ちを中断しキューを空にする"""
+        voice.stop_playback_event.set()
+        while not self.tts_queue.empty():
+            try: self.tts_queue.get_nowait()
+            except queue.Empty: break
+        while not self.playback_queue.empty():
+            try: self.playback_queue.get_nowait()
+            except queue.Empty: break
+        # 少し待ってからリセット
+        time.sleep(0.1)
+        voice.stop_playback_event.clear()
 
-        finally:
-            self._cleanup()
-
-    def _initialize_porcupine(self):
-        """Porcupineを初期化する。"""
-        try:
-            ACCESS_KEY = os.getenv("POR_ACCESS_KEY")
-            STOP_KEYWORD_FILE_PATH = 'porcupine/ストップ_ja_windows_v3_0_0.ppn'
-            MODEL_FILE_PATH = 'porcupine/porcupine_params_ja.pv'
+    def _synthesis_worker(self):
+        """文を音声データに変換する（先行合成）スレッド"""
+        while self.is_running:
+            item = self.tts_queue.get()
+            if item is None: break
             
-            if not all([ACCESS_KEY, os.path.exists(STOP_KEYWORD_FILE_PATH), os.path.exists(MODEL_FILE_PATH)]):
-                raise RuntimeError("Porcupineの初期化に必要なキーまたはファイルが見つかりません。")
+            if item == "END_MARKER":
+                self.playback_queue.put("END_MARKER")
+                self.tts_queue.task_done()
+                continue
 
-            self.porcupine = pvporcupine.create(
-                access_key=ACCESS_KEY,
-                keyword_paths=[STOP_KEYWORD_FILE_PATH],
-                model_path=MODEL_FILE_PATH
-            )
-        except Exception as e:
-            print(f"Porcupineの初期化に失敗しました: {e}")
-            self.porcupine = None
-
-    def _playback_loop(self, wav_data):
-        """音声データを再生するループ。"""
-        if not wav_data:
-            return
-
-        try:
-            wf = wave.open(io.BytesIO(wav_data), 'rb')
-            self.playback_stream = self.pyaudio_instance.open(
-                format=self.pyaudio_instance.get_format_from_width(wf.getsampwidth()),
-                channels=wf.getnchannels(),
-                rate=wf.getframerate(),
-                output=True,
-                output_device_index=self.device_index
-            )
-
-            chunk = 1024
-            data = wf.readframes(chunk)
-            while data and not self.stop_event.is_set():
-                self.playback_stream.write(data)
-                data = wf.readframes(chunk)
-        except Exception as e:
-            print(f"音声の再生中にエラーが発生しました: {e}")
-        finally:
-            self.stop_event.set()
-
-    def _monitor_stop_word(self):
-        """「ストップ」ウェイクワードを監視するループ。"""
-        if not self.porcupine:
-            return
-
-        try:
-            self.monitoring_stream = self.pyaudio_instance.open(
-                rate=self.porcupine.sample_rate,
-                channels=1,
-                format=pyaudio.paInt16,
-                input=True,
-                frames_per_buffer=self.porcupine.frame_length,
-                input_device_index=self.device_index
-            )
-
-            while not self.stop_event.is_set():
+            # 長文分割ロジック
+            sentences = [s.strip() for s in re.split(r'([、,])', item) if s.strip()] if len(item) > 100 else [item]
+            
+            for sub in sentences:
                 try:
-                    pcm = self.monitoring_stream.read(self.porcupine.frame_length, exception_on_overflow=False)
-                    pcm = struct.unpack_from("h" * self.porcupine.frame_length, pcm)
-                    
-                    if self.porcupine.process(pcm) >= 0:
-                        print("「ストップ」を検出しました。再生を停止します。")
-                        self.stop_event.set()
-                        
-                except IOError as e:
-                    if e.errno == pyaudio.paInputOverflowed:
-                        pass
-                    else:
-                        raise
-        except Exception as e:
-            print(f"ウェイクワードの監視中にエラーが発生しました: {e}")
-        finally:
-            self.stop_event.set()
+                    if voice.stop_playback_event.is_set(): break
+                    logging.debug(f"Synthesis starting: {sub[:20]}...")
+                    wav_data = voice.generate_speech_data(sub)
+                    if wav_data:
+                        self.playback_queue.put(wav_data)
+                except Exception as e:
+                    logging.error(f"TTS Synthesis error: {e}")
+            
+            self.tts_queue.task_done()
 
-    def _cleanup(self):
-        """リソースを解放する。"""
-        if self.playback_stream:
-            self.playback_stream.stop_stream()
-            self.playback_stream.close()
-        if self.monitoring_stream:
-            self.monitoring_stream.stop_stream()
-            self.monitoring_stream.close()
-        if self.porcupine:
-            self.porcupine.delete()
+    def _playback_worker(self):
+        """合成済み音声を順次再生するスレッド"""
+        while self.is_running:
+            item = self.playback_queue.get()
+            if item is None: break
+            
+            if item == "END_MARKER":
+                if self.on_playback_end:
+                    self.on_playback_end(is_final=True)
+                self.playback_queue.task_done()
+                continue
+
+            wav_data = item
+            try:
+                if not voice.stop_playback_event.is_set():
+                    if self.on_playback_start:
+                        self.on_playback_start()
+                    
+                    # 音量調整込みで再生
+                    voice.play_wav_data(wav_data, volume=0.5)
+            except Exception as e:
+                logging.error(f"TTS Playback error: {e}")
+            finally:
+                self.playback_queue.task_done()
+                # 連続再生中の「文の間」では end(final=False) を呼ぶ必要があればここ

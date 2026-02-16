@@ -47,10 +47,13 @@ class MemoryAccessError(Exception):
     """メモリーへのアクセス中にエラーが発生した場合に発生する例外"""
     pass
 
+import queue
+import threading
+
 class MemoryManager:
     def __init__(self, collection_name='memories'):
         """
-        MemoryManagerを初期化し、ChromaDBとGeminiのクライアントを即座にセットアップする。
+        MemoryManagerを初期化し、バックグラウンド保存スレッドを開始。
         """
         try:
             logging.debug("MemoryManagerの初期化を開始します...")
@@ -58,9 +61,11 @@ class MemoryManager:
             self.gemini_client = get_gemini_client()
             self.collection_name = collection_name
 
-            logging.info(f"Getting or creating collection '{self.collection_name}' with HNSW parameters.")
-            # embedding_function=None を指定して、ChromaDBデフォルトのONNXモデルロードを阻止する
-            # ※ データの追加・検索時には必ず自前で embeddings を計算して渡す必要がある
+            # バックグラウンド処理用
+            self.task_queue = queue.Queue()
+            self.is_running = True
+            self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="Memory-Worker")
+
             self.collection = self.chroma_client.get_or_create_collection(
                 name=self.collection_name,
                 embedding_function=None,
@@ -71,14 +76,66 @@ class MemoryManager:
                     "hnsw:ef": 256
                 }
             )
-            logging.info(f"コレクションの準備ができました: '{self.collection_name}'")
             
-            # 初期化時にモデルをロードしておく
             get_embedding_model()
+            self.worker_thread.start()
+            logging.info(f"MemoryManager worker started for collection: '{self.collection_name}'")
             
         except Exception as e:
             logging.critical(f"MemoryManagerの初期化中に致命的なエラーが発生しました: {e}", exc_info=True)
             raise
+
+    def stop(self):
+        """ワーカー停止"""
+        self.is_running = False
+        self.task_queue.put(None)
+
+    def enqueue_save(self, event_data):
+        """保存タスクをキューに追加"""
+        self.task_queue.put({'type': 'save', 'data': event_data})
+
+    def enqueue_summarize(self, prompt, user_id, memory_type):
+        """要約保存タスクをキューに追加"""
+        self.task_queue.put({
+            'type': 'summarize', 
+            'data': {'prompt': prompt, 'user_id': user_id, 'memory_type': memory_type}
+        })
+
+    def run_query(self, query_texts, n_results=5, where=None):
+        """
+        クエリを実行。これは同期的（Future経由）に結果を待つ。
+        gui/app.py から直接呼ぶ場合を想定。
+        """
+        from concurrent.futures import Future
+        future = Future()
+        self.task_queue.put({
+            'type': 'query', 
+            'future': future, 
+            'data': {'query_texts': query_texts, 'n_results': n_results, 'where': where}
+        })
+        return future.result()
+
+    def _worker_loop(self):
+        """バックグラウンド処理の本体"""
+        while self.is_running:
+            try:
+                task = self.task_queue.get()
+                if task is None: break
+                
+                t_type = task.get('type')
+                data = task.get('data')
+                
+                if t_type == 'save':
+                    self.save_event_to_chroma_sync(data)
+                elif t_type == 'summarize':
+                    self.summarize_and_add_memory(**data)
+                elif t_type == 'query':
+                    res = self.query_collection(**data)
+                    if task.get('future'): task['future'].set_result(res)
+                
+                self.task_queue.task_done()
+            except Exception as e:
+                logging.error(f"Memory worker error: {e}", exc_info=True)
 
     def get_all_memories(self):
         """すべてのメモリーを取得する"""
