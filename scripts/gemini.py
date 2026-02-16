@@ -51,24 +51,25 @@ class GeminiSession:
         if custom_instruction:
             self.history.append(types.Content(role="user", parts=[types.Part(text=custom_instruction)]))
             self.history.append(types.Content(role="model", parts=[types.Part(text="はい、承知いたしましただわん。")]))
-        self.memory_manager = MemoryManager(collection_name="memories")
+        
+        # MemoryManagerはApp経由で使用することを推奨するが、
+        # 既存コードとの互換性のため個別に保持（Appから渡されるのが理想）
+        if hasattr(self.app, 'memory_manager'):
+            self.memory_manager = self.app.memory_manager
+        else:
+            self.memory_manager = MemoryManager(collection_name="memories")
+            
         local_summarizer.initialize_llm()
         self.last_grounding_metadata = None
 
     def _handle_quota_error(self) -> bool:
-        """
-        クォータエラー時にAPIキーを切り替え、メッセージを表示する。
-        """
         logging.warning("Gemini API Quota exhausted. Attempting to switch API key...")
-        
         if switch_to_next_api_key():
-            self.client = get_gemini_client() # クライアントを更新
-            msg = "クォータを使い切りました、次のAPIキーを使うので待ってね"
-            logging.info(msg)
+            self.client = get_gemini_client() 
+            logging.info("クォータを使い切りました、次のAPIキーを使うので待ってね")
             return True
         else:
-            msg = "クォータをすべて使い切りました"
-            logging.error(msg)
+            logging.error("クォータをすべて使い切りました")
             return False
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
@@ -87,12 +88,13 @@ class GeminiSession:
     def _generate_content_internal(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
         if not target_user_id: raise ValueError("User ID is not set.")
-        summarize_task = {'type': 'summarize_and_save', 'future': None, 'data': {'prompt': prompt, 'user_id': target_user_id, 'memory_type': memory_type}}
-        self.app.db_save_queue.put(summarize_task)
-        query_future = Future()
-        query_task = {'type': 'query', 'future': query_future, 'data': {'query_texts': [prompt], 'n_results': 5, 'where': {"$and": [{"type": memory_type}, {"user": target_user_id}]}}}
-        self.app.db_save_queue.put(query_task)
-        results = query_future.result()
+        
+        # RAGのための履歴要約と保存 (非同期キュー)
+        self.memory_manager.enqueue_summarize(prompt, target_user_id, memory_type)
+        
+        # 関連メモリの検索 (同期的待ち)
+        results = self.memory_manager.run_query([prompt], n_results=5, where={"$and": [{"type": memory_type}, {"user": target_user_id}]})
+        
         documents = results.get("documents") if results else None
         memory_text = "\n".join([doc for doc in documents[0] if doc is not None]) if documents and documents[0] else ""
         memory = local_summarizer.summarize(memory_text) if memory_text else ""
@@ -134,12 +136,10 @@ class GeminiSession:
     def _generate_content_stream_internal(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
         if not target_user_id: raise ValueError("User ID is not set.")
-        summarize_task = {'type': 'summarize_and_save', 'future': None, 'data': {'prompt': prompt, 'user_id': target_user_id, 'memory_type': memory_type}}
-        self.app.db_save_queue.put(summarize_task)
-        query_future = Future()
-        query_task = {'type': 'query', 'future': query_future, 'data': {'query_texts': [prompt], 'n_results': 5, 'where': {"$and": [{"type": memory_type}, {"user": target_user_id}]}}}
-        self.app.db_save_queue.put(query_task)
-        results = query_future.result()
+        
+        self.memory_manager.enqueue_summarize(prompt, target_user_id, memory_type)
+        results = self.memory_manager.run_query([prompt], n_results=5, where={"$and": [{"type": memory_type}, {"user": target_user_id}]})
+        
         documents = results.get("documents") if results else None
         memory_text = "\n".join([doc for doc in documents[0] if doc is not None]) if documents and documents[0] else ""
         memory = local_summarizer.summarize(memory_text) if memory_text else ""

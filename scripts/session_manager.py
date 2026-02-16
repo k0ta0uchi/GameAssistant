@@ -224,7 +224,7 @@ class SessionManager:
             'content': text,
             'timestamp': event.timestamp.isoformat()
         }
-        self.app.db_save_queue.put({'type': 'save', 'data': event_data, 'future': None})
+        self.app.memory_manager.enqueue_save(event_data)
 
     def handle_twitch_message(self, message: Union[TwitchChatMessage, object]):
         if self.session_memory:
@@ -234,9 +234,9 @@ class SessionManager:
             if author_name and content:
                 event = TwitchMessage(author=author_name, content=content)
                 self.session_memory.events.append(event)
-                self.app.db_save_queue.put({'type': 'save', 'data': {
+                self.app.memory_manager.enqueue_save({
                     'type': 'twitch_chat', 'source': author_name, 'content': content, 'timestamp': event.timestamp.isoformat()
-                }, 'future': None})
+                })
 
     def get_session_history(self):
         if not self.session_memory: return ""
