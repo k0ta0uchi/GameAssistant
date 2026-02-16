@@ -29,10 +29,10 @@ from twitchio.utils import setup_logging
 import logging
 from logging.handlers import QueueHandler
 import queue
-import scripts.capture as capture
+import scripts.visual_capture as visual_capture
 from scripts.settings import SettingsManager
 from scripts.record import AudioService
-from scripts.capture import CaptureService
+from scripts.visual_capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
 from .components import GeminiResponseWindow, MemoryWindow, SettingsWindow
 import subprocess
@@ -84,7 +84,7 @@ class GameAssistantApp:
         
         self.loopback_device_index = None
 
-        self.windows = capture.list_available_windows()
+        self.windows = visual_capture.list_available_windows()
         default_window = self.settings_manager.get("window", self.windows[0] if self.windows else "")
         self.selected_window_title = ttk.StringVar(value=default_window)
         self.selected_window = None
@@ -591,7 +591,7 @@ class GameAssistantApp:
 
     def update_window(self, event=None):
         selected_window_title = self.selected_window_title.get()
-        self.selected_window = capture.get_window_by_title(selected_window_title)
+        self.selected_window = visual_capture.get_window_by_title(selected_window_title)
         if self.selected_window:
             logging.info(f"選択されたウィンドウ: {self.selected_window.title}")
             self.selected_window_label.config(text=f"Selected: {self.selected_window.title}")
@@ -604,7 +604,7 @@ class GameAssistantApp:
 
     def refresh_window_list(self):
         logging.info("ウィンドウリストを更新します...")
-        self.windows = capture.list_available_windows()
+        self.windows = visual_capture.list_available_windows()
         self.window_dropdown['values'] = self.windows
         current_selection = self.selected_window_title.get()
 
