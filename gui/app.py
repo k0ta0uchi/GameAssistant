@@ -135,22 +135,27 @@ class GameAssistantApp:
 
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
-        self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 0)); self.sidebar.pack_propagate(False)
-        canvas = ttk.Canvas(self.sidebar, background="#0F0F23", highlightthickness=0); scroll = ttk.Scrollbar(self.sidebar, orient=VERTICAL, command=canvas.yview)
+        # 1. 左サイドバー (幅を300に微調整)
+        self.sidebar = ttk.Frame(self.main_container, width=300); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 0)); self.sidebar.pack_propagate(False)
+        
+        # スクロールバーを左(side=LEFT)に配置して、右側の隙間を消す
+        canvas = ttk.Canvas(self.sidebar, background="#0F0F23", highlightthickness=0)
+        scroll = ttk.Scrollbar(self.sidebar, orient=VERTICAL, command=canvas.yview)
+        scroll.pack(side=LEFT, fill=Y) # 左端へ
+        
         self.sidebar_scrollable = ttk.Frame(canvas); self.sidebar_scrollable.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=self.sidebar_scrollable, anchor="nw", width=300); canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side=LEFT, fill=BOTH, expand=True); scroll.pack(side=RIGHT, fill=Y)
+        canvas.create_window((0, 0), window=self.sidebar_scrollable, anchor="nw", width=280) 
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        
         self._create_audio_card(self.sidebar_scrollable); self._create_target_card(self.sidebar_scrollable)
         
-        # アクションボタン (セッション開始/停止をここに追加)
+        # アクションボタン
         btns = ttk.Frame(self.sidebar_scrollable, padding=2); btns.pack(fill=X, pady=4)
-        
         self.start_session_button = ttk.Button(btns, text="🚀 Start Session", style="success.TButton", command=self.start_session)
         self.start_session_button.pack(fill=X, pady=2)
-        
         self.stop_session_button = ttk.Button(btns, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session)
-        self.stop_session_button.pack(fill=X, pady=2)
-        self.stop_session_button.pack_forget()
+        self.stop_session_button.pack(fill=X, pady=2); self.stop_session_button.pack_forget()
 
         self.sidebar_sep = ttk.Separator(self.sidebar_scrollable, orient="horizontal")
         self.sidebar_sep.pack(fill=X, pady=5)
@@ -158,6 +163,7 @@ class GameAssistantApp:
         ttk.Button(btns, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
         ttk.Button(btns, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
         
+        # 2. 右メインエリア (padxの左側を0に)
         self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
         self._create_status_dashboard(self.content_area)
         self.response_frame = ttk.Labelframe(self.content_area, text="Geminiの回答", style="Card.TLabelframe"); self.response_frame.pack(fill=X, pady=(0, 4))
