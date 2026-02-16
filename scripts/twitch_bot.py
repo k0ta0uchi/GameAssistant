@@ -274,7 +274,12 @@ class TwitchService:
                 logging.info("Twitchボットインスタンスが作成されました。実行スレッドを開始します。")
                 self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
                 self.twitch_thread.start()
-                self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
+                
+                # UIボタンの更新（SettingsWindowが開いている場合のみ）
+                if self.app.twitch_connect_button and self.app.twitch_connect_button.winfo_exists():
+                    self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
+                else:
+                    logging.info("Twitch bot connected. (Settings UI is closed)")
             else:
                 logging.warning("Twitchボットインスタンスの作成に失敗したため、実行スレッドは開始されません。")
         except Exception as e:
@@ -350,7 +355,11 @@ class TwitchService:
             self.twitch_thread.join(timeout=5)
         self.twitch_thread = None
         self.twitch_bot = None
-        self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "接続", "style": "primary.TButton"})
+        
+        # UIボタンの更新（SettingsWindowが開いている場合のみ）
+        if self.app.twitch_connect_button and self.app.twitch_connect_button.winfo_exists():
+            self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "接続", "style": "primary.TButton"})
+        
         logging.info("Twitchボットを切断しました。")
 
     def run_bot_in_thread(self, loop):

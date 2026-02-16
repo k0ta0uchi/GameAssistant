@@ -85,6 +85,7 @@ class GameAssistantApp:
         self.twitch_service = TwitchService(self, mention_callback=self.schedule_twitch_mention)
         self.session_manager = SessionManager(self, self.twitch_service)
         
+        self.twitch_connect_button = None # Placeholder for external access
         self.log_history = []
         self.create_widgets()
         self._setup_logging()
@@ -160,7 +161,8 @@ class GameAssistantApp:
         self.stop_session_button = ttk.Button(self.btn_container, text="🛑 Stop Session", style="danger.TButton", command=self.stop_session); self.stop_session_button.pack(fill=X, pady=2); self.stop_session_button.pack_forget()
         
         ttk.Separator(self.sidebar_content, orient="horizontal").pack(fill=X, pady=5)
-        ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton").pack(fill=X, pady=2)
+        self.settings_btn = ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton")
+        self.settings_btn.pack(fill=X, pady=2)
         ttk.Button(self.btn_container, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
         
         self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
@@ -241,9 +243,11 @@ class GameAssistantApp:
         if self.session_manager.is_session_active(): self.stop_session()
         else: self.start_session()
     def start_session(self): 
-        self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(fill=X, pady=2)
+        self.session_manager.start_session(); self.start_session_button.pack_forget()
+        self.stop_session_button.pack(fill=X, pady=2, before=self.settings_btn)
     def stop_session(self): 
-        self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2)
+        self.session_manager.stop_session(); self.stop_session_button.pack_forget()
+        self.start_session_button.pack(fill=X, pady=2, before=self.settings_btn)
         if self.create_blog_post.get(): threading.Thread(target=self.generate_and_save_blog_post).start()
 
     def generate_and_save_blog_post(self, c=None):
