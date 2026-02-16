@@ -77,7 +77,7 @@ class AudioService:
             logging.error(f"Porcupine Init Error: {e}")
 
         # PyAudioストリーム開始
-        device_index = self.app.device_index
+        device_index = self.app.state.device_index
         
         # デバイスインデックスの検証
         if device_index is not None:

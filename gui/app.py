@@ -93,6 +93,12 @@ class AppState:
         self.current_window = None
         self.device_index = None
         self.last_engine = self.tts_engine.get()
+        
+        # パスとデータ
+        self.audio_file_path = os.path.abspath("temp_recording.wav")
+        self.screenshot_file_path = os.path.abspath("temp_screenshot.png")
+        self.cached_screenshot = None
+        self.image = None # PhotoImage object
 
     def save(self, key, value):
         """設定を保存"""
@@ -106,26 +112,20 @@ class GameAssistantApp:
         self.root.title("GameAssistant - AI Companion")
         self.root.geometry("1100x850")
         self._setup_custom_styles()
-        
-        # 1. ログ機能の初期化
         self.log_history = []
         self._setup_logging()
         
-        # 2. 状態・設定の初期化
         self.settings_manager = SettingsManager()
         self.state = AppState(self.root, self.settings_manager)
         self.cleanup_temp_files()
         
-        # 3. サービス群の初期化
         self._init_services()
         self.create_widgets()
 
         keyboard.add_hotkey("ctrl+shift+f2", self.toggle_session)
         self._process_log_queue()
         
-        # 初期デバイス・ウィンドウの同期
         self.sync_initial_state()
-        
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self._update_auto_commentary_bar_loop()
 
@@ -150,17 +150,14 @@ class GameAssistantApp:
         if self.state.tts_engine.get() == "style_bert_vits2": self.start_vits2_server()
 
     def sync_initial_state(self):
-        """初期のオーディオデバイスとウィンドウを反映"""
         audio_names = record.get_audio_device_names()
         if audio_names:
-            if not self.state.audio_device.get():
-                self.state.audio_device.set(audio_names[0])
+            if not self.state.audio_device.get(): self.state.audio_device.set(audio_names[0])
             self.update_device_index()
             
         win_titles = visual_capture.list_available_windows()
         if win_titles:
-            if not self.state.window_title.get():
-                self.state.window_title.set(win_titles[0])
+            if not self.state.window_title.get(): self.state.window_title.set(win_titles[0])
             self.update_window()
 
     def _on_tts_playback_finished(self, is_final):
@@ -234,7 +231,7 @@ class GameAssistantApp:
 
     def _create_log_area(self, parent):
         log_container = ttk.Labelframe(parent, text="LOGS", style="Card.TLabelframe"); log_container.pack(fill=BOTH, expand=True)
-        filter_frame = ttk.Frame(log_container); filter_frame.pack(fill=X, padx=4, pady=2)
+        filter_frame = ttk.Frame(log_container, background="#1a1a3a"); filter_frame.pack(fill=X, padx=4, pady=2)
         log_levels = {"DEBUG": "secondary", "INFO": "info", "WARNING": "warning", "ERROR": "danger"}
         self.log_filters = {}
         for level, bstyle in log_levels.items():
@@ -289,15 +286,13 @@ class GameAssistantApp:
         except Exception as e: logging.error(f"Blog Error: {e}")
 
     def update_device_index(self, e=None):
-        n = self.state.audio_device.get()
-        self.state.device_index = record.get_device_index_from_name(n)
+        n = self.state.audio_device.get(); self.state.device_index = record.get_device_index_from_name(n)
         logging.info(f"オーディオ入力デバイスを選択しました: {n} (Index: {self.state.device_index})")
         self.device_index_label.config(text=f"Index: {self.state.device_index} - {n}")
         self.state.save("audio_device", n)
 
     def update_window(self, e=None):
-        t = self.state.window_title.get()
-        self.state.current_window = visual_capture.get_window_by_title(t)
+        t = self.state.window_title.get(); self.state.current_window = visual_capture.get_window_by_title(t)
         if self.state.current_window: logging.info(f"対象ウィンドウを選択しました: {t}")
         self.selected_window_label.config(text=f"Selected: {t if self.state.current_window else '(Not Found)'}")
         self.state.save("window", t)
@@ -325,8 +320,8 @@ class GameAssistantApp:
         finally: self.root.after(0, lambda: (self.update_status('gemini', False), self.finalize_response_processing()))
 
     def finalize_response_processing(self): 
-        if os.path.exists(self.audio_file_path): os.remove(self.audio_file_path)
-        if os.path.exists(self.screenshot_file_path): os.remove(self.screenshot_file_path)
+        if os.path.exists(self.state.audio_file_path): os.remove(self.state.audio_file_path)
+        if os.path.exists(self.state.screenshot_file_path): os.remove(self.state.screenshot_file_path)
     def update_asr_display(self, t, f=False):
         self.asr_text_area.config(state="normal")
         if f:
