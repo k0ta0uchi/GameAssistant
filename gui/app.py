@@ -336,15 +336,16 @@ class GameAssistantApp:
             for l in getattr(self, 'asr_history', []): self.asr_text_area.insert(END, l + "\n")
             self.asr_text_area.insert(END, ">>> " + t); self.update_status('asr', True)
         self.asr_text_area.see(END); self.asr_text_area.config(state="disabled")
-    def show_gemini_response(self, t, auto=False, timer=False):
+    def show_gemini_response(self, t, auto_close=False, only_timer=False):
         if self.state.show_response_in_new_window.get():
             if self.current_response_window and self.current_response_window.winfo_exists():
-                if not timer: self.current_response_window.set_response_text(t, auto_close=auto)
+                if not only_timer: self.current_response_window.set_response_text(t, auto_close=auto_close)
                 else: self.current_response_window.start_close_timer()
-            elif not timer: self.current_response_window = GeminiResponseWindow(self.root, t, self.state.response_display_duration.get()); (self.current_response_window.start_close_timer() if auto else None)
+            elif not only_timer: self.current_response_window = GeminiResponseWindow(self.root, t, self.state.response_display_duration.get()); (self.current_response_window.start_close_timer() if auto_close else None)
         else:
-            if not timer: self.response_text_area.config(state="normal"); self.response_text_area.delete("1.0", END); self.response_text_area.insert(END, t); self.response_text_area.see(END); self.response_text_area.config(state="disabled")
-            if auto: self.root.after(self.state.response_display_duration.get(), self._clear_response_area)
+            if not only_timer:
+                self.response_text_area.config(state="normal"); self.response_text_area.delete("1.0", END); self.response_text_area.insert(END, t); self.response_text_area.see(END); self.response_text_area.config(state="disabled")
+            if auto_close: self.root.after(self.state.response_display_duration.get(), self._clear_response_area)
     def _clear_response_area(self): self.response_text_area.config(state="normal"); self.response_text_area.delete("1.0", END); self.response_text_area.config(state="disabled")
     def schedule_twitch_mention(self, a, p, c): (asyncio.run_coroutine_threadsafe(self.handle_twitch_mention(a, p, c), self.twitch_service.twitch_bot_loop) if self.twitch_service.twitch_bot_loop else None)
     async def handle_twitch_mention(self, a, p, c):
