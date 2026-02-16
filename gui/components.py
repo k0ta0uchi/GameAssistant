@@ -88,14 +88,13 @@ class SettingsWindow(tk.Toplevel):
             ttk.Radiobutton(tts_frame, text=label_text, variable=self.app.tts_engine, value=engine, 
                            command=self.app.on_tts_engine_change).pack(side=LEFT, padx=5)
 
-        # VITS2 Models (will be shown/hidden by app.on_tts_engine_change)
+        # VITS2 Models
         self.app.vits2_config_frame = ttk.Frame(tab)
         ttk.Label(self.app.vits2_config_frame, text="VITS2 Model:").pack(anchor="w", pady=(5, 0))
         self.app.vits2_model_dropdown = ttk.Combobox(self.app.vits2_config_frame, state="readonly")
         self.app.vits2_model_dropdown.pack(fill=X, pady=2)
         self.app.vits2_model_dropdown.bind("<<ComboboxSelected>>", self.app.on_vits2_model_change)
         
-        # Initial visibility
         if self.app.tts_engine.get() == "style_bert_vits2":
             self.app.vits2_config_frame.pack(fill=X, pady=5)
             self.app.refresh_vits2_models()
@@ -121,20 +120,19 @@ class SettingsWindow(tk.Toplevel):
         tab = ttk.Frame(self.notebook, padding=15)
         self.notebook.add(tab, text=" Twitch ")
 
-        def _create_entry(label, var, show=None):
+        def _create_entry(label, var, key, show=None):
             f = ttk.Frame(tab)
             f.pack(fill=X, pady=5)
             ttk.Label(f, text=label, width=15).pack(side=LEFT)
             e = ttk.Entry(f, textvariable=var, show=show)
             e.pack(side=LEFT, fill=X, expand=True)
-            # Use var._name or similar if SettingsManager needs keys
-            e.bind("<FocusOut>", lambda ev: (self.app.settings_manager.set(label.lower().replace(" ","_").replace(":",""), var.get()), 
+            e.bind("<FocusOut>", lambda ev: (self.app.settings_manager.set(key, var.get()), 
                                            self.app.settings_manager.save(self.app.settings_manager.settings)))
 
-        _create_entry("Bot Username:", self.app.twitch_bot_username)
-        _create_entry("Bot ID:", self.app.twitch_bot_id)
-        _create_entry("Client ID:", self.app.twitch_client_id)
-        _create_entry("Client Secret:", self.app.twitch_client_secret, show="*")
+        _create_entry("Bot Username:", self.app.twitch_bot_username, 'twitch_bot_username')
+        _create_entry("Bot ID:", self.app.twitch_bot_id, 'bot_id')
+        _create_entry("Client ID:", self.app.twitch_client_id, 'twitch_client_id')
+        _create_entry("Client Secret:", self.app.twitch_client_secret, 'twitch_client_secret', show="*")
 
         ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
 
@@ -158,17 +156,16 @@ class SettingsWindow(tk.Toplevel):
         self.notebook.add(tab, text=" General ")
 
         # Toggles
-        def _create_toggle(text, var, cmd=None):
-            if cmd is None:
-                cmd = lambda: (self.app.settings_manager.set(var._name, var.get()), 
-                              self.app.settings_manager.save(self.app.settings_manager.settings))
+        def _create_toggle(text, var, key):
+            cmd = lambda: (self.app.settings_manager.set(key, var.get()), 
+                          self.app.settings_manager.save(self.app.settings_manager.settings))
             ttk.Checkbutton(tab, text=text, variable=var, style="success-square-toggle", command=cmd).pack(anchor="w", pady=5)
 
-        _create_toggle("Use Image (Vision)", self.app.use_image)
-        _create_toggle("Private Mode (No session history saving)", self.app.is_private)
-        _create_toggle("Enable Auto-Commentary", self.app.enable_auto_commentary)
-        _create_toggle("Show Response in New Window", self.app.show_response_in_new_window)
-        _create_toggle("Create Blog Post after session", self.app.create_blog_post)
+        _create_toggle("Use Image (Vision)", self.app.use_image, 'use_image')
+        _create_toggle("Private Mode", self.app.is_private, 'is_private')
+        _create_toggle("Enable Auto-Commentary", self.app.enable_auto_commentary, 'enable_auto_commentary')
+        _create_toggle("Show Response in New Window", self.app.show_response_in_new_window, 'show_response_in_new_window')
+        _create_toggle("Create Blog Post after session", self.app.create_blog_post, 'create_blog_post')
 
         ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
 
@@ -188,6 +185,10 @@ class SettingsWindow(tk.Toplevel):
         e2.pack(side=LEFT, fill=X, expand=True)
         e2.bind("<FocusOut>", lambda e: (self.app.settings_manager.set('response_display_duration', self.app.response_display_duration.get()), 
                                        self.app.settings_manager.save(self.app.settings_manager.settings)))
+
+
+class MemoryWindow(tk.Toplevel):
+    def __init__(self, parent, app, memory_manager, gemini_service):
         super().__init__(parent)
         self.app = app
         self.memory_manager = memory_manager
@@ -353,8 +354,6 @@ class SettingsWindow(tk.Toplevel):
             values = item['values']
             timestamp, _, type_val, user, comment = values
 
-            # 選択されたすべてのタイプをブログ生成のソースとして含める
-            # 表示ラベルを調整
             label = user
             if type_val == 'twitch_chat':
                 label = f"Twitch Viewer: {user}"
@@ -372,9 +371,6 @@ class SettingsWindow(tk.Toplevel):
             return
 
         conversation = "\n\n".join(conversation_parts)
-
-        # GameAssistantAppのブログ生成・保存メソッドを呼び出す
-        # スレッドで実行してGUIが固まらないようにする
         threading.Thread(target=self.app.generate_and_save_blog_post, args=(conversation,)).start()
 
 
@@ -417,7 +413,6 @@ class SettingsWindow(tk.Toplevel):
     def delete_memory(self):
         selected_items = self.memory_listbox.selection()
         if not selected_items:
-            # リストボックスで選択されていない場合、入力欄のキーを削除試行（従来互換）
             key = self.key_entry.get()
             if not key:
                 print("削除するメモリーを選択してください。")
@@ -429,14 +424,11 @@ class SettingsWindow(tk.Toplevel):
                 print("指定されたキーのメモリーが見つかりません。")
             return
 
-        # 複数選択削除
         deleted_count = 0
         for item_id in selected_items:
             item = self.memory_listbox.item(item_id)
             values = item['values']
-            # valuesの2番目（インデックス1）がキー
             key = values[1]
-            
             if self.memory_manager.delete_memory(key):
                 deleted_count += 1
         
