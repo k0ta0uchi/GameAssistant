@@ -241,9 +241,11 @@ class GameAssistantApp:
         if self.session_manager.is_session_active(): self.stop_session()
         else: self.start_session()
     def start_session(self): 
-        self.session_manager.start_session(); self.start_session_button.pack_forget(); self.stop_session_button.pack(fill=X, pady=2, before=self.sidebar_sep if hasattr(self, 'sidebar_sep') else None)
+        self.session_manager.start_session(); self.start_session_button.pack_forget()
+        self.stop_session_button.pack(fill=X, pady=2, before=self.settings_btn)
     def stop_session(self): 
-        self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2, before=self.sidebar_sep if hasattr(self, 'sidebar_sep') else None)
+        self.session_manager.stop_session(); self.stop_session_button.pack_forget()
+        self.start_session_button.pack(fill=X, pady=2, before=self.settings_btn)
         if self.create_blog_post.get(): threading.Thread(target=self.generate_and_save_blog_post).start()
 
     def generate_and_save_blog_post(self, c=None):
