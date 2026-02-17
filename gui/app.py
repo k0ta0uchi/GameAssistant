@@ -82,6 +82,8 @@ class AppState:
         self.enable_auto_commentary = ttk.BooleanVar(value=self.settings.get("enable_auto_commentary", False))
         self.auto_commentary_min = ttk.IntVar(value=self.settings.get("auto_commentary_min", 300))
         self.auto_commentary_max = ttk.IntVar(value=self.settings.get("auto_commentary_max", 600))
+        self.auto_commentary_avoid_overlap = ttk.BooleanVar(value=self.settings.get("auto_commentary_avoid_overlap", True))
+        self.auto_commentary_avoid_duration = ttk.IntVar(value=self.settings.get("auto_commentary_avoid_duration", 15))
         
         # Twitch関連
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from typing import Optional, Generator, List
+from typing import Optional, Generator, List, Any
 import os
 import re
 from dotenv import load_dotenv
@@ -19,6 +19,9 @@ import time
 import logging
 from concurrent.futures import Future
 
+# ロガー設定
+logger = logging.getLogger(__name__)
+
 def split_into_sentences(tokens_generator: Generator[str, None, None]) -> Generator[str, None, None]:
     buffer = ""
     sentence_endings = r"[。！？\n]"
@@ -32,6 +35,61 @@ def split_into_sentences(tokens_generator: Generator[str, None, None]) -> Genera
         buffer = parts[-1]
     if buffer.strip():
         yield buffer.strip()
+
+def safe_get_text(response: Any) -> str:
+    """
+    思考プロセス(thought_signature)などを含むレスポンスから、
+    テキスト部分のみを安全に抽出して結合します。詳細なデバッグログを出力します。
+    """
+    if not response:
+        logger.debug("safe_get_text: Response is None")
+        return ""
+    
+    try:
+        if not response.candidates:
+            logger.debug("safe_get_text: No candidates in response")
+            return ""
+
+        candidate = response.candidates[0]
+        if not candidate.content or not candidate.content.parts:
+            logger.debug("safe_get_text: Candidate content or parts is empty")
+            return ""
+
+        text_parts = []
+        logger.debug(f"safe_get_text: Analyzing {len(candidate.content.parts)} parts...")
+        
+        for i, part in enumerate(candidate.content.parts):
+            # パーツごとの属性を詳細にログ出力
+            part_types = []
+            if part.text: part_types.append("text")
+            if hasattr(part, 'thought') and part.thought: part_types.append("thought")
+            if hasattr(part, 'thought_signature') and part.thought_signature: part_types.append("thought_signature")
+            if part.function_call: part_types.append("function_call")
+            if part.executable_code: part_types.append("executable_code")
+            
+            logger.debug(f"  Part[{i}]: types={part_types}")
+            
+            if part.text:
+                text_parts.append(part.text)
+                logger.debug(f"  Part[{i}]: Text found (length: {len(part.text)})")
+            elif hasattr(part, 'thought') and part.thought:
+                logger.debug(f"  Part[{i}]: Thought found (length: {len(part.thought)}) - Skipping for output")
+
+        if text_parts:
+            result = "".join(text_parts)
+            logger.debug(f"safe_get_text: Successfully extracted text (total length: {len(result)})")
+            return result
+            
+    except Exception as e:
+        logger.error(f"safe_get_text: Error during parsing parts: {e}", exc_info=True)
+
+    # 最終手段
+    try:
+        logger.debug("safe_get_text: Falling back to legacy .text access")
+        return response.text or ""
+    except Exception as e:
+        logger.debug(f"safe_get_text: Legacy fallback failed: {e}")
+        return ""
 
 load_dotenv()
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL")
@@ -52,8 +110,6 @@ class GeminiSession:
             self.history.append(types.Content(role="user", parts=[types.Part(text=custom_instruction)]))
             self.history.append(types.Content(role="model", parts=[types.Part(text="はい、承知いたしましただわん。")]))
         
-        # MemoryManagerはApp経由で使用することを推奨するが、
-        # 既存コードとの互換性のため個別に保持（Appから渡されるのが理想）
         if hasattr(self.app, 'memory_manager'):
             self.memory_manager = self.app.memory_manager
         else:
@@ -63,13 +119,13 @@ class GeminiSession:
         self.last_grounding_metadata = None
 
     def _handle_quota_error(self) -> bool:
-        logging.warning("Gemini API Quota exhausted. Attempting to switch API key...")
+        logger.warning("Gemini API Quota exhausted. Attempting to switch API key...")
         if switch_to_next_api_key():
             self.client = get_gemini_client() 
-            logging.info("クォータを使い切りました、次のAPIキーを使うので待ってね")
+            logger.info("クォータを使い切りました、次のAPIキーを使うので待ってね")
             return True
         else:
-            logging.error("クォータをすべて使い切りました")
+            logger.error("クォータをすべて使い切りました")
             return False
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
@@ -82,17 +138,14 @@ class GeminiSession:
                     if self._handle_quota_error():
                         time.sleep(1)
                         continue
-                logging.error(f"Final error in generate_content: {e}", exc_info=True)
+                logger.error(f"Final error in generate_content: {e}", exc_info=True)
                 return "申し訳ありません、エラーが発生しましただわん。"
 
     def _generate_content_internal(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
         if not target_user_id: raise ValueError("User ID is not set.")
         
-        # RAGのための履歴要約と保存 (非同期キュー)
         self.memory_manager.enqueue_summarize(prompt, target_user_id, memory_type)
-        
-        # 関連メモリの検索 (同期的待ち)
         results = self.memory_manager.run_query([prompt], n_results=5, where={"$and": [{"type": memory_type}, {"user": target_user_id}]})
         
         documents = results.get("documents") if results else None
@@ -105,7 +158,7 @@ class GeminiSession:
                 buf = BytesIO()
                 img.save(buf, format=getattr(img, "format", "JPEG"))
                 current_user_parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type=mimetypes.guess_type(image_path)[0] or "image/jpeg"))
-            except Exception as e: logging.warning(f"Failed to load image: {e}")
+            except Exception as e: logger.warning(f"Failed to load image: {e}")
         prompt_with_memory = (f"Previous conversations:\n{memory}\n\nUser: {prompt}\nAI:" if memory else f"User: {prompt}\nAI:")
         current_user_parts.append(types.Part(text=prompt_with_memory))
         self.history.append(types.Content(role="user", parts=current_user_parts))
@@ -115,7 +168,7 @@ class GeminiSession:
             response = self.client.models.generate_content(model=GEMINI_MODEL, contents=self.history, config=config)
             if response and response.candidates:
                 self.history.append(response.candidates[0].content)
-            return response.text
+            return safe_get_text(response)
         except Exception as e: raise e
 
     def generate_content_stream(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
@@ -129,7 +182,7 @@ class GeminiSession:
                     if self._handle_quota_error():
                         time.sleep(1)
                         continue
-                logging.error(f"Final error in generate_content_stream: {e}", exc_info=True)
+                logger.error(f"Final error in generate_content_stream: {e}", exc_info=True)
                 yield "申し訳ありません、エラーが発生しましただわん。"
                 return
 
@@ -150,7 +203,7 @@ class GeminiSession:
                 buf = BytesIO()
                 img.save(buf, format=getattr(img, "format", "JPEG"))
                 current_user_parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type=mimetypes.guess_type(image_path)[0] or "image/jpeg"))
-            except Exception as e: logging.warning(f"Failed to load image: {e}")
+            except Exception as e: logger.warning(f"Failed to load image: {e}")
         prompt_with_memory = (f"Previous conversations:\n{memory}\n\nUser: {prompt}\nAI:" if memory else f"User: {prompt}\nAI:")
         current_user_parts.append(types.Part(text=prompt_with_memory))
         self.history.append(types.Content(role="user", parts=current_user_parts))
@@ -159,7 +212,7 @@ class GeminiSession:
             config = types.GenerateContentConfig(thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget))
             full_response_text = ""
             for response in self.client.models.generate_content_stream(model=GEMINI_MODEL, contents=self.history, config=config):
-                chunk_text = response.text or ""
+                chunk_text = safe_get_text(response)
                 full_response_text += chunk_text
                 yield chunk_text
             self.history.append(types.Content(role="model", parts=[types.Part(text=full_response_text)]))
@@ -172,7 +225,7 @@ class GeminiSession:
                 return response.candidates[0].content.parts[0].inline_data.data
             return None
         except Exception as e:
-            print(f"An error occurred during speech generation: {e}")
+            logger.error(f"An error occurred during speech generation: {e}")
             return None
 
     def get_history(self):
@@ -202,9 +255,9 @@ class GeminiService:
         prompt = f"{SESSION_SUMMARIZE_PROMPT}{session_history}"
         try:
             response = self.session.client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-            return response.text
+            return safe_get_text(response)
         except Exception as e:
-            print(f"セッションの要約中にエラーが発生しました: {e}")
+            logger.error(f"セッションの要約中にエラーが発生しました: {e}")
             return None
 
     def generate_blog_post(self, conversation: list[dict[str, str]] | str) -> Optional[str]:
@@ -220,9 +273,21 @@ class GeminiService:
         base_delay = 10 
         for attempt in range(max_retries):
             try:
-                logging.info(f"ブログ記事の生成を試行中... (モデル: {target_model}, 試行 {attempt + 1}/{max_retries})")
-                response = self.session.client.models.generate_content(model=target_model, config=types.GenerateContentConfig(system_instruction=system_prompt), contents=full_prompt)
-                if response and response.text: return response.text
+                logger.info(f"ブログ記事の生成を試行中... (モデル: {target_model}, 試行 {attempt + 1}/{max_retries})")
+                # ブログ生成時は思考モードやAFCなどの複雑な機能を制限して確実にテキストを得る設定にする
+                config = types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0), # ブログ生成時は思考をオフに
+                    tools=[], # 明示的にAFCを無効化
+                )
+                response = self.session.client.models.generate_content(model=target_model, config=config, contents=full_prompt)
+                logger.debug("ブログ生成レスポンス受信。解析を開始します...")
+                text = safe_get_text(response)
+                if text: 
+                    logger.info(f"ブログ記事の生成に成功しました (文字数: {len(text)})")
+                    return text
+                else:
+                    logger.warning("レスポンスからテキストを抽出できませんでした。")
             except Exception as e:
                 error_msg = str(e)
                 if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
@@ -231,9 +296,11 @@ class GeminiService:
                         continue 
                 if "429" in error_msg or "Too Many Requests" in error_msg.lower() or "ResourceExhausted" in error_msg:
                     delay = base_delay * (2 ** attempt)
-                    logging.warning(f"レート制限(429)を検出しました。{delay}秒後に再試行します... エラー: {e}")
+                    logger.warning(f"レート制限(429)を検出しました。{delay}秒後に再試行します... エラー: {e}")
                     time.sleep(delay)
-                else: break
+                else: 
+                    logger.error(f"ブログ生成中に予期せぬエラーが発生しました: {e}", exc_info=True)
+                    break
         return None
 
 if __name__ == "__main__":

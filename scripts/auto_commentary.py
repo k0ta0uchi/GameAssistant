@@ -126,11 +126,14 @@ class AutoCommentaryService:
         if not self.is_running: 
             return
 
-        # 誰かが喋っていたら、タイマーをリセットせず「数秒待って回避」する
+        # 誰かが喋っていたら、回避オプションが有効な場合に限り「設定された秒数待って回避」する
         if self._is_busy():
-            logging.info("✋ ユーザーまたはAIが発話中のため、タイミングをずらします。")
-            self._avoid_and_retry()
-            return
+            if self.app.state.auto_commentary_avoid_overlap.get():
+                logging.info("✋ ユーザーまたはAIが発話中のため、タイミングをずらします。")
+                self._avoid_and_retry()
+                return
+            else:
+                logging.info("📢 発話中ですが回避設定が無効なため、そのまま実行を試みます。")
         
         self._generate_and_speak()
 
@@ -151,7 +154,7 @@ class AutoCommentaryService:
         return False 
 
     def _avoid_and_retry(self):
-        """数秒（15秒）待って再試行する（メインタイマーはリセットしない）"""
+        """数秒待って再試行する（メインタイマーはリセットしない）"""
         self.retry_count += 1
         if self.retry_count > self.max_retries:
             logging.info("❌ 再試行回数の上限に達しました。このサイクルは一旦終了します。")
@@ -159,7 +162,11 @@ class AutoCommentaryService:
             # 諦めて次の通常サイクルへ（TTS終了を待たないのでここでスケジュール）
             self._schedule_next_commentary()
         else:
-            delay = 15 # 15秒ずらす
+            try:
+                delay = int(self.app.state.auto_commentary_avoid_duration.get())
+            except:
+                delay = 15
+            logging.info(f"🔄 回避のため {delay} 秒後に再試行します...")
             self._schedule_next_commentary(interval=delay)
 
     def _generate_and_speak(self):

@@ -175,6 +175,18 @@ class SettingsWindow(tk.Toplevel):
         e_max.pack(side=LEFT, padx=5)
         e_max.bind("<FocusOut>", lambda e: self.app.state.save('auto_commentary_max', self.app.state.auto_commentary_max.get()))
 
+        # Avoid Overlap Settings
+        avoid_frame = ttk.Frame(tab)
+        avoid_frame.pack(fill=X, pady=2, padx=(25, 0))
+        ttk.Checkbutton(avoid_frame, text="Avoid Overlap", variable=self.app.state.auto_commentary_avoid_overlap, 
+                       style="success-square-toggle",
+                       command=lambda: self.app.state.save('auto_commentary_avoid_overlap', self.app.state.auto_commentary_avoid_overlap.get())).pack(side=LEFT)
+        
+        ttk.Label(avoid_frame, text=" Wait (s):").pack(side=LEFT, padx=(10, 0))
+        e_avoid = ttk.Entry(avoid_frame, textvariable=self.app.state.auto_commentary_avoid_duration, width=8)
+        e_avoid.pack(side=LEFT, padx=5)
+        e_avoid.bind("<FocusOut>", lambda e: self.app.state.save('auto_commentary_avoid_duration', self.app.state.auto_commentary_avoid_duration.get()))
+
         _create_toggle("Show Response in New Window", self.app.state.show_response_in_new_window, 'show_response_in_new_window')
         _create_toggle("Create Blog Post after session", self.app.state.create_blog_post, 'create_blog_post')
 
