@@ -221,72 +221,106 @@ class MemoryWindow(tk.Toplevel):
         self.app = app
         self.memory_manager = memory_manager
         self.gemini_service = gemini_service
-        self.title("メモリー管理")
-        self.geometry("1000x600")
+        self.title("Memory Management")
+        self.geometry("1040x650") # Width increased by 40px, height slightly increased for comfort
+        self.minsize(900, 500)
 
         self.create_widgets()
         self.load_memories_to_listbox()
 
     def create_widgets(self):
-        main_frame = ttk.Frame(self, padding=10)
+        # Background consistent with main app
+        main_frame = ttk.Frame(self, padding=15)
         main_frame.pack(fill=BOTH, expand=True)
 
-        left_frame = ttk.Frame(main_frame)
-        left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
+        # --- Left Side: List Area ---
+        list_container = ttk.Frame(main_frame)
+        list_container.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 15))
+
+        # Treeview with Scrollbar
+        tree_frame = ttk.Frame(list_container)
+        tree_frame.pack(fill=BOTH, expand=True)
 
         columns = ("timestamp", "key", "type", "user", "comment")
-        self.memory_listbox = ttk.Treeview(left_frame, columns=columns, show="headings", selectmode="extended")
+        self.memory_listbox = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="extended")
         
-        self.memory_listbox.heading("timestamp", text="タイムスタンプ", command=lambda: self.sort_column("timestamp", False))
-        self.memory_listbox.heading("key", text="キー", command=lambda: self.sort_column("key", False))
-        self.memory_listbox.heading("type", text="タイプ", command=lambda: self.sort_column("type", False))
-        self.memory_listbox.heading("user", text="ユーザー", command=lambda: self.sort_column("user", False))
-        self.memory_listbox.heading("comment", text="コメント", command=lambda: self.sort_column("comment", False))
+        # Scrollbar setup
+        scrollbar = ttk.Scrollbar(tree_frame, orient=VERTICAL, command=self.memory_listbox.yview)
+        self.memory_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.memory_listbox.heading("timestamp", text="Timestamp", command=lambda: self.sort_column("timestamp", False))
+        self.memory_listbox.heading("key", text="Key", command=lambda: self.sort_column("key", False))
+        self.memory_listbox.heading("type", text="Type", command=lambda: self.sort_column("type", False))
+        self.memory_listbox.heading("user", text="User", command=lambda: self.sort_column("user", False))
+        self.memory_listbox.heading("comment", text="Comment", command=lambda: self.sort_column("comment", False))
 
-        self.memory_listbox.column("timestamp", width=160, anchor='w')
-        self.memory_listbox.column("key", width=120, anchor='w')
+        self.memory_listbox.column("timestamp", width=150, anchor='w')
+        self.memory_listbox.column("key", width=100, anchor='w')
         self.memory_listbox.column("type", width=80, anchor='w')
         self.memory_listbox.column("user", width=80, anchor='w')
-        self.memory_listbox.column("comment", width=400, anchor='w')
+        self.memory_listbox.column("comment", width=350, anchor='w')
 
-        self.memory_listbox.pack(fill=BOTH, expand=True)
+        self.memory_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+        
         self.memory_listbox.bind("<<TreeviewSelect>>", self.on_memory_select)
 
-        right_frame = ttk.Frame(main_frame, width=280)
-        right_frame.pack(side=RIGHT, fill=Y)
+        # --- Right Side: Details Area ---
+        right_frame = ttk.Labelframe(main_frame, text=" MEMORY DETAILS ", padding=15, style="Card.TLabelframe")
+        right_frame.pack(side=RIGHT, fill=Y, width=320)
         right_frame.pack_propagate(False)
 
-        ttk.Label(right_frame, text="キー:").pack(fill=X, pady=(0, 5))
-        self.key_entry = ttk.Entry(right_frame, state='readonly')
-        self.key_entry.pack(fill=X, pady=(0, 10))
+        # Key (Readonly)
+        ttk.Label(right_frame, text="Key:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        self.key_entry = ttk.Entry(right_frame, state='readonly', font=("Consolas", 9))
+        self.key_entry.pack(fill=X, pady=(2, 10))
 
-        ttk.Label(right_frame, text="タイムスタンプ:").pack(fill=X, pady=(0, 5))
-        self.timestamp_label = ttk.Label(right_frame, text="")
-        self.timestamp_label.pack(fill=X, pady=(0, 10))
+        # Metadata Row 1
+        meta_frame = ttk.Frame(right_frame)
+        meta_frame.pack(fill=X, pady=(0, 10))
+        
+        type_sub = ttk.Frame(meta_frame)
+        type_sub.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        ttk.Label(type_sub, text="Type:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        self.type_entry = ttk.Entry(type_sub)
+        self.type_entry.pack(fill=X, pady=2)
 
-        ttk.Label(right_frame, text="タイプ:").pack(fill=X, pady=(0, 5))
-        self.type_entry = ttk.Entry(right_frame)
-        self.type_entry.pack(fill=X, pady=(0, 10))
+        user_sub = ttk.Frame(meta_frame)
+        user_sub.pack(side=LEFT, fill=X, expand=True)
+        ttk.Label(user_sub, text="User:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        self.user_entry = ttk.Entry(user_sub)
+        self.user_entry.pack(fill=X, pady=2)
 
-        ttk.Label(right_frame, text="ユーザー:").pack(fill=X, pady=(0, 5))
-        self.user_entry = ttk.Entry(right_frame)
-        self.user_entry.pack(fill=X, pady=(0, 10))
+        # Timestamp (Label only)
+        ttk.Label(right_frame, text="Timestamp:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        self.timestamp_label = ttk.Label(right_frame, text="-", foreground="#64748b")
+        self.timestamp_label.pack(anchor="w", pady=(2, 10))
 
-        ttk.Label(right_frame, text="コメント:").pack(fill=X, pady=(0, 5))
-        self.comment_text = tk.Text(right_frame, height=10)
-        self.comment_text.pack(fill=BOTH, expand=True, pady=(0, 10))
+        # Comment Text
+        ttk.Label(right_frame, text="Content:", font=("TkDefaultFont", 9, "bold")).pack(anchor="w")
+        self.comment_text = tk.Text(right_frame, height=12, font=("Arial", 10), wrap=tk.WORD, 
+                                   bg="#1a1a3a", fg="white", insertbackground="white", 
+                                   padx=5, pady=5, borderwidth=1, relief="flat")
+        self.comment_text.pack(fill=BOTH, expand=True, pady=(2, 15))
 
-        button_frame = ttk.Frame(right_frame)
-        button_frame.pack(fill=X, side='bottom')
+        # --- Button Actions ---
+        btn_container = ttk.Frame(right_frame)
+        btn_container.pack(fill=X, side='bottom')
 
-        save_button = ttk.Button(button_frame, text="保存", command=self.save_memory, style="success.TButton")
-        save_button.pack(side=LEFT, expand=True, fill=X, padx=(0, 5))
+        # Row 1: Save & Delete
+        row1 = ttk.Frame(btn_container)
+        row1.pack(fill=X, pady=(0, 8))
+        
+        save_btn = ttk.Button(row1, text="💾 Save Changes", command=self.save_memory, style="success.TButton")
+        save_btn.pack(side=LEFT, expand=True, fill=X, padx=(0, 4))
 
-        delete_button = ttk.Button(button_frame, text="削除", command=self.delete_memory, style="danger.TButton")
-        delete_button.pack(side=LEFT, expand=True, fill=X)
+        del_btn = ttk.Button(row1, text="🗑️ Delete", command=self.delete_memory, style="danger.TButton")
+        del_btn.pack(side=LEFT, expand=True, fill=X)
 
-        generate_blog_button = ttk.Button(button_frame, text="ブログ生成", command=self.generate_blog_from_selection, style="info.TButton")
-        generate_blog_button.pack(fill=X, pady=(5, 0))
+        # Row 2: Blog Generation (Primary Action)
+        self.blog_btn = ttk.Button(btn_container, text="📝 Generate Blog from Selected", 
+                                  command=self.generate_blog_from_selection, style="info.TButton")
+        self.blog_btn.pack(fill=X)
 
     def sort_column(self, col, reverse):
         l = [(self.memory_listbox.set(k, col), k) for k in self.memory_listbox.get_children('')]
