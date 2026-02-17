@@ -168,7 +168,9 @@ class GameAssistantApp:
         if is_final:
             self.root.after(0, lambda: (
                 self.show_gemini_response(None, auto_close=True, only_timer=True),
-                self.update_status('tts', False)
+                self.update_status('tts', False),
+                # TTS終了を起点に、自動ツッコミの次サイクルカウントを開始
+                self.session_manager.auto_commentary_service.start_next_cycle() if hasattr(self, 'session_manager') else None
             ))
 
     def _setup_custom_styles(self):
