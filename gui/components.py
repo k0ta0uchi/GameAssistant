@@ -189,6 +189,13 @@ class SettingsWindow(tk.Toplevel):
 
         _create_toggle("Show Response in New Window", self.app.state.show_response_in_new_window, 'show_response_in_new_window')
         _create_toggle("Create Blog Post after session", self.app.state.create_blog_post, 'create_blog_post')
+        
+        # Blog Thinking Toggle
+        blog_thinking_frame = ttk.Frame(tab)
+        blog_thinking_frame.pack(fill=X, pady=2, padx=(25, 0))
+        ttk.Checkbutton(blog_thinking_frame, text="Use Thinking for Blog", variable=self.app.state.blog_use_thinking, 
+                       style="success-square-toggle",
+                       command=lambda: self.app.state.save('blog_use_thinking', self.app.state.blog_use_thinking.get())).pack(side=LEFT)
 
         ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
 

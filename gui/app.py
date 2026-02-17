@@ -79,6 +79,7 @@ class AppState:
         self.asr_engine = ttk.StringVar(value=self.settings.get("asr_engine", "large"))
         self.user_name = ttk.StringVar(value=self.settings.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings.get("create_blog_post", False))
+        self.blog_use_thinking = ttk.BooleanVar(value=self.settings.get("blog_use_thinking", False))
         self.enable_auto_commentary = ttk.BooleanVar(value=self.settings.get("enable_auto_commentary", False))
         self.auto_commentary_min = ttk.IntVar(value=self.settings.get("auto_commentary_min", 300))
         self.auto_commentary_max = ttk.IntVar(value=self.settings.get("auto_commentary_max", 600))

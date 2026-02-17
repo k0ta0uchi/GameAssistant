@@ -269,15 +269,24 @@ class GeminiService:
         full_prompt = f"# 会話履歴\n{conversation_text}"
         target_model = GEMINI_PRO_MODEL if GEMINI_PRO_MODEL else GEMINI_MODEL
         if not target_model: return None
+        
+        # 設定の取得
+        use_thinking = False
+        if hasattr(self.session.app, 'state'):
+            use_thinking = self.session.app.state.blog_use_thinking.get()
+        
         max_retries = 5
         base_delay = 10 
         for attempt in range(max_retries):
             try:
-                logger.info(f"ブログ記事の生成を試行中... (モデル: {target_model}, 試行 {attempt + 1}/{max_retries})")
-                # ブログ生成時は思考モードやAFCなどの複雑な機能を制限して確実にテキストを得る設定にする
+                logger.info(f"ブログ記事の生成を試行中... (モデル: {target_model}, 試行 {attempt + 1}/{max_retries}, 思考モード: {use_thinking})")
+                
+                # 設定に基づいて思考予算を決定
+                thinking_budget = -1 if use_thinking else 0
+                
                 config = types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0), # ブログ生成時は思考をオフに
+                    thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget),
                     tools=[], # 明示的にAFCを無効化
                 )
                 response = self.session.client.models.generate_content(model=target_model, config=config, contents=full_prompt)
