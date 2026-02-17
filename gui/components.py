@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, font, END, LEFT, X, BOTH, Y, RIGHT
+from tkinter import ttk, font, END, LEFT, X, BOTH, Y, RIGHT, VERTICAL, HORIZONTAL
 import json
 from datetime import datetime
 import threading
@@ -266,8 +266,8 @@ class MemoryWindow(tk.Toplevel):
         self.memory_listbox.bind("<<TreeviewSelect>>", self.on_memory_select)
 
         # --- Right Side: Details Area ---
-        right_frame = ttk.Labelframe(main_frame, text=" MEMORY DETAILS ", padding=15, style="Card.TLabelframe")
-        right_frame.pack(side=RIGHT, fill=Y, width=320)
+        right_frame = ttk.Labelframe(main_frame, text=" MEMORY DETAILS ", padding=15, style="Card.TLabelframe", width=320)
+        right_frame.pack(side=RIGHT, fill=Y)
         right_frame.pack_propagate(False)
 
         # Key (Readonly)
