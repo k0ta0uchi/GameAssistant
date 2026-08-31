@@ -11,6 +11,7 @@ from kokoro import KPipeline
 import soundfile as sf
 import torch
 from scripts.gemini import GeminiSession
+from scripts.resource_monitor import VRAMPreallocator
 
 stop_playback_event = threading.Event()
 
@@ -31,13 +32,14 @@ def generate_speech_data(text, speaker_id=46, core_version=None):
     与えられたテキストを音声データに変換する。
     設定に応じてVOICEVOXまたはGemini TTSを使用する。
     """
-    global _gemini_session_for_tts
-    try:
-        with open('settings.json', 'r', encoding="utf-8") as f:
-            settings = json.load(f)
-        tts_engine = settings.get("tts_engine", "voicevox")
-    except (FileNotFoundError, json.JSONDecodeError):
-        tts_engine = "voicevox"
+    with VRAMPreallocator.pool_context():
+        global _gemini_session_for_tts
+        try:
+            with open('settings.json', 'r', encoding="utf-8") as f:
+                settings = json.load(f)
+            tts_engine = settings.get("tts_engine", "voicevox")
+        except (FileNotFoundError, json.JSONDecodeError):
+            tts_engine = "voicevox"
 
     if tts_engine == "gemini":
         if _gemini_session_for_tts is None:

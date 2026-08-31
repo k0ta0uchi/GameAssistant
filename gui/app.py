@@ -36,6 +36,7 @@ from scripts.visual_capture import CaptureService
 from scripts.session_manager import SessionManager, GeminiResponse
 from scripts.tts_player import TTSManager
 from .components import GeminiResponseWindow, MemoryWindow, SettingsWindow
+from scripts.resource_monitor import ResourceMonitor, VRAMPreallocator
 import subprocess
 import glob
 
@@ -80,11 +81,18 @@ class AppState:
         self.user_name = ttk.StringVar(value=self.settings.get("user_name", "User"))
         self.create_blog_post = ttk.BooleanVar(value=self.settings.get("create_blog_post", False))
         self.blog_use_thinking = ttk.BooleanVar(value=self.settings.get("blog_use_thinking", False))
+        self.enable_blog_skills = ttk.BooleanVar(value=self.settings.get("enable_blog_skills", True))
+        self.enabled_blog_skills = list(self.settings.get("enabled_blog_skills", ["k0ta-writing-style"]))
         self.enable_auto_commentary = ttk.BooleanVar(value=self.settings.get("enable_auto_commentary", False))
         self.auto_commentary_min = ttk.IntVar(value=self.settings.get("auto_commentary_min", 300))
         self.auto_commentary_max = ttk.IntVar(value=self.settings.get("auto_commentary_max", 600))
         self.auto_commentary_avoid_overlap = ttk.BooleanVar(value=self.settings.get("auto_commentary_avoid_overlap", True))
         self.auto_commentary_avoid_duration = ttk.IntVar(value=self.settings.get("auto_commentary_avoid_duration", 15))
+        self.preallocate_vram = ttk.BooleanVar(value=self.settings.get("preallocate_vram", False))
+        self.wake_word_engine = ttk.StringVar(value=self.settings.get("wake_word_engine", "whisper_vad"))
+        self.wake_word_threshold = ttk.DoubleVar(value=self.settings.get("wake_word_threshold", 0.25))
+        self.enable_discord_capture = ttk.BooleanVar(value=self.settings.get("enable_discord_capture", False))
+        self.discord_audio_device = ttk.StringVar(value=self.settings.get("discord_audio_device", "Auto (Discord App / System Loopback)"))
         
         # Twitch関連
         self.twitch_bot_username = ttk.StringVar(value=self.settings.get("twitch_bot_username", ""))
@@ -107,10 +115,29 @@ class AppState:
         self.cached_screenshot = None
         self.image = None # PhotoImage object
 
+    def is_skill_enabled(self, skill_id: str) -> bool:
+        """指定されたスキルが有効化されているかを返す"""
+        return skill_id in self.enabled_blog_skills
+
+    def set_skill_enabled(self, skill_id: str, enabled: bool):
+        """スキルの有効/無効を切り替えて保存"""
+        current = list(self.enabled_blog_skills)
+        if enabled:
+            if skill_id not in current:
+                current.append(skill_id)
+        else:
+            if skill_id in current:
+                current.remove(skill_id)
+        self.enabled_blog_skills = current
+        self.save("enabled_blog_skills", self.enabled_blog_skills)
+
     def save(self, key, value):
         """設定を保存"""
         self.settings.set(key, value)
         self.settings.save(self.settings.settings)
+        if key == "wake_word_engine":
+            import os
+            os.environ["WAKE_WORD_ENGINE"] = str(value)
 
 class GameAssistantApp:
     def __init__(self, root):
@@ -135,8 +162,10 @@ class GameAssistantApp:
         self.sync_initial_state()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self._update_auto_commentary_bar_loop()
+        self._update_resource_monitor_loop()
 
     def _init_services(self):
+        self.resource_monitor = ResourceMonitor()
         self.audio_service = AudioService(self)
         self.capture_service = CaptureService(self)
         self.memory_manager = MemoryManager()
@@ -166,6 +195,13 @@ class GameAssistantApp:
         if win_titles:
             if not self.state.window_title.get(): self.state.window_title.set(win_titles[0])
             self.update_window()
+        self.update_vram_preallocation()
+
+    def update_vram_preallocation(self):
+        enabled = self.state.preallocate_vram.get()
+        success = VRAMPreallocator.set_preallocation(enabled)
+        status_str = "Preallocated 1GB VRAM" if (enabled and success) else ("Freed VRAM" if not enabled else "Failed to preallocate VRAM")
+        logging.info(f"VRAM Preallocation Status: {status_str}")
 
     def _on_tts_playback_finished(self, is_final):
         if is_final:
@@ -188,12 +224,14 @@ class GameAssistantApp:
         self.style.configure("Header.TLabel", font=("Russo One", 14), foreground="#E2E8F0", background="#0F0F23")
         self.style.configure("Asr.Horizontal.TProgressbar", thickness=10, troughcolor="#1a1a3a", background="#00d2ff")
         self.style.configure("Commentary.Horizontal.TProgressbar", thickness=4, troughcolor="#0F0F23", background="#7C3AED")
+        self.style.configure("Vram.Horizontal.TProgressbar", thickness=6, troughcolor="#1a1a3a", background="#00d2ff")
+        self.style.configure("Ram.Horizontal.TProgressbar", thickness=6, troughcolor="#1a1a3a", background="#A78BFA")
 
     def create_widgets(self):
         self.main_container = ttk.Frame(self.root, padding=4); self.main_container.pack(fill=BOTH, expand=True)
         self.sidebar = ttk.Frame(self.main_container, width=320); self.sidebar.pack(side=LEFT, fill=Y, padx=(2, 2))
         self.sidebar_content = ttk.Frame(self.sidebar); self.sidebar_content.pack(fill=BOTH, expand=True)
-        self._create_audio_card(self.sidebar_content); self._create_target_card(self.sidebar_content)
+        self._create_audio_card(self.sidebar_content); self._create_target_card(self.sidebar_content); self._create_resource_card(self.sidebar_content)
         
         self.btn_container = ttk.Frame(self.sidebar_content, padding=2); self.btn_container.pack(fill=X, pady=4)
         self.start_session_button = ttk.Button(self.btn_container, text="🚀 Start Session", style="success.TButton", command=self.start_session); self.start_session_button.pack(fill=X, pady=2)
@@ -201,6 +239,7 @@ class GameAssistantApp:
         
         self.settings_btn = ttk.Button(self.btn_container, text="⚙️ Settings", command=self.open_settings_window, style="secondary.TButton"); self.settings_btn.pack(fill=X, pady=2)
         ttk.Button(self.btn_container, text="📂 Memory", command=self.open_memory_window, style="info.TButton").pack(fill=X, pady=2)
+        ttk.Button(self.btn_container, text="🔄 Restart Whisper", command=self.restart_whisper, style="outline-warning.TButton").pack(fill=X, pady=2)
         
         self.content_area = ttk.Frame(self.main_container); self.content_area.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 2))
         self._create_status_dashboard(self.content_area)
@@ -220,7 +259,12 @@ class GameAssistantApp:
         ttk.Label(card, text="インプットデバイス:").pack(anchor="w")
         self.audio_dropdown = ttk.Combobox(card, textvariable=self.state.audio_device, values=record.get_audio_device_names(), state=READONLY); self.audio_dropdown.pack(fill=X, pady=4); self.audio_dropdown.bind("<<ComboboxSelected>>", self.update_device_index)
         self.device_index_label = ttk.Label(card, text="Index: -", font=("TkDefaultFont", 8)); self.device_index_label.pack(anchor="w")
-        self.level_meter = ttk.Progressbar(card, length=200, maximum=100, value=0, style="Asr.Horizontal.TProgressbar"); self.level_meter.pack(fill=X, pady=(8, 0))
+        self.level_meter = ttk.Progressbar(card, length=200, maximum=100, value=0, style="Asr.Horizontal.TProgressbar"); self.level_meter.pack(fill=X, pady=(8, 4))
+        
+        # Discord音声キャプチャのトグル
+        ttk.Checkbutton(card, text="🎧 Discord音声をキャプチャ", variable=self.state.enable_discord_capture,
+                       style="info-square-toggle",
+                       command=lambda: self.state.save('enable_discord_capture', self.state.enable_discord_capture.get())).pack(anchor="w", pady=(2, 0))
 
     def _create_target_card(self, parent):
         card = ttk.Labelframe(parent, text="TARGET WINDOW", style="Card.TLabelframe", padding=8); card.pack(fill=X, pady=4)
@@ -229,6 +273,47 @@ class GameAssistantApp:
         self.window_dropdown = ttk.Combobox(win_frame, textvariable=self.state.window_title, values=visual_capture.list_available_windows(), state=READONLY); self.window_dropdown.pack(side=LEFT, fill=X, expand=True); self.window_dropdown.bind("<<ComboboxSelected>>", self.update_window)
         ttk.Button(win_frame, text="🔄", command=self.refresh_window_list, width=3).pack(side=LEFT, padx=2)
         self.selected_window_label = ttk.Label(card, text="Selected: -", font=("TkDefaultFont", 8), wraplength=250); self.selected_window_label.pack(anchor="w", pady=2)
+
+    def _create_resource_card(self, parent):
+        card = ttk.Labelframe(parent, text="RESOURCE MONITOR", style="Card.TLabelframe", padding=6)
+        card.pack(fill=X, pady=4)
+
+        # VRAM
+        vram_frame = ttk.Frame(card)
+        vram_frame.pack(fill=X, pady=1)
+        ttk.Label(vram_frame, text="[VRAM]", font=("Chakra Petch", 8, "bold"), foreground="#00d2ff").pack(anchor="w")
+        self.app_vram_label = ttk.Label(vram_frame, text="App VRAM: -", font=("TkDefaultFont", 8))
+        self.app_vram_label.pack(anchor="w")
+        self.sys_vram_label = ttk.Label(vram_frame, text="Sys VRAM: -", font=("TkDefaultFont", 8))
+        self.sys_vram_label.pack(anchor="w")
+        self.vram_meter = ttk.Progressbar(vram_frame, length=200, maximum=100, value=0, style="Vram.Horizontal.TProgressbar")
+        self.vram_meter.pack(fill=X, pady=(2, 0))
+
+        # RAM
+        ram_frame = ttk.Frame(card)
+        ram_frame.pack(fill=X, pady=(4, 0))
+        ttk.Label(ram_frame, text="[RAM]", font=("Chakra Petch", 8, "bold"), foreground="#A78BFA").pack(anchor="w")
+        self.app_ram_label = ttk.Label(ram_frame, text="App RAM: -", font=("TkDefaultFont", 8))
+        self.app_ram_label.pack(anchor="w")
+        self.sys_ram_label = ttk.Label(ram_frame, text="Sys RAM: -", font=("TkDefaultFont", 8))
+        self.sys_ram_label.pack(anchor="w")
+        self.ram_meter = ttk.Progressbar(ram_frame, length=200, maximum=100, value=0, style="Ram.Horizontal.TProgressbar")
+        self.ram_meter.pack(fill=X, pady=(2, 0))
+
+    def _update_resource_monitor_loop(self):
+        try:
+            info = self.resource_monitor.get_memory_info()
+            if hasattr(self, 'app_vram_label'):
+                self.app_vram_label.config(text=f"App VRAM: {info['app_vram']}")
+                self.sys_vram_label.config(text=f"Sys VRAM: {info['sys_vram_used']} / {info['sys_vram_total']} ({info['sys_vram_percent']})")
+                self.vram_meter['value'] = info.get('sys_vram_percent_val', 0.0)
+                self.app_ram_label.config(text=f"App RAM: {info['app_ram']}")
+                self.sys_ram_label.config(text=f"Sys RAM: {info['sys_ram_used']} / {info['sys_ram_total']} ({info['sys_ram_percent']})")
+                self.ram_meter['value'] = info.get('sys_ram_percent_val', 0.0)
+        except Exception as e:
+            logging.error(f"Resource monitor update error: {e}")
+        finally:
+            self.root.after(2000, self._update_resource_monitor_loop)
 
     def _create_status_dashboard(self, parent):
         self.status_frame = ttk.Frame(parent, padding=2); self.status_frame.pack(fill=X, pady=(0, 4))
@@ -283,6 +368,11 @@ class GameAssistantApp:
     def stop_session(self): 
         self.session_manager.stop_session(); self.stop_session_button.pack_forget(); self.start_session_button.pack(fill=X, pady=2, before=self.settings_btn)
         if self.state.create_blog_post.get(): threading.Thread(target=self.generate_and_save_blog_post).start()
+
+    def restart_whisper(self):
+        if hasattr(self, 'session_manager'):
+            threading.Thread(target=self.session_manager.restart_whisper, daemon=True).start()
+
 
     def generate_and_save_blog_post(self, c=None):
         try:

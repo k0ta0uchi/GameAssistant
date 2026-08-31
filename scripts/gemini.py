@@ -12,6 +12,7 @@ from .clients import get_gemini_client, switch_to_next_api_key
 from . import local_summarizer
 from .memory import MemoryManager
 from .prompts import BLOG_WRITER_SYSTEM_PROMPT, SESSION_SUMMARIZE_PROMPT, TTS_STYLE_INSTRUCTION
+from .resource_monitor import VRAMPreallocator
 import uuid
 import threading
 import asyncio
@@ -129,17 +130,18 @@ class GeminiSession:
             return False
 
     def generate_content(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
-        while True:
-            try:
-                return self._generate_content_internal(prompt, image_path, is_private, memory_type, memory_user_id)
-            except Exception as e:
-                error_msg = str(e)
-                if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
-                    if self._handle_quota_error():
-                        time.sleep(1)
-                        continue
-                logger.error(f"Final error in generate_content: {e}", exc_info=True)
-                return "申し訳ありません、エラーが発生しましただわん。"
+        with VRAMPreallocator.pool_context():
+            while True:
+                try:
+                    return self._generate_content_internal(prompt, image_path, is_private, memory_type, memory_user_id)
+                except Exception as e:
+                    error_msg = str(e)
+                    if ("429" in error_msg or "400" in error_msg or "ResourceExhausted" in error_msg or "API_KEY_INVALID" in error_msg):
+                        if self._handle_quota_error():
+                            time.sleep(1)
+                            continue
+                    logger.error(f"Final error in generate_content: {e}", exc_info=True)
+                    return "申し訳ありません、エラーが発生しましただわん。"
 
     def _generate_content_internal(self, prompt: str, image_path: str | None = None, is_private: bool = True, memory_type: str = "app", memory_user_id: str | None = None):
         target_user_id = memory_user_id if memory_user_id else (USER_ID_PRIVATE if is_private else USER_ID_PUBLIC)
@@ -273,7 +275,21 @@ class GeminiService:
         # 設定の取得
         use_thinking = False
         if hasattr(self.session.app, 'state'):
-            use_thinking = self.session.app.state.blog_use_thinking.get()
+            state = self.session.app.state
+            use_thinking = getattr(state, 'blog_use_thinking', None) and state.blog_use_thinking.get()
+            
+            # スキル適用の判定と読み込み
+            if getattr(state, 'enable_blog_skills', None) and state.enable_blog_skills.get():
+                enabled_skills = getattr(state, 'enabled_blog_skills', [])
+                if enabled_skills:
+                    try:
+                        from .skills import load_enabled_skills_content
+                        skills_content = load_enabled_skills_content(enabled_skills)
+                        if skills_content:
+                            logger.info(f"ブログ記事生成にスキルを適用します: {enabled_skills}")
+                            system_prompt += f"\n\n# 適用スキル・執筆ガイドライン\n以下のスキルの指示・文体・トーン＆マナー・構成パターンを最優先で適用して記事を作成してください。\n\n{skills_content}"
+                    except Exception as se:
+                        logger.error(f"スキルの読み込み中にエラーが発生しました: {se}")
         
         max_retries = 5
         base_delay = 10 

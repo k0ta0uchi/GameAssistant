@@ -15,6 +15,7 @@ chromadb/
 models/
 output.mp3
 temp_*
+Obsidian/
 
 *.gguf
 .serena/
@@ -41,3 +42,4 @@ logs/
 
 chroma_backup/
 blogs/
+scratch/

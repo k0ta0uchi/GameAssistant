@@ -18,7 +18,8 @@ kokoro
 playwright
 sounddevice
 twitchio==3.1.0
-pvporcupine
+openwakeword
+onnxruntime
 mss==10.1.0
 sentence-transformers
 panda3d-gltf

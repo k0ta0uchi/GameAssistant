@@ -3,6 +3,8 @@ from tkinter import ttk, font, END, LEFT, X, BOTH, Y, RIGHT, VERTICAL, HORIZONTA
 import json
 from datetime import datetime
 import threading
+from scripts.skills import get_available_skills
+from scripts.record import get_audio_device_names, get_discord_audio_device_names
 
 
 class GeminiResponseWindow(tk.Toplevel):
@@ -58,7 +60,7 @@ class SettingsWindow(tk.Toplevel):
         super().__init__(parent)
         self.app = app
         self.title("GameAssistant Advanced Settings")
-        self.geometry("500x650")
+        self.geometry("560x700")
         self.transient(parent)
         self.grab_set()
 
@@ -73,6 +75,7 @@ class SettingsWindow(tk.Toplevel):
 
         self._create_engine_tab()
         self._create_twitch_tab()
+        self._create_blog_tab()
         self._create_general_tab()
 
     def _create_engine_tab(self):
@@ -108,7 +111,58 @@ class SettingsWindow(tk.Toplevel):
         ttk.Radiobutton(asr_frame, text="LARGE (High Accuracy)", variable=self.app.state.asr_engine, value="large").pack(anchor="w", pady=2)
         ttk.Radiobutton(asr_frame, text="TINY (Lightweight)", variable=self.app.state.asr_engine, value="tiny").pack(anchor="w", pady=2)
 
-        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
+        # Wake Word Engine
+        ttk.Label(tab, text="Wake Word Engine:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        wake_frame = ttk.Frame(tab)
+        wake_frame.pack(fill=X, pady=(0, 10))
+        ttk.Radiobutton(wake_frame, text="VAD + Faster-Whisper (即時認識)", variable=self.app.state.wake_word_engine, value="whisper_vad",
+                        command=lambda: self.app.state.save('wake_word_engine', 'whisper_vad')).pack(anchor="w", pady=2)
+        ttk.Radiobutton(wake_frame, text="openwakeword (ねえぐり / ONNX モデル)", variable=self.app.state.wake_word_engine, value="openwakeword",
+                        command=lambda: self.app.state.save('wake_word_engine', 'openwakeword')).pack(anchor="w", pady=2)
+
+        # Wake Word Threshold (感度 / 閾値)
+        thresh_frame = ttk.Frame(wake_frame)
+        thresh_frame.pack(fill=X, pady=(6, 2))
+        
+        thresh_val_label = ttk.Label(thresh_frame, text=f"Threshold (検出感度): {self.app.state.wake_word_threshold.get():.2f}", font=("TkDefaultFont", 9))
+        thresh_val_label.pack(anchor="w")
+
+        def _on_thresh_change(val):
+            v = round(float(val), 2)
+            self.app.state.wake_word_threshold.set(v)
+            thresh_val_label.config(text=f"Threshold (検出感度): {v:.2f}")
+            self.app.state.save('wake_word_threshold', v)
+
+        thresh_slider = ttk.Scale(thresh_frame, from_=0.05, to=0.95, 
+                                  value=self.app.state.wake_word_threshold.get(), 
+                                  command=_on_thresh_change)
+        thresh_slider.pack(fill=X, pady=(2, 0))
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=12)
+
+        # Discord Audio Capture (コラボ用)
+        ttk.Label(tab, text="Discord Audio Capture (コラボ音声文字起こし):", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        ttk.Checkbutton(tab, text="Enable Discord Audio Capture (Discord音声を文字起こし・メモリ保存)", 
+                       variable=self.app.state.enable_discord_capture, style="success-square-toggle",
+                       command=lambda: self.app.state.save('enable_discord_capture', self.app.state.enable_discord_capture.get())).pack(anchor="w", pady=2)
+        
+        discord_dev_frame = ttk.Frame(tab)
+        discord_dev_frame.pack(fill=X, pady=4)
+        ttk.Label(discord_dev_frame, text="Device:").pack(side=LEFT, padx=(0, 5))
+        
+        self.discord_audio_dropdown = ttk.Combobox(discord_dev_frame, textvariable=self.app.state.discord_audio_device, 
+                                                    values=get_discord_audio_device_names(), state="readonly")
+        self.discord_audio_dropdown.pack(side=LEFT, fill=X, expand=True, padx=(0, 5))
+        self.discord_audio_dropdown.bind("<<ComboboxSelected>>", lambda e: self.app.state.save('discord_audio_device', self.app.state.discord_audio_device.get()))
+
+        def _refresh_discord_devices():
+            devices = get_discord_audio_device_names()
+            self.discord_audio_dropdown['values'] = devices
+
+        ttk.Button(discord_dev_frame, text="🔄", width=3, command=_refresh_discord_devices).pack(side=LEFT)
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=12)
 
         # Thinking Mode
         ttk.Checkbutton(tab, text="Disable Thinking Mode (Faster response)", 
@@ -149,6 +203,88 @@ class SettingsWindow(tk.Toplevel):
                                                    style="primary.TButton")
         self.app.twitch_connect_button.pack(fill=X, pady=10)
 
+    def _create_blog_tab(self):
+        tab = ttk.Frame(self.notebook, padding=15)
+        self.notebook.add(tab, text=" Blog & Skills ")
+
+        # 1. ブログ生成基本設定
+        ttk.Label(tab, text="Blog Post Settings:", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        ttk.Checkbutton(tab, text="Create Blog Post after session (セッション終了時に記事生成)", 
+                       variable=self.app.state.create_blog_post, style="success-square-toggle",
+                       command=lambda: self.app.state.save('create_blog_post', self.app.state.create_blog_post.get())).pack(anchor="w", pady=4)
+        
+        blog_thinking_frame = ttk.Frame(tab)
+        blog_thinking_frame.pack(fill=X, pady=2, padx=(20, 0))
+        ttk.Checkbutton(blog_thinking_frame, text="Use Thinking for Blog (思考モードを使用)", 
+                       variable=self.app.state.blog_use_thinking, style="success-square-toggle",
+                       command=lambda: self.app.state.save('blog_use_thinking', self.app.state.blog_use_thinking.get())).pack(side=LEFT)
+
+        ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=12)
+
+        # 2. スキル適用マスター設定
+        ttk.Label(tab, text="Writing Skills (執筆スキル連携):", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(0, 5))
+        
+        ttk.Checkbutton(tab, text="Apply Skills to Blog (ブログ作成にスキルを適用する)", 
+                       variable=self.app.state.enable_blog_skills, style="success-square-toggle",
+                       command=lambda: self.app.state.save('enable_blog_skills', self.app.state.enable_blog_skills.get())).pack(anchor="w", pady=4)
+
+        # 3. スキル一覧カード
+        skills_card = ttk.Labelframe(tab, text="Available Skills (スキル一覧)", padding=10, style="Card.TLabelframe")
+        skills_card.pack(fill=BOTH, expand=True, pady=(8, 0))
+
+        # ヘッダーコントロール
+        ctrl_frame = ttk.Frame(skills_card)
+        ctrl_frame.pack(fill=X, pady=(0, 6))
+        ttk.Label(ctrl_frame, text="skills/ フォルダ内のSKILL.mdを個別に有効化できます:", font=("TkDefaultFont", 8)).pack(side=LEFT)
+        
+        btn_box = ttk.Frame(ctrl_frame)
+        btn_box.pack(side=RIGHT)
+        ttk.Button(btn_box, text="🔄 Reload", style="secondary-outline.TButton", width=8, 
+                   command=lambda: self._refresh_skills_list(skills_list_frame)).pack(side=RIGHT, padx=2)
+
+        # スキル一覧描画コンテナ
+        skills_list_frame = ttk.Frame(skills_card)
+        skills_list_frame.pack(fill=BOTH, expand=True)
+
+        self._refresh_skills_list(skills_list_frame)
+
+    def _refresh_skills_list(self, container):
+        """skills/ ディレクトリ内のスキル一覧を描画"""
+        for widget in container.winfo_children():
+            widget.destroy()
+
+        skills = get_available_skills()
+        if not skills:
+            empty_frame = ttk.Frame(container, padding=20)
+            empty_frame.pack(fill=BOTH, expand=True)
+            ttk.Label(empty_frame, text="skills/ ディレクトリ内にスキル (SKILL.md) が見つかりませんでした。", 
+                      font=("TkDefaultFont", 9), foreground="#94A3B8").pack(anchor="center")
+            return
+
+        for skill in skills:
+            s_id = skill["id"]
+            s_name = skill.get("name", s_id)
+            s_desc = skill.get("description", "")
+            
+            # 各スキルのカード風フレーム
+            item_frame = ttk.Frame(container, padding=6)
+            item_frame.pack(fill=X, pady=3)
+
+            is_enabled_var = tk.BooleanVar(value=self.app.state.is_skill_enabled(s_id))
+
+            def make_cmd(sid, var):
+                return lambda: self.app.state.set_skill_enabled(sid, var.get())
+
+            cb = ttk.Checkbutton(item_frame, text=f" {s_name}  [{s_id}]", variable=is_enabled_var, 
+                                 style="info-square-toggle", command=make_cmd(s_id, is_enabled_var))
+            cb.pack(anchor="w")
+
+            if s_desc:
+                desc_label = ttk.Label(item_frame, text=s_desc, font=("TkDefaultFont", 8), 
+                                       foreground="#94A3B8", wraplength=470, justify=LEFT)
+                desc_label.pack(anchor="w", padx=(24, 0), pady=(2, 0))
+
     def _create_general_tab(self):
         tab = ttk.Frame(self.notebook, padding=15)
         self.notebook.add(tab, text=" General ")
@@ -161,6 +297,15 @@ class SettingsWindow(tk.Toplevel):
         _create_toggle("Use Image (Vision)", self.app.state.use_image, 'use_image')
         _create_toggle("Private Mode", self.app.state.is_private, 'is_private')
         _create_toggle("Enable Auto-Commentary", self.app.state.enable_auto_commentary, 'enable_auto_commentary')
+        
+        # VRAM Pre-allocation Toggle
+        def _toggle_vram_prealloc():
+            val = self.app.state.preallocate_vram.get()
+            self.app.state.save('preallocate_vram', val)
+            self.app.update_vram_preallocation()
+
+        ttk.Checkbutton(tab, text="Pre-allocate 1GB VRAM (VRAMを1GB確保)", variable=self.app.state.preallocate_vram,
+                       style="success-square-toggle", command=_toggle_vram_prealloc).pack(anchor="w", pady=5)
         
         # Auto-Commentary Intervals
         interval_frame = ttk.Frame(tab)
@@ -188,14 +333,6 @@ class SettingsWindow(tk.Toplevel):
         e_avoid.bind("<FocusOut>", lambda e: self.app.state.save('auto_commentary_avoid_duration', self.app.state.auto_commentary_avoid_duration.get()))
 
         _create_toggle("Show Response in New Window", self.app.state.show_response_in_new_window, 'show_response_in_new_window')
-        _create_toggle("Create Blog Post after session", self.app.state.create_blog_post, 'create_blog_post')
-        
-        # Blog Thinking Toggle
-        blog_thinking_frame = ttk.Frame(tab)
-        blog_thinking_frame.pack(fill=X, pady=2, padx=(25, 0))
-        ttk.Checkbutton(blog_thinking_frame, text="Use Thinking for Blog", variable=self.app.state.blog_use_thinking, 
-                       style="success-square-toggle",
-                       command=lambda: self.app.state.save('blog_use_thinking', self.app.state.blog_use_thinking.get())).pack(side=LEFT)
 
         ttk.Separator(tab, orient="horizontal").pack(fill=X, pady=15)
 
