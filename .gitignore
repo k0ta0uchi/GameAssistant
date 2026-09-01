@@ -49,4 +49,6 @@ node_modules/
 src-tauri/target/
 data/
 __pycache__/
+dist_release/
+
 
