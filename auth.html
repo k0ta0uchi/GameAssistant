@@ -3,85 +3,467 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Twitch認証</title>
+    <title>Twitch Authorization — GameAssistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            height: 100vh;
+        :root {
+            --color-void: #08090a;
+            --color-carbon: #0f1011;
+            --color-obsidian: #161718;
+            --color-graphite: #23252a;
+            --color-smoke: #383b3f;
+            --color-ash: #62666d;
+            --color-fog: #8a8f98;
+            --color-mist: #d0d6e0;
+            --color-bone: #e5e5e6;
+            --color-paper: #ffffff;
+            --color-acid-lime: #e4f222;
+            --color-twitch: #9146ff;
+            --color-pulse-green: #27a644;
+            --color-coral-red: #eb5757;
+            --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
             margin: 0;
-            background-color: #f0f0f0;
+            padding: 0;
         }
-        .container {
-            text-align: center;
-            padding: 2em;
-            background-color: white;
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--color-void);
+            color: var(--color-mist);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            overflow-x: hidden;
+            position: relative;
+            letter-spacing: -0.01em;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* 背景アンビエントグラデーション & グリッド */
+        .ambient-bg {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background: 
+                radial-gradient(circle at 50% 20%, rgba(145, 70, 255, 0.12) 0%, transparent 60%),
+                radial-gradient(circle at 80% 80%, rgba(228, 242, 34, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 20% 90%, rgba(39, 166, 68, 0.04) 0%, transparent 50%);
+            z-index: 0;
+        }
+
+        .grid-pattern {
+            position: fixed;
+            inset: 0;
+            background-image: linear-gradient(to right, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+            background-size: 32px 32px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* メインカード */
+        .auth-card {
+            position: relative;
+            z-index: 1;
+            width: 100%;
+            max-width: 520px;
+            background-color: var(--color-carbon);
+            border: 1px solid var(--color-graphite);
+            border-radius: 14px;
+            padding: 36px 32px;
+            box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.7),
+                        0 0 0 1px rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(20px);
+            animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(12px) scale(0.98);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+            }
+        }
+
+        /* ヘッダー */
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 24px;
+        }
+
+        .twitch-badge-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, rgba(145, 70, 255, 0.2), rgba(145, 70, 255, 0.05));
+            border: 1px solid rgba(145, 70, 255, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--color-twitch);
+            flex-shrink: 0;
+        }
+
+        .twitch-badge-icon svg {
+            width: 22px;
+            height: 22px;
+            fill: currentColor;
+        }
+
+        .header-text h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--color-paper);
+            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .header-text p {
+            font-size: 12px;
+            color: var(--color-fog);
+            margin-top: 2px;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 11px;
+            font-weight: 500;
+            margin-bottom: 20px;
+        }
+
+        .status-pill.success {
+            background-color: rgba(39, 166, 68, 0.12);
+            border: 1px solid rgba(39, 166, 68, 0.3);
+            color: #4ade80;
+        }
+
+        .status-pill.error {
+            background-color: rgba(235, 87, 87, 0.12);
+            border: 1px solid rgba(235, 87, 87, 0.3);
+            color: #f87171;
+        }
+
+        .status-pill.info {
+            background-color: rgba(145, 70, 255, 0.12);
+            border: 1px solid rgba(145, 70, 255, 0.3);
+            color: #c084fc;
+        }
+
+        .pulse-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: currentColor;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+
+        /* 案内テキスト */
+        .instruction {
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--color-mist);
+            margin-bottom: 18px;
+        }
+
+        /* コード表示ボックス */
+        .code-wrapper {
+            position: relative;
+            background-color: var(--color-void);
+            border: 1px solid var(--color-graphite);
             border-radius: 8px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            padding: 14px 16px;
+            margin-bottom: 20px;
+            transition: border-color 0.15s ease;
         }
-        #auth-code {
-            font-family: monospace;
-            background-color: #eee;
-            padding: 0.5em;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            margin-top: 1em;
-            display: inline-block;
+
+        .code-wrapper:hover {
+            border-color: var(--color-smoke);
+        }
+
+        .code-label {
+            font-size: 10px;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--color-ash);
+            margin-bottom: 6px;
+        }
+
+        .code-content {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            color: var(--color-paper);
             word-break: break-all;
+            user-select: all;
+            line-height: 1.5;
         }
-        #copy-button {
-            margin-top: 1em;
-            padding: 0.5em 1em;
+
+        /* アクションボタン */
+        .btn-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-primary {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            background-color: var(--color-acid-lime);
+            color: #08090a;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 16px;
+            font-family: var(--font-sans);
+            font-size: 13px;
+            font-weight: 600;
             cursor: pointer;
+            transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .btn-primary:hover {
+            background-color: #edf83b;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(228, 242, 34, 0.25);
+        }
+
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
+        .btn-primary svg {
+            width: 15px;
+            height: 15px;
+        }
+
+        /* フッター */
+        .footer {
+            margin-top: 24px;
+            padding-top: 18px;
+            border-top: 1px solid var(--color-graphite);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 11px;
+            color: var(--color-ash);
+        }
+
+        .footer a {
+            color: var(--color-fog);
+            text-decoration: none;
+            transition: color 0.15s ease;
+        }
+
+        .footer a:hover {
+            color: var(--color-mist);
+        }
+
+        /* トースト通知 */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%) translateY(20px);
+            background-color: var(--color-obsidian);
+            border: 1px solid rgba(228, 242, 34, 0.3);
+            color: var(--color-paper);
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 12px 28px rgba(0, 0, 0, 0.6);
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 100;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background-color: var(--color-acid-lime);
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Twitch認証</h1>
-        <div id="message">
-            <p>認証コードを取得しています...</p>
+    <div class="ambient-bg"></div>
+    <div class="grid-pattern"></div>
+
+    <div class="auth-card">
+        <div class="header">
+            <div class="twitch-badge-icon">
+                <svg viewBox="0 0 24 24">
+                    <path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/>
+                </svg>
+            </div>
+            <div class="header-text">
+                <h1>Twitch 認証完了</h1>
+                <p>GameAssistant OAuth Authentication</p>
+            </div>
         </div>
-        <div id="code-display" style="display: none;">
-            <p>以下の認証コードをコピーして、ボットの管理者に渡してください。</p>
-            <pre id="auth-code"></pre>
-            <button id="copy-button">コピー</button>
+
+        <!-- 状態バッジ -->
+        <div id="status-container">
+            <div class="status-pill info">
+                <span class="pulse-dot"></span>
+                <span id="status-text">認証パラメータを処理しています...</span>
+            </div>
+        </div>
+
+        <!-- 認証成功時の表示 -->
+        <div id="success-view" style="display: none;">
+            <p class="instruction">
+                認証コードの取得に成功しました。以下のコードをコピーして GameAssistant 設定の「認証コード」欄に入力してください。
+            </p>
+
+            <div class="code-wrapper">
+                <div class="code-label">Authorization Code</div>
+                <div class="code-content" id="auth-code-text"></div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn-primary" id="copy-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                    </svg>
+                    <span id="btn-label">認証コードをコピー</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- エラー・直接アクセス時の表示 -->
+        <div id="error-view" style="display: none;">
+            <p class="instruction" id="error-message-text" style="color: var(--color-fog);">
+                このページは Twitch 認証完了後のリダイレクト専用です。<br>
+                GameAssistant の設定画面（Settings &gt; Twitch）から認証を開始してください。
+            </p>
+        </div>
+
+        <div class="footer">
+            <span>GameAssistant AI Desktop</span>
+            <a href="javascript:window.close()">このウィンドウを閉じる</a>
         </div>
     </div>
 
+    <!-- トースト通知 -->
+    <div id="toast" class="toast">
+        <span class="toast-dot"></span>
+        <span id="toast-text">認証コードをクリップボードにコピーしました</span>
+    </div>
+
     <script>
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            const toastText = document.getElementById('toast-text');
+            toastText.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 3000);
+        }
+
         window.onload = function() {
             const params = new URLSearchParams(window.location.search);
             const code = params.get('code');
+            const error = params.get('error');
+            const errorDesc = params.get('error_description');
+
+            const statusContainer = document.getElementById('status-container');
+            const successView = document.getElementById('success-view');
+            const errorView = document.getElementById('error-view');
+            const authCodeText = document.getElementById('auth-code-text');
+            const copyBtn = document.getElementById('copy-btn');
+            const btnLabel = document.getElementById('btn-label');
 
             if (code) {
-                document.getElementById('message').style.display = 'none';
-                document.getElementById('code-display').style.display = 'block';
-                const codeElement = document.getElementById('auth-code');
-                codeElement.textContent = code;
+                // 成功時
+                statusContainer.innerHTML = `
+                    <div class="status-pill success">
+                        <span class="pulse-dot"></span>
+                        <span>認証成功 — コード取得完了</span>
+                    </div>
+                `;
+                successView.style.display = 'block';
+                authCodeText.textContent = code;
 
-                const copyButton = document.getElementById('copy-button');
-                copyButton.addEventListener('click', () => {
+                // 自動コピー試行
+                navigator.clipboard.writeText(code).then(() => {
+                    showToast('認証コードを自動コピーしました！');
+                    btnLabel.textContent = 'コピー完了 (Copied)';
+                }).catch(() => {
+                    // 自動コピー失敗時は手動ボタンでコピー
+                });
+
+                copyBtn.addEventListener('click', () => {
                     navigator.clipboard.writeText(code).then(() => {
-                        alert('認証コードをクリップボードにコピーしました！');
+                        showToast('クリップボードにコピーしました！');
+                        btnLabel.textContent = 'コピー完了 (Copied)';
+                        setTimeout(() => {
+                            btnLabel.textContent = '認証コードをコピー';
+                        }, 2500);
                     }).catch(err => {
-                        alert('コピーに失敗しました。');
-                        console.error('Could not copy text: ', err);
+                        console.error('Copy failed:', err);
+                        showToast('コピーに失敗しました');
                     });
                 });
+            } else if (error) {
+                // エラー時
+                statusContainer.innerHTML = `
+                    <div class="status-pill error">
+                        <span class="pulse-dot"></span>
+                        <span>認証エラー: ${error}</span>
+                    </div>
+                `;
+                errorView.style.display = 'block';
+                document.getElementById('error-message-text').innerHTML = `
+                    <strong style="color: #f87171;">Twitch 認証に失敗しました。</strong><br>
+                    ${errorDesc ? errorDesc : '認証フローがキャンセルされたか、無効なリクエストです。'}
+                `;
             } else {
-                const error = params.get('error');
-                const errorDescription = params.get('error_description');
-                if (error) {
-                    document.getElementById('message').innerHTML = 
-                        `<p style="color: red;">認証に失敗しました。</p>` +
-                        `<p><strong>エラー:</strong> ${error}</p>` +
-                        `<p><strong>詳細:</strong> ${errorDescription}</p>`;
-                } else {
-                    document.getElementById('message').innerHTML = '<p>このページはTwitch認証からのリダイレクト専用です。ボット管理者から提供されたURLから認証を開始してください。</p>';
-                }
+                // パラメータなし（直接アクセス）
+                statusContainer.innerHTML = `
+                    <div class="status-pill info">
+                        <span class="pulse-dot"></span>
+                        <span>リダイレクト待機中</span>
+                    </div>
+                `;
+                errorView.style.display = 'block';
             }
         };
     </script>
