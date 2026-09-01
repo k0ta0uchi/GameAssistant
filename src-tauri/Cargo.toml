@@ -1,6 +1,6 @@
 [package]
 name = "gameassistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "GameAssistant AI Desktop"
 authors = ["GameAssistant Team"]
 edition = "2021"
