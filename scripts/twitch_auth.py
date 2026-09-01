@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 
 import aiohttp
 import chromadb
+from chromadb.config import Settings
 
 # --- 定数 ---
 # 重要: このリダイレクトURIは、Twitch開発者コンソールに登録されているものと
@@ -17,7 +18,7 @@ class DummyEmbeddingFunction:
         return [[0.0] * 384 for _ in input]
 
 # --- ChromaDBクライアントの初期化 ---
-chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
+chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data", settings=Settings(anonymized_telemetry=False))
 token_collection = chroma_client.get_or_create_collection(
     name="user_tokens",
     embedding_function=DummyEmbeddingFunction(),

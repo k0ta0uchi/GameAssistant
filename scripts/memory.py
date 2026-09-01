@@ -77,7 +77,8 @@ class MemoryManager:
                 }
             )
             
-            get_embedding_model()
+            # モデルのプリロードはワーカーまたは別スレッドで実行
+            threading.Thread(target=get_embedding_model, daemon=True).start()
             self.worker_thread.start()
             logging.info(f"MemoryManager worker started for collection: '{self.collection_name}'")
             

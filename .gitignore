@@ -43,3 +43,10 @@ logs/
 chroma_backup/
 blogs/
 scratch/
+design.md
+HANDOVER.md
+node_modules/
+src-tauri/target/
+data/
+__pycache__/
+

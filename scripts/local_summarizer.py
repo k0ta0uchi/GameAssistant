@@ -1,5 +1,5 @@
 from llama_cpp import Llama
-from .prompts import MEMORY_SUMMARIZE_PROMPT
+from .prompts import MEMORY_SUMMARIZE_PROMPT, get_prompt
 
 # グローバルにLLMインスタンスを保持
 llm = None
@@ -20,13 +20,18 @@ def initialize_llm(model_path="./models/gemma-3-1b-it-Q4_K_S.gguf", n_ctx=2048, 
             print(f"ローカルLLMの初期化中にエラーが発生しました: {e}")
             llm = None # 初期化失敗時はNoneのままにする
 
-def summarize(text: str) -> str:
+def summarize(text: str, settings_manager=None) -> str:
     """テキストを1文で要約する"""
     if llm is None:
         print("LLMが初期化されていません。")
         return "要約できませんでした。"
 
-    prompt = MEMORY_SUMMARIZE_PROMPT.format(text=text)
+    template = get_prompt("memory_summarize_prompt", settings_manager)
+    if "{text}" in template:
+        prompt = template.format(text=text)
+    else:
+        prompt = f"{template}\n\n発言: {text}\n記録:"
+
     try:
         result = llm(
             prompt,

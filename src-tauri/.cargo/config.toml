@@ -1,0 +1,3 @@
+[env]
+PROTOC = "C:/Workspace/GameAssistant/tools/protoc/bin/protoc.exe"
+PROTOC_INCLUDE = "C:/Workspace/GameAssistant/tools/protoc/include"

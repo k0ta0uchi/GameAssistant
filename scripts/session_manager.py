@@ -7,6 +7,7 @@ import threading
 import logging
 import re
 import time
+import unicodedata
 from scripts.twitch_bot import TwitchService
 from twitchio import ChatMessage as TwitchChatMessage
 from scripts.record import AudioService, DiscordAudioService
@@ -14,6 +15,35 @@ from scripts.streaming_whisper import StreamTranscriber
 from scripts.voice import play_random_nod
 import scripts.voice as voice
 from scripts.auto_commentary import AutoCommentaryService
+
+def normalize_kana(text: str) -> str:
+    """
+    全角/半角、ひらがな/カタカナ、英字大小、長音・小書き文字の揺らぎを統一した比較用文字列を生成する
+    例: 'ネエグリ' -> 'ねえぐり', 'ﾈｰｸﾞﾘ' -> 'ねえぐり', 'ねぇぐり' -> 'ねえぐり'
+    """
+    if not text:
+        return ""
+    # 1. NFKC 正規化（半角カナ -> 全角カナ、全角英数 -> 半角英数）
+    normalized = unicodedata.normalize('NFKC', text).lower()
+    
+    # 2. 全角カタカナをひらがなに変換 (0x30A1 - 0x30F6 -> 0x3041 - 0x3096)
+    chars = []
+    for c in normalized:
+        code = ord(c)
+        if 0x30A1 <= code <= 0x30F6:
+            chars.append(chr(code - 0x60))
+        elif c in ('〜', '～', 'ー', '-'):
+            chars.append('ー')
+        else:
+            chars.append(c)
+    
+    res = "".join(chars)
+    # 小書き文字の正規化
+    small_to_normal = {
+        'ぁ': 'あ', 'ぃ': 'い', 'ぅ': 'う', 'ぇ': 'え', 'ぉ': 'お',
+        'ゃ': 'や', 'ゅ': 'ゆ', 'ょ': 'よ', 'っ': 'つ', 'ゎ': 'わ'
+    }
+    return "".join(small_to_normal.get(c, c) for c in res)
 
 @dataclass
 class TwitchMessage:
@@ -224,42 +254,85 @@ class SessionManager:
     def stop_session(self):
         logging.info("セッションを停止します。")
         
-        # 自立型ツッコミサービスの停止
-        if hasattr(self, 'auto_commentary_service'):
-            self.auto_commentary_service.stop()
-
+        # 1. 音声再生・Gemini処理・ツッコミサービスの即時中断
+        voice.request_stop_playback()
+        self.is_collecting_prompt = False
         self.session_running = False
-        self.twitch_service.disconnect_twitch_bot()
-        
-        self.audio_service.stop_stream()
-        self.discord_audio_service.stop_stream()
+
+        if hasattr(self, 'auto_commentary_service'):
+            try:
+                self.auto_commentary_service.stop()
+            except Exception as e:
+                logging.debug(f"AutoCommentary stop error: {e}")
+
+        # 2. ステータスを確実に消灯
+        self.app.update_status('session', False)
+        self.app.update_status('gemini', False)
+        self.app.update_status('tts', False)
+
+        # 3. Twitch および オーディオストリームの停止
+        try:
+            self.twitch_service.disconnect_twitch_bot()
+        except Exception as e:
+            logging.debug(f"Twitch disconnect error: {e}")
+
+        try:
+            self.audio_service.stop_stream()
+        except Exception as e:
+            logging.debug(f"AudioService stop error: {e}")
+
+        try:
+            self.discord_audio_service.stop_stream()
+        except Exception as e:
+            logging.debug(f"DiscordAudioService stop error: {e}")
         
         if self.transcriber:
-            self.audio_service.remove_listener(self.transcriber.add_audio)
-            self.transcriber.stop()
+            try:
+                self.audio_service.remove_listener(self.transcriber.add_audio)
+                self.transcriber.stop()
+            except Exception as e:
+                logging.debug(f"Transcriber stop error: {e}")
             self.transcriber = None
 
         if self.discord_transcriber:
-            self.discord_audio_service.remove_listener(self.discord_transcriber.add_audio)
-            self.discord_transcriber.stop()
+            try:
+                self.discord_audio_service.remove_listener(self.discord_transcriber.add_audio)
+                self.discord_transcriber.stop()
+            except Exception as e:
+                logging.debug(f"Discord Transcriber stop error: {e}")
             self.discord_transcriber = None
         
+        # 4. セッション要約（非同期スレッドで実行し、UIや停止処理を一切ブロックしない）
         if self.session_memory:
             self.session_memory.end_time = datetime.now()
             session_history = self.get_session_history()
-            summary = self.app.gemini_service.summarize_session(session_history)
-            if summary:
-                self.app.memory_manager.add_or_update_memory(self.session_memory.session_id, summary, type='session_summary')
+            session_id = self.session_memory.session_id
 
-    def _on_wake_word(self):
-        """openwakewordが「ねえぐり」を検知した時の処理"""
-        logging.info("【openwakeword】ウェイクワード検知！プロンプト待機モードへ移行します。")
+            def _async_summarize():
+                try:
+                    summary = self.app.gemini_service.summarize_session(session_history)
+                    if summary:
+                        self.app.memory_manager.add_or_update_memory(session_id, summary, type='session_summary')
+                except Exception as se:
+                    logging.debug(f"Session summary background error: {se}")
+
+            threading.Thread(target=_async_summarize, daemon=True).start()
+
+    def _on_wake_word(self, source="WakeWord"):
+        """openwakeword または Whisper ASR が「ねえぐり」を検知した時の処理"""
+        now = time.time()
+        # 直近1.0秒以内の多重発火のみ抑制
+        if (now - self.last_wake_trigger_time) < 1.0:
+            return
+        self.last_wake_trigger_time = now
+
+        logging.info(f"【{source}】ウェイクワード検知！プロンプト待機モードへ移行します。")
         # 頷き音を別スレッドで再生
         threading.Thread(target=voice.play_random_nod, daemon=True).start()
         self.is_collecting_prompt = True
         
-        # 検知から1.5秒間は、直前のノイズや「ねえぐり」自身の残響を拾わないように無視する
-        self.prompt_cooldown_until = time.time() + 1.5
+        # 検知から0.5秒間は、直前のノイズや「ねえぐり」自身の残響を拾わないように設定
+        self.prompt_cooldown_until = now + 0.5
         
         if self.app.state.current_window:
             self.app.state.cached_screenshot = self.app.capture_service.capture_window()
@@ -269,24 +342,91 @@ class SessionManager:
         logging.info("【openwakeword】ストップワード検知！再生を中断します。")
         voice.request_stop_playback()
 
+
+
+    def get_wake_words_list(self):
+        """設定からウェイクワード一覧を取得（カンマ区切り対応）"""
+        default_list = ["ねえぐり", "ねぐり", "ネグリ", "ねーぐり", "ねぇぐり", "ね〜ぐり", "neguri"]
+        if hasattr(self.app, 'state') and hasattr(self.app.state, 'custom_wake_words'):
+            val = self.app.state.custom_wake_words.get()
+            if isinstance(val, str) and val.strip():
+                words = [w.strip() for w in re.split(r'[,、]', val) if w.strip()]
+                if words:
+                    return words
+            elif isinstance(val, list) and val:
+                return [str(w).strip() for w in val if str(w).strip()]
+        return default_list
+
+    def _extract_prompt_from_text(self, text: str):
+        """
+        テキストからウェイクワードを検出し、ウェイクワード除去後のプロンプト本文を返す。
+        ひらがな・カタカナ・半角全角・長音の揺らぎを自動吸収してマッチングする。
+        """
+        cleaned = text.strip()
+        if not cleaned:
+            return False, ""
+
+        wake_words = self.get_wake_words_list()
+        norm_text = normalize_kana(cleaned)
+
+        # 登録ウェイクワードの正規化リストを作成（長音の揺らぎも自動生成）
+        norm_wake_words = []
+        for w in wake_words:
+            nw = normalize_kana(w)
+            if nw:
+                norm_wake_words.append(nw)
+                # 長音「ー」と母音（え、い、う等）の相互置換パターン
+                if 'ー' in nw:
+                    norm_wake_words.append(nw.replace('ー', 'え'))
+                    norm_wake_words.append(nw.replace('ー', ''))
+                elif 'え' in nw:
+                    norm_wake_words.append(nw.replace('え', 'ー'))
+
+        # 重複削除＆文字長降順ソート（最長一致を優先）
+        norm_wake_words = sorted(list(set(norm_wake_words)), key=len, reverse=True)
+
+        # 1. 文頭パターンチェック
+        for nw in norm_wake_words:
+            pattern = re.compile(rf'^{re.escape(nw)}[、,\s\u3000ー]*', re.IGNORECASE)
+            match = pattern.search(norm_text)
+            if match:
+                end_pos = match.end()
+                remainder = cleaned[min(end_pos, len(cleaned)):].lstrip('、, 　ー').strip()
+                return True, remainder
+
+        # 2. 文中パターンチェック
+        for nw in norm_wake_words:
+            if nw in norm_text:
+                idx = norm_text.find(nw)
+                end_pos = idx + len(nw)
+                remainder = cleaned[min(end_pos, len(cleaned)):].lstrip('、, 　ー').strip()
+                return True, remainder
+
+        return False, cleaned
+
     def _on_transcription_result(self, text, is_final):
         """Whisperからの認識結果"""
-        if not text: return
+        if not text:
+            return
 
         # UIへのリアルタイム表示
         self.app.root.after(0, lambda: self.app.update_asr_display(text, is_final))
 
-        # VAD + Whisper ASR 即時ウェイクワード判定 ("ねえぐり", "ねぐり" 等の検出)
-        wake_words = ["ねえぐり", "ねぐり", "ネグリ", "ねーぐり", "ねぇぐり", "ね〜ぐり", "neguri"]
-        cleaned_text = re.sub(r'[\s\u3000\.,\?！!\-ー]', '', text.lower())
+        now = time.time()
+        has_wake, remainder = self._extract_prompt_from_text(text)
 
+        # まだプロンプト待機モードに入っていない時
         if not self.is_collecting_prompt:
-            if any(kw in cleaned_text for kw in wake_words):
-                now = time.time()
-                if (now - self.last_wake_trigger_time) > 2.0:
-                    self.last_wake_trigger_time = now
-                    logging.info(f"【VAD+Whisper】'ねえぐり'を即時検知しました！ (ASR Text: '{text}')")
-                    self._on_wake_word()
+            if has_wake:
+                # 「ねえぐり、〇〇して」と一息で言われた場合
+                if len(remainder) >= 2 and is_final:
+                    logging.info(f"【VAD+Whisper】ウェイクワード付きプロンプト検出: '{remainder}' (Raw: '{text}')")
+                    self._process_as_prompt(remainder)
+                    self.is_collecting_prompt = False
+                    return
+                elif (now - self.last_wake_trigger_time) > 1.2:
+                    # 「ねえぐり」単体検知 -> 待機モードへ
+                    self._on_wake_word(source="VAD+Whisper")
                     return
 
         if not is_final:
@@ -300,18 +440,16 @@ class SessionManager:
         
         # プロンプト待機モード中の場合
         if self.is_collecting_prompt:
-            # クールダウン中かチェック（Nod音声の誤認識防止）
-            if time.time() < self.prompt_cooldown_until:
-                logging.info(f"クールダウン中のため無視（待機継続）: {text}")
+            # 待機中に届いたテキストからウェイクワードを除去
+            _, clean_prompt = self._extract_prompt_from_text(text)
+
+            # ノイズや「ねえぐり」単体の残響は無視して待機継続
+            if len(clean_prompt.strip()) < 2:
+                logging.debug(f"ウェイクワード単体または短すぎるため待機継続: '{text}'")
                 return
 
-            # 空文字や極端に短いノイズを無視
-            if len(text.strip()) <= 1:
-                logging.info(f"テキストが短すぎるため無視（待機継続）: {text}")
-                return
-
-            logging.info(f"プロンプトとして処理: {text}")
-            self._process_as_prompt(text)
+            logging.info(f"プロンプトとして処理: '{clean_prompt}'")
+            self._process_as_prompt(clean_prompt)
             self.is_collecting_prompt = False
             return
 
@@ -352,8 +490,21 @@ class SessionManager:
         self.app.memory_manager.enqueue_save(event_data)
 
     def _process_as_prompt(self, text):
-        """テキストをプロンプトとしてAIに送信する"""
-        logging.info(f"AIへのプロンプトを検出: {text}")
+        """テキストをプロンプトとしてAIに送信する（重複連投防止付き）"""
+        now = time.time()
+        last_sent = getattr(self, 'last_prompt_sent_time', 0.0)
+        last_text = getattr(self, 'last_prompt_text', '')
+
+        # 1.5秒以内の同一プロンプトのみ重複ブロック
+        if (now - last_sent) < 1.5 and text == last_text:
+            logging.warning(f"同一プロンプトの重複送信をブロックしました: '{text}'")
+            return
+
+        self.last_prompt_sent_time = now
+        self.last_prompt_text = text
+        self.is_collecting_prompt = False
+
+        logging.info(f"AIへのプロンプトを送信: '{text}'")
         # ユーザーの発話を受け取った合図として頷き音を再生
         threading.Thread(target=voice.play_random_nod, daemon=True).start()
         

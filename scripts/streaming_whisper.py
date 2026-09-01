@@ -136,5 +136,5 @@ class StreamTranscriber:
                 time.sleep(0.2)
 
             except Exception as e:
-                logging.error(f"StreamTranscriber Error: {e}")
+                logging.error(f"StreamTranscriber Error: {e}", exc_info=True)
                 time.sleep(1)

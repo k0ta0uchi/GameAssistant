@@ -174,3 +174,106 @@ AUTO_COMMENTARY_PROMPT = """
 「チャットのみんなも『クサ』って言ってるだわん。今のプレイは面白すぎただわん！」
 「…ねえ、このメニュー画面のまま5分経ってるけど、もしかして寝落ちしただわん？」
 """
+
+# =====================================================================
+# プロンプト設定のメタデータ定義
+# =====================================================================
+PROMPT_DEFINITIONS = {
+    "system_instruction_character": {
+        "id": "system_instruction_character",
+        "title": "AI Character & Persona (メインアシスタント)",
+        "category": "Character",
+        "icon": "Bot",
+        "description": "対話時・画面解析時のAIの口調、語尾、カタカナ変換、Web検索ルール、振る舞い全般の指示です。",
+        "default": SYSTEM_INSTRUCTION_CHARACTER.strip()
+    },
+    "auto_commentary_prompt": {
+        "id": "auto_commentary_prompt",
+        "title": "Auto Commentary (自動ツッコミ・自立発話)",
+        "category": "Commentary",
+        "icon": "Sparkles",
+        "description": "沈黙時やゲーム画面の変化を検知した際に、AIが自発的に行うツッコミ・リアクションの指示です。",
+        "default": AUTO_COMMENTARY_PROMPT.strip()
+    },
+    "blog_writer_system_prompt": {
+        "id": "blog_writer_system_prompt",
+        "title": "Blog Writer (ブログ記事自動生成)",
+        "category": "Blog",
+        "icon": "BookOpen",
+        "description": "配信終了時に会話履歴から臨場感あふれる note プレイ日誌記事を生成するための指示です。",
+        "default": BLOG_WRITER_SYSTEM_PROMPT.strip()
+    },
+    "memory_summarize_prompt": {
+        "id": "memory_summarize_prompt",
+        "title": "Memory Fact Extraction (事実抽出・記憶)",
+        "category": "Memory",
+        "icon": "Brain",
+        "description": "ユーザー発話から重要な事実を抽出して ChromaDB に記録するためのプロンプトです。※ {text} プレースホルダーを含めてください。",
+        "default": MEMORY_SUMMARIZE_PROMPT.strip()
+    },
+    "session_summarize_prompt": {
+        "id": "session_summarize_prompt",
+        "title": "Session Summarization (会話履歴要約)",
+        "category": "Memory",
+        "icon": "FileText",
+        "description": "セッション全体の会話ログを要約・凝縮する際の指示です。",
+        "default": SESSION_SUMMARIZE_PROMPT.strip()
+    },
+    "tts_style_instruction": {
+        "id": "tts_style_instruction",
+        "title": "TTS Voice Style (音声合成スタイル)",
+        "category": "Voice",
+        "icon": "Volume2",
+        "description": "Gemini TTS 音声合成モデルに対する声質・感情・トーンの指示です。",
+        "default": TTS_STYLE_INSTRUCTION.strip()
+    }
+}
+
+def get_prompt(key: str, settings_manager=None) -> str:
+    """
+    指定されたキーのプロンプトを settings_manager または settings 辞書から取得。
+    未設定の場合はデフォルト値を返す。
+    """
+    if settings_manager is not None:
+        if hasattr(settings_manager, "get"):
+            # settings 直下のキー または settings['prompts'] 内をチェック
+            val = settings_manager.get(key)
+            if val is not None and str(val).strip():
+                return str(val)
+            prompts_dict = settings_manager.get("prompts", {})
+            if isinstance(prompts_dict, dict) and key in prompts_dict:
+                val = prompts_dict.get(key)
+                if val is not None and str(val).strip():
+                    return str(val)
+        elif isinstance(settings_manager, dict):
+            val = settings_manager.get(key)
+            if val is not None and str(val).strip():
+                return str(val)
+            prompts_dict = settings_manager.get("prompts", {})
+            if isinstance(prompts_dict, dict) and key in prompts_dict:
+                val = prompts_dict.get(key)
+                if val is not None and str(val).strip():
+                    return str(val)
+
+    # デフォルト値を返す
+    if key in PROMPT_DEFINITIONS:
+        return PROMPT_DEFINITIONS[key]["default"]
+    
+    return ""
+
+def get_all_prompts_data(settings_manager=None):
+    """全プロンプトの現在の設定値・デフォルト値・メタデータを取得"""
+    results = []
+    for key, meta in PROMPT_DEFINITIONS.items():
+        current_val = get_prompt(key, settings_manager)
+        results.append({
+            "id": meta["id"],
+            "title": meta["title"],
+            "category": meta["category"],
+            "icon": meta["icon"],
+            "description": meta["description"],
+            "default": meta["default"],
+            "value": current_val,
+            "is_modified": current_val.strip() != meta["default"].strip()
+        })
+    return results

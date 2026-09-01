@@ -36,7 +36,7 @@ class AudioService:
         self.stream_start_time = 0.0
         self.warmup_duration = 2.0  # 起動直後の誤発火防止ウォームアップ(秒)
         self._threshold = 0.25      # デフォルト検出スコア閾値
-        self.cooldown = 2.0         # 重複検知防止クールダウン(秒)
+        self.cooldown = 2.5         # 重複検知防止クールダウン(秒)
 
     @property
     def threshold(self):
@@ -215,12 +215,32 @@ class AudioService:
         return (in_data, pyaudio.paContinue)
 
 # ヘルパー関数
+def sanitize_device_name(raw_name: str) -> str:
+    if not raw_name:
+        return ""
+    cleaned = raw_name.replace("\r", "").replace("\n", " ").strip()
+    try:
+        reencoded = cleaned.encode("latin-1").decode("cp932")
+        if reencoded and len(reencoded) > 0:
+            cleaned = reencoded
+    except Exception:
+        pass
+    return cleaned.strip()
+
 def get_audio_device_names():
-    device_names = []
+    device_names = ["Default (System Default)"]
+    seen = {"Default (System Default)"}
     for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        if int(device_info.get('maxInputChannels', 0)) > 0:
-            device_names.append(device_info.get('name'))
+        try:
+            device_info = p.get_device_info_by_index(i)
+            if int(device_info.get('maxInputChannels', 0)) > 0:
+                raw_name = device_info.get('name', '')
+                clean_name = sanitize_device_name(raw_name)
+                if clean_name and clean_name not in seen:
+                    seen.add(clean_name)
+                    device_names.append(clean_name)
+        except Exception:
+            continue
     return device_names
 
 def get_discord_audio_device_names():
@@ -241,12 +261,21 @@ def is_discord_running():
         return False
 
 def get_device_index_from_name(device_name):
-    if not device_name:
-        return None
+    if not device_name or device_name == "Default (System Default)":
+        try:
+            default_info = p.get_default_input_device_info()
+            return default_info.get('index', None)
+        except Exception:
+            return None
     for i in range(p.get_device_count()):
-        device_info = p.get_device_info_by_index(i)
-        if device_info.get('name') == device_name:
-            return i
+        try:
+            device_info = p.get_device_info_by_index(i)
+            raw_name = device_info.get('name', '')
+            clean_name = sanitize_device_name(raw_name)
+            if clean_name == device_name or raw_name == device_name:
+                return i
+        except Exception:
+            continue
     return None
 
 class DiscordAudioService:

@@ -58,13 +58,13 @@ class TwitchBot(commands.Bot):
     """
     TwitchIO v3 Bot (chromadb対応)
     """
-    def __init__(self, *, token: str, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, mention_callback: MentionCallback = None, message_callback: Optional[Callable[[twitchio.ChatMessage], Awaitable[None]]] = None) -> None:
+    def __init__(self, *, token: str, client_id: str, client_secret: str, bot_id: str, owner_id: str, nick: str, token_collection: Any, app_logic: Any = None, mention_callback: MentionCallback = None, message_callback: Optional[Callable[[twitchio.ChatMessage], Awaitable[None]]] = None) -> None:
         self.token_collection = token_collection
         self.mention_callback = mention_callback
         self.message_callback = message_callback
         self.bot_id_str = bot_id
         self.nick = nick
-        # self._bot_token = token # この行は不要
+        self.app = app_logic
         super().__init__(
             client_id=client_id,
             client_secret=client_secret,
@@ -84,15 +84,13 @@ class TwitchBot(commands.Bot):
 
         if results and results['ids']:
             for i, user_id_str in enumerate(results['ids']):
-                # "bot" というIDはボット自身のトークンなので、ここではスキップ
-                
                 metadata = results['metadatas'][i]
                 token = metadata.get('token')
                 refresh = metadata.get('refresh')
 
                 if token and refresh:
                     try:
-                        # 1. トークンをクライアントに追加 (これにより self._tokens に保存される)
+                        # 1. トークンをクライアントに追加
                         await self.add_token(token, refresh)
 
                         # 2. サブスクリプションオブジェクトを作成
@@ -115,6 +113,8 @@ class TwitchBot(commands.Bot):
     async def event_ready(self) -> None:
         """ボットが正常にログインしたときに呼び出されます。"""
         LOGGER.info(f"Twitchに正常にログインしました: {self.nick} (ID: {self.bot_id})")
+        if self.app and hasattr(self.app, 'update_status'):
+            self.app.update_status('twitch', True)
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:
         """OAuth認証が成功したときに呼び出されます。"""
@@ -276,13 +276,19 @@ class TwitchService:
                 self.twitch_thread = threading.Thread(target=self.run_bot_in_thread, args=(self.twitch_bot_loop,), daemon=True)
                 self.twitch_thread.start()
                 
-                # UIボタンの更新（SettingsWindowが開いている場合のみ）
-                if self.app.twitch_connect_button and self.app.twitch_connect_button.winfo_exists():
-                    self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "切断", "style": "danger.TButton"})
+                # UIボタンの更新（Tkinter SettingsWindow が開いている場合のみ）
+                twitch_btn = getattr(self.app, 'twitch_connect_button', None)
+                if twitch_btn and hasattr(twitch_btn, 'winfo_exists') and twitch_btn.winfo_exists():
+                    self.app.root.after(0, twitch_btn.config, {"text": "切断", "style": "danger.TButton"})
                 else:
                     logging.info("Twitch bot connected. (Settings UI is closed)")
+
+                if hasattr(self.app, 'update_status'):
+                    self.app.update_status('twitch', True)
             else:
                 logging.warning("Twitchボットインスタンスの作成に失敗したため、実行スレッドは開始されません。")
+                if hasattr(self.app, 'update_status'):
+                    self.app.update_status('twitch', False)
         except Exception as e:
             logging.error(f"Twitchボット接続スレッドで致命的なエラーが発生しました: {e}", exc_info=True)
 
@@ -313,10 +319,11 @@ class TwitchService:
             logging.debug("ChromaDBクライアントを初期化しています (path='./chroma_tokens_data')...")
             # DBパスの絶対パスを表示して確認
             import os
+            from chromadb.config import Settings
             abs_path = os.path.abspath("./chroma_tokens_data")
             logging.debug(f"ChromaDB Path: {abs_path}")
             
-            chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data")
+            chroma_client = chromadb.PersistentClient(path="./chroma_tokens_data", settings=Settings(anonymized_telemetry=False))
             logging.debug("ChromaDBクライアント初期化完了。コレクションを取得/作成します...")
             
             token_collection = chroma_client.get_or_create_collection(
@@ -339,6 +346,7 @@ class TwitchService:
                 owner_id=bot_id,
                 nick=self.app.state.twitch_bot_username.get(),
                 token_collection=token_collection,
+                app_logic=self.app,
                 message_callback=self.message_callback,
                 mention_callback=self.mention_callback,
             )
@@ -347,19 +355,28 @@ class TwitchService:
         except Exception as e:
             logging.error(f"Twitchへの接続初期化中にエラーが発生しました: {e}", exc_info=True)
             self.twitch_bot = None
+            if hasattr(self.app, 'update_status'):
+                self.app.update_status('twitch', False)
 
     def disconnect_twitch_bot(self):
         logging.info("Twitchボットの切断を試みます...")
         if self.twitch_bot and self.twitch_bot_loop:
-            asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
+            try:
+                asyncio.run_coroutine_threadsafe(self.twitch_bot.close(), self.twitch_bot_loop)
+            except Exception:
+                pass
         if self.twitch_thread and self.twitch_thread.is_alive():
-            self.twitch_thread.join(timeout=5)
+            self.twitch_thread.join(timeout=3)
         self.twitch_thread = None
         self.twitch_bot = None
         
-        # UIボタンの更新（SettingsWindowが開いている場合のみ）
-        if self.app.twitch_connect_button and self.app.twitch_connect_button.winfo_exists():
-            self.app.root.after(0, self.app.twitch_connect_button.config, {"text": "接続", "style": "primary.TButton"})
+        if hasattr(self.app, 'update_status'):
+            self.app.update_status('twitch', False)
+
+        # UIボタンの更新（Tkinter SettingsWindow が開いている場合のみ）
+        twitch_btn = getattr(self.app, 'twitch_connect_button', None)
+        if twitch_btn and hasattr(twitch_btn, 'winfo_exists') and twitch_btn.winfo_exists():
+            self.app.root.after(0, twitch_btn.config, {"text": "接続", "style": "primary.TButton"})
         
         logging.info("Twitchボットを切断しました。")
 

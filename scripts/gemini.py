@@ -11,7 +11,13 @@ import wave
 from .clients import get_gemini_client, switch_to_next_api_key
 from . import local_summarizer
 from .memory import MemoryManager
-from .prompts import BLOG_WRITER_SYSTEM_PROMPT, SESSION_SUMMARIZE_PROMPT, TTS_STYLE_INSTRUCTION
+from .prompts import (
+    BLOG_WRITER_SYSTEM_PROMPT,
+    SESSION_SUMMARIZE_PROMPT,
+    TTS_STYLE_INSTRUCTION,
+    SYSTEM_INSTRUCTION_CHARACTER,
+    get_prompt
+)
 from .resource_monitor import VRAMPreallocator
 import uuid
 import threading
@@ -107,8 +113,9 @@ class GeminiSession:
         self.settings_manager = settings_manager
         self.disable_thinking_mode = self.settings_manager.get("disable_thinking_mode", False) if self.settings_manager else False
         self.history = []
-        if custom_instruction:
-            self.history.append(types.Content(role="user", parts=[types.Part(text=custom_instruction)]))
+        instruction = custom_instruction or get_prompt("system_instruction_character", self.settings_manager)
+        if instruction:
+            self.history.append(types.Content(role="user", parts=[types.Part(text=instruction)]))
             self.history.append(types.Content(role="model", parts=[types.Part(text="はい、承知いたしましただわん。")]))
         
         if hasattr(self.app, 'memory_manager'):
@@ -116,7 +123,7 @@ class GeminiSession:
         else:
             self.memory_manager = MemoryManager(collection_name="memories")
             
-        local_summarizer.initialize_llm()
+        threading.Thread(target=local_summarizer.initialize_llm, daemon=True).start()
         self.last_grounding_metadata = None
 
     def _handle_quota_error(self) -> bool:
@@ -254,7 +261,8 @@ class GeminiService:
         yield from self.session.generate_content_stream(full_prompt, image_path, is_private, memory_type, memory_user_id)
 
     def summarize_session(self, session_history: str) -> Optional[str]:
-        prompt = f"{SESSION_SUMMARIZE_PROMPT}{session_history}"
+        base_prompt = get_prompt("session_summarize_prompt", self.session.settings_manager)
+        prompt = f"{base_prompt}\n\n{session_history}" if base_prompt else session_history
         try:
             response = self.session.client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
             return safe_get_text(response)
@@ -264,7 +272,7 @@ class GeminiService:
 
     def generate_blog_post(self, conversation: list[dict[str, str]] | str) -> Optional[str]:
         if not conversation: return None
-        system_prompt = BLOG_WRITER_SYSTEM_PROMPT
+        system_prompt = get_prompt("blog_writer_system_prompt", self.session.settings_manager)
         if isinstance(conversation, str): conversation_text = conversation
         elif isinstance(conversation, list): conversation_text = "\n".join(f"- {item['role']}: {item['content']}" for item in conversation)
         else: return None

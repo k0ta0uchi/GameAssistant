@@ -1,0 +1,100 @@
+/* LoadingScreen.css - Minimal, Clean & Elegant Aesthetics */
+.loading-screen-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background-color: #08090a;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.4s ease;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  user-select: none;
+  overflow: hidden;
+}
+
+.loading-screen-overlay.fade-out {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* ミニマルな中央コンテナ */
+.loading-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 320px;
+  width: 90%;
+  animation: loading-appear 0.5s ease-out forwards;
+}
+
+@keyframes loading-appear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* シンプルで滑らかなミニマルスピナー */
+.loading-spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.08);
+  border-top-color: #e4f222;
+  animation: spinner-rotate 0.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  margin-bottom: 24px;
+}
+
+@keyframes spinner-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* アプリタイトル & サブテキスト */
+.loading-app-name {
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: #f3f4f6;
+  margin-bottom: 6px;
+}
+
+.loading-status-text {
+  font-size: 13px;
+  color: #6e7681;
+  min-height: 18px;
+  transition: opacity 0.2s ease;
+}
+
+/* 極細プログレスライン */
+.loading-line-container {
+  width: 140px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  margin-top: 20px;
+  overflow: hidden;
+  position: relative;
+}
+
+.loading-line-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: #e4f222;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}

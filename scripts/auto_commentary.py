@@ -7,7 +7,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
-from scripts.prompts import AUTO_COMMENTARY_PROMPT
+from scripts.prompts import AUTO_COMMENTARY_PROMPT, get_prompt
 import scripts.voice as voice
 
 class AutoCommentaryService:
@@ -181,7 +181,8 @@ class AutoCommentaryService:
                 logging.warning(f"Screenshot Error: {e}")
         
         history = self.session_manager.get_session_history()
-        prompt = AUTO_COMMENTARY_PROMPT
+        settings_mgr = getattr(self.app, 'settings_manager', getattr(self.app, 'state', None))
+        prompt = get_prompt("auto_commentary_prompt", settings_mgr)
         if history:
             prompt += f"\n\n(直近の会話履歴):\n{history[-1000:]}"
 
