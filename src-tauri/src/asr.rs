@@ -104,26 +104,34 @@ impl WhisperWsClient {
 
         self.stop_process_only();
 
-        let cur_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let root_dir = if cur_dir.ends_with("src-tauri") {
-            cur_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".."))
+        let root_dir = crate::resolve_project_root();
+
+        // scripts/asr_server.py の探索
+        let script_path = if root_dir.join("scripts").join("asr_server.py").exists() {
+            root_dir.join("scripts").join("asr_server.py")
+        } else if std::path::Path::new("C:/Workspace/GameAssistant/scripts/asr_server.py").exists() {
+            std::path::PathBuf::from("C:/Workspace/GameAssistant/scripts/asr_server.py")
         } else {
-            cur_dir.clone()
+            root_dir.join("scripts").join("asr_server.py")
         };
 
-        let script_path = root_dir.join("scripts").join("asr_server.py");
-        let venv_py = root_dir.join("venv").join("Scripts").join("python.exe");
+        // python.exe の探索
+        let python_path = if root_dir.join("venv").join("Scripts").join("python.exe").exists() {
+            root_dir.join("venv").join("Scripts").join("python.exe")
+        } else if std::path::Path::new("C:/Workspace/GameAssistant/venv/Scripts/python.exe").exists() {
+            std::path::PathBuf::from("C:/Workspace/GameAssistant/venv/Scripts/python.exe")
+        } else {
+            std::path::PathBuf::from("python")
+        };
 
         if !script_path.exists() {
+            eprintln!("[ERROR] [ASR] ASR server script not found at: {:?}", script_path);
             return Err(format!("ASR server script not found at: {:?}", script_path));
         }
 
-        let mut cmd = if venv_py.exists() {
-            Command::new(venv_py)
-        } else {
-            Command::new("python")
-        };
+        println!("[INFO] [ASR] Spawning Faster-Whisper ASR server: {:?} with python: {:?}", script_path, python_path);
 
+        let mut cmd = Command::new(&python_path);
         cmd.arg(&script_path)
             .current_dir(&root_dir)
             .stdout(Stdio::piped())

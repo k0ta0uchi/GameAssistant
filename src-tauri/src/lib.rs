@@ -41,17 +41,40 @@ struct AppState {
     log_mgr: Arc<LogManager>,
 }
 
-fn find_project_root() -> PathBuf {
-    let current = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if current.join("settings.json").exists() || current.join("server.py").exists() {
-        return current;
-    }
-    if let Some(parent) = current.parent() {
-        if parent.join("settings.json").exists() || parent.join("server.py").exists() {
-            return parent.to_path_buf();
+pub fn resolve_project_root() -> PathBuf {
+    // 1. カレントディレクトリ
+    if let Ok(current) = std::env::current_dir() {
+        if current.join("settings.json").exists() || current.join("scripts").join("asr_server.py").exists() {
+            return current;
+        }
+        if let Some(parent) = current.parent() {
+            if parent.join("settings.json").exists() || parent.join("scripts").join("asr_server.py").exists() {
+                return parent.to_path_buf();
+            }
         }
     }
-    current
+
+    // 2. 実行ファイル（EXE）のディレクトリ及びその上位
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            if exe_dir.join("settings.json").exists() || exe_dir.join("scripts").join("asr_server.py").exists() {
+                return exe_dir.to_path_buf();
+            }
+            if let Some(parent) = exe_dir.parent() {
+                if parent.join("settings.json").exists() || parent.join("scripts").join("asr_server.py").exists() {
+                    return parent.to_path_buf();
+                }
+            }
+        }
+    }
+
+    // 3. 既知のワークスペースパス
+    let default_path = PathBuf::from("C:/Workspace/GameAssistant");
+    if default_path.exists() {
+        return default_path;
+    }
+
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 // -------------------------------------------------------------
@@ -437,7 +460,7 @@ fn load_dotenv(root_dir: &std::path::Path) {
 }
 
 pub fn run() {
-    let root_dir = find_project_root();
+    let root_dir = resolve_project_root();
     load_dotenv(&root_dir);
 
     let log_mgr = Arc::new(LogManager::new());
