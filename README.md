@@ -1,47 +1,52 @@
 # GameAssistant
 
-ゲームプレイをリアルタイムで支援するために作られた、多機能AIアシスタントです。
-音声対話、画面認識、Twitch連携など、様々な機能であなたのゲーミング体験を向上させます。
+ゲームプレイや配信をリアルタイムで支援するために作られた、超高速・低遅延な **Tauri 2.0 + Pure Rust Native** 製 AI デスクトップアシスタントです。
+音声対話（Kotoba-Whisper CUDA INT8）、画面認識、Twitch連携、LanceDB ベクトル長期記憶、自立型実況（Auto Commentary）、noteブログ自動執筆など、様々な機能であなたのゲーミング体験を向上させます。
 
-## 主な機能 (Features)
+---
 
-- **🎮 AIによるゲームアシスト**:
-  - ゲームに関する質問に、過去の会話や文脈を考慮して応答します。
-  - キャラクター（優しい犬の女の子）として、親しみやすく対話します。
+## ⚡ 主な機能 (Features)
 
-- **🎤 高度な音声対話**:
-  - 「ねえぐり」というウェイクワードでアシスタントを起動。
-  - 高性能な `Whisper` モデルによる正確な音声認識。
-  - `VOICEVOX` または `Google Gemini` TTSによる自然な音声応答。
-  - AIの応答が長い時に「ストップ」と言うことで、再生をいつでも中断できます。
+- **🎮 AI によるゲームアシスト & 実況 (Gemini 2.0 Flash / Pro)**:
+  - 画面認識・過去の会話文脈・ゲーム内履歴を総合的に考慮して応答。
+  - 沈黙時間が続いた際に画面を見て自律的にコメント・ツッコミを入れる「Auto Commentary」機能。
+  - Thinking モードの動的切り替え（会話時は高速、ブログ執筆時は熟考）。
 
-- **🖼️ スクリーンショット解析**:
-  - 指定したゲーム画面のスクリーンショットをAIが解析し、状況に基づいたアドバイスを提供します。
-  - `mss` ライブラリを使用し、ゲーム画面も安定してキャプチャできます。
+- **🎤 超低遅延・高精度 音声対話 (Kotoba-Whisper CUDA INT8 + cpal)**:
+  - 「ねえぐり」「アシスタント」等のウェイクワードで即座に起動し、相槌（Nod Sound）を即時再生。
+  - Faster-Whisper CUDA INT8 によるミリ秒単位のストリーミング音声認識。
+  - WASAPI Loopback による Discord 通話音声のゼロ遅延キャプチャ。
+  - VRAM 蓄積による推論遅延を自動検知して自律的にワーカーを再起動するウォッチドッグ。
 
-- **🤖 Twitch連携**:
-  - あなたのTwitchチャンネルのボットとして動作します。
-  - チャットでメンションが送られると、AIが内容を理解して応答します。
+- **🧠 ローカルベクトル長期記憶 (Pure Rust LanceDB + GLuCoSE-base-ja)**:
+  - プレイヤーの発話・AI応答・Discord会話を 768 次元の埋め込みベクトルとして LanceDB に自動蓄積。
+  - 過去の出来事やプレイ記憶を高速セマンティック検索してプロンプトに動的注入。
 
-- **🧠 永続的な記憶**:
-  - 会話の履歴やゲーム内のイベントを `ChromaDB` に自動で保存・記憶します。
-  - 記憶した内容を基に、より的確な応答が可能です。
-  - セッション終了時に、その日の会話内容をまとめたブログ記事（マークダウン形式）を自動生成できます。
+- **📝 note ブログ記事の自動執筆 & スキル注入 (Skills Engine)**:
+  - セッション終了時に配信ログから note ブログ記事（Markdown）を自動生成。
+  - `skills/` 配下の執筆ペルソナ・文体ガイドライン（YAMLフロントマター付き）を動的に注入。
 
-- **🖥️ 使いやすいGUI**:
-  - `ttkbootstrap` を利用した、モダンで分かりやすいデスクトップアプリケーション。
-  - 使用するマイクやキャプチャするウィンドウをGUIから簡単に選択・変更できます。
+- **🤖 Pure Rust Twitch 連携 (WebSocket IRC)**:
+  - 配信セッション開始時に自動接続し、視聴者チャットに応答。
+  - OAuth Authorization Code フローによる安全なワンクリック認証。
 
-## 必要なもの (Requirements)
+- **🖥️ リッチ & モダンな UI (React 18 + Tailwind CSS + Tauri 2.0)**:
+  - MIC, GEMINI, VOICE, TWITCH のリアルタイム・アクティビティ演出（Pulse / Glow）。
+  - GPU VRAM / システム RAM のリアルタイムモニターと VRAM 1GB 事前確保オプション。
 
-- Python 3.9 以上
-- `requirements.txt` に記載されたPythonライブラリ
-- **VOICEVOX Engine**: ローカルでの音声合成に必要です。事前に起動しておく必要があります。
-- **各種APIキー**:
-  - `PICOVOICE_ACCESS_KEY` (Porcupineウェイクワードエンジン用)
-  - `GOOGLE_API_KEY` (Google Gemini用)
+---
 
-## セットアップ (Setup)
+## 🚀 必要なもの & セットアップ (Setup)
+
+### 必要な環境
+- **OS**: Windows 10 / 11 (64-bit)
+- **GPU**: NVIDIA GeForce (CUDA 12.x / VRAM 6GB以上推奨)
+- **Node.js**: v18 以上
+- **Rust**: 1.75 以上 (`rustup`)
+- **VOICEVOX Engine**: ローカル音声合成用に起動（デフォルト: `http://127.0.0.1:50021`）
+- **Google Gemini API Key**: [Google AI Studio](https://aistudio.google.com/) から取得
+
+### インストール手順
 
 1. **リポジトリをクローン:**
    ```bash
@@ -49,54 +54,31 @@
    cd GameAssistant
    ```
 
-2. **Python仮想環境の作成と有効化:**
+2. **Python 仮想環境の作成と ASR 依存ライブラリのインストール:**
    ```bash
    python -m venv venv
    .\venv\Scripts\activate
-   ```
-
-3. **必要なライブラリをインストール:**
-   ```bash
    pip install -r requirements.txt
    ```
-   
-4. **環境変数の設定:**
-   プロジェクトのルートに `.env` という名前のファイルを作成し、以下のようにAPIキーを記述します。
-   ```
-   PICOVOICE_ACCESS_KEY="YOUR_PICOVOICE_ACCESS_KEY"
-   GOOGLE_API_KEY="YOUR_GOOGLE_API_KEY"
-   ```
 
-5. **VOICEVOXの準備:**
-   ローカル環境に[VOICEVOX Engine](https://voicevox.hiroshiba.jp/)をインストールし、本アプリケーションを使用する前に起動しておいてください。
-
-## 使い方 (Usage)
-
-1. **アプリケーションの起動:**
+3. **Node.js パッケージのインストール:**
    ```bash
-   python main.py
+   npm install
    ```
 
-2. **初期設定:**
-   - **インプットデバイス**: 音声入力に使用するマイクを選択します。
-   - **ウィンドウ**: スクリーンショットの対象となるゲームウィンドウを選択します。
+4. **アプリケーションの起動 (開発モード):**
+   ```bash
+   npm run tauri dev
+   ```
 
-3. **基本的な使い方:**
-   - **音声で起動**: 「ねえぐり」と話しかけると録音が開始されます。無音が続くと自動で録音が終了します。
-   - **ボタンで録音**: 「録音開始」ボタンで手動録音も可能です。
-   - **応答の中断**: AIが話している途中で「ストップ」と言うと、いつでも応答を中断できます。
+---
 
-4. **Twitch連携:**
-   - GUIの「Twitch Bot」セクションで、ボットのユーザー名や認証情報を設定します。
-   - 「承認URLコピー」ボタンから認証を行い、取得したコードを「認証コード」欄に入力して「トークン登録」ボタンを押します。
-   - 「接続」ボタンを押すと、あなたのチャンネルでボットが動作を開始します。
+## 🛠️ 技術スタック (Technology Stack)
 
-## 技術スタック (Technology Stack)
-
-- **AI & ML**: Google Gemini, OpenAI Whisper, Picovoice Porcupine
-- **音声処理**: `pyaudio`, `sounddevice`, VOICEVOX
-- **データベース**: `ChromaDB` (Vector DB)
-- **GUI**: `ttkbootstrap` (Tkinter)
-- **スクリーンショット**: `mss`
-- **Twitch連携**: `twitchio`
-- **その他**: `Python 3`, `threading`
+- **Frontend**: React 18, TypeScript, Tailwind CSS, Lucide Icons, Vite
+- **Core Backend**: Tauri 2.0, Pure Rust (`tokio`, `cpal`, `hound`, `rodio`, `reqwest`, `image`)
+- **Vector Database**: LanceDB (Pure Rust SDK) + Apache Arrow 53
+- **ASR & Embedding**: Kotoba-Whisper-v2.0-faster (CUDA INT8), pkshatech/GLuCoSE-base-ja
+- **AI & Multimodal**: Google Gemini 2.0 Flash / Pro API, Brave Search API
+- **TTS Engine**: VOICEVOX Engine (Local HTTP REST) / Style-Bert-VITS2
+- **Twitch Integration**: Pure Rust WebSocket IRC Client (`tokio-tungstenite`)
