@@ -50,5 +50,7 @@ src-tauri/target/
 data/
 __pycache__/
 dist_release/
+skills/k0ta-writing-style/
+
 
 
