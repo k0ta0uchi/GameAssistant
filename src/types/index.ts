@@ -113,3 +113,26 @@ export interface PromptItem {
   value: string;
   is_modified: boolean;
 }
+
+export interface ModelStatus {
+  id: string;
+  name: string;
+  description: string;
+  hf_repo: string;
+  category: 'ASR' | 'Embedding' | 'LLM' | 'Other';
+  required: boolean;
+  estimated_size_bytes: number;
+  is_installed: boolean;
+  actual_size_bytes: number;
+  local_path: string;
+}
+
+export interface DownloadProgressEvent {
+  model_id: string;
+  current_bytes: number;
+  total_bytes: number;
+  speed_mbps: number;
+  percent: number;
+  status: 'downloading' | 'completed' | 'error' | 'cancelled';
+  error_message?: string;
+}

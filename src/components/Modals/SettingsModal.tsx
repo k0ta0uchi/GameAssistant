@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import {
   X,
   Sliders,
@@ -13,8 +14,15 @@ import {
   ExternalLink,
   Power,
   RefreshCw,
+  HardDrive,
+  Download,
+  CheckCircle2,
+  AlertTriangle,
+  FolderOpen,
+  Loader2,
+  XCircle,
 } from 'lucide-react';
-import { SkillsResponse, PromptItem } from '../../types';
+import { SkillsResponse, PromptItem, ModelStatus, DownloadProgressEvent } from '../../types';
 import { PromptsTab } from './PromptsTab';
 
 interface SettingsModalProps {
@@ -26,6 +34,7 @@ interface SettingsModalProps {
   prompts?: PromptItem[];
   onSavePrompt?: (id: string, value: string) => Promise<boolean>;
   onResetPrompt?: (id: string) => Promise<boolean>;
+  initialTab?: 'engines' | 'models' | 'prompts' | 'twitch' | 'preferences' | 'blog_skills';
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -37,20 +46,66 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   prompts = [],
   onSavePrompt = async () => true,
   onResetPrompt = async () => true,
+  initialTab = 'engines',
 }) => {
-  const [activeTab, setActiveTab] = useState<'engines' | 'prompts' | 'twitch' | 'preferences' | 'blog_skills'>('engines');
+  const [activeTab, setActiveTab] = useState<'engines' | 'models' | 'prompts' | 'twitch' | 'preferences' | 'blog_skills'>(initialTab);
   const [skillsData, setSkillsData] = useState<SkillsResponse | null>(null);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [editingSkillContent, setEditingSkillContent] = useState<string>('');
   const [isSavingSkill, setIsSavingSkill] = useState<boolean>(false);
 
+  // モデル管理 state
+  const [modelsList, setModelsList] = useState<ModelStatus[]>([]);
+  const [modelsDirInput, setModelsDirInput] = useState<string>('');
+  const [downloadProgressMap, setDownloadProgressMap] = useState<Record<string, DownloadProgressEvent>>({});
+  const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
+
+  const fetchModels = useCallback(async (customDir?: string) => {
+    setIsRefreshingModels(true);
+    try {
+      const list = await invoke<ModelStatus[]>('get_models_status', {
+        customDir: customDir !== undefined ? customDir : (settings.models_dir || null),
+      });
+      setModelsList(list);
+    } catch (e) {
+      console.error('Failed to fetch models status:', e);
+    } finally {
+      setIsRefreshingModels(false);
+    }
+  }, [settings.models_dir]);
+
   useEffect(() => {
     if (isOpen) {
+      setActiveTab(initialTab);
+      setModelsDirInput(settings.models_dir || '');
+      fetchModels();
       invoke<SkillsResponse>('list_skills')
         .then((data) => setSkillsData(data))
         .catch((err) => console.error('Failed to fetch skills:', err));
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab, fetchModels, settings.models_dir]);
+
+  // ダウンロード進捗イベントのリスナー
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<DownloadProgressEvent>('download_progress', (event) => {
+      const payload = event.payload;
+      setDownloadProgressMap((prev) => ({
+        ...prev,
+        [payload.model_id]: payload,
+      }));
+
+      if (payload.status === 'completed' || payload.status === 'error' || payload.status === 'cancelled') {
+        fetchModels();
+      }
+    }).then((unsub) => {
+      unlisten = unsub;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [fetchModels]);
 
   if (!isOpen) return null;
 
@@ -92,6 +147,70 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   };
 
+  const handleStartDownloadModel = async (modelId: string) => {
+    try {
+      setDownloadProgressMap((prev) => ({
+        ...prev,
+        [modelId]: {
+          model_id: modelId,
+          current_bytes: 0,
+          total_bytes: 100,
+          speed_mbps: 0,
+          percent: 0,
+          status: 'downloading',
+        },
+      }));
+      await invoke('download_model', {
+        modelId,
+        customDir: settings.models_dir || null,
+      });
+    } catch (e) {
+      console.error(`Failed to start download for ${modelId}:`, e);
+    }
+  };
+
+  const handleCancelDownloadModel = async (modelId: string) => {
+    try {
+      await invoke('cancel_download_model', { modelId });
+      setDownloadProgressMap((prev) => ({
+        ...prev,
+        [modelId]: {
+          ...(prev[modelId] || {
+            model_id: modelId,
+            current_bytes: 0,
+            total_bytes: 100,
+            speed_mbps: 0,
+            percent: 0,
+          }),
+          status: 'cancelled',
+        },
+      }));
+    } catch (e) {
+      console.error(`Failed to cancel download for ${modelId}:`, e);
+    }
+  };
+
+  const handleDownloadAllMissing = async () => {
+    const missing = modelsList.filter((m) => !m.is_installed);
+    for (const m of missing) {
+      const currentProg = downloadProgressMap[m.id];
+      if (!currentProg || currentProg.status !== 'downloading') {
+        handleStartDownloadModel(m.id);
+      }
+    }
+  };
+
+  const handleSaveModelsDir = async () => {
+    await onUpdateSetting('models_dir', modelsDirInput.trim());
+    fetchModels(modelsDirInput.trim() || undefined);
+  };
+
+  const handleResetModelsDir = async () => {
+    setModelsDirInput('');
+    await onUpdateSetting('models_dir', '');
+    fetchModels('');
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm animate-fade-in select-none">
       <div className="w-[840px] max-h-[88vh] bg-[#0f1011] border border-[#23252a] rounded-[12px] shadow-2xl flex flex-col overflow-hidden">
@@ -113,6 +232,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="px-5 border-b border-[#23252a] flex gap-4 bg-[#0f1011]">
           {[
             { id: 'engines', label: 'Engines', icon: Cpu },
+            { id: 'models', label: 'Models', icon: HardDrive },
             { id: 'prompts', label: 'System Prompts', icon: MessageSquareCode },
             { id: 'twitch', label: 'Twitch', icon: Radio },
             { id: 'preferences', label: 'Preferences', icon: Sliders },
@@ -253,7 +373,226 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           )}
 
-          {/* 2. System Prompts タブ */}
+          {/* 2. Models タブ */}
+          {activeTab === 'models' && (
+            <div className="flex flex-col gap-4">
+              {/* モデル保存先ディレクトリ設定 */}
+              <div className="p-3 rounded-[8px] bg-[#08090a] border border-[#23252a] flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-[#e4f222]" />
+                    <span className="text-white font-semibold">Model Storage Directory (モデル保存先)</span>
+                  </div>
+                  <span className="text-[11px] text-[#62666d]">デフォルト: ./models</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={modelsDirInput}
+                    onChange={(e) => setModelsDirInput(e.target.value)}
+                    placeholder="例: C:\Workspace\GameAssistant\models (未指定時はデフォルト)"
+                    className="linear-input py-1.5 px-2.5 bg-[#0f1011] text-[#d0d6e0] font-mono text-xs flex-1 border border-[#23252a] focus:border-[#e4f222]"
+                  />
+                  <button
+                    onClick={handleSaveModelsDir}
+                    className="px-3 py-1.5 linear-btn-primary text-xs font-semibold shrink-0"
+                  >
+                    Set Path
+                  </button>
+                  {modelsDirInput && (
+                    <button
+                      onClick={handleResetModelsDir}
+                      className="px-2.5 py-1.5 linear-btn-ghost text-xs text-[#8a8f98] hover:text-white shrink-0"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+                <div className="text-[11px] text-[#62666d] leading-relaxed">
+                  ASR（音声認識）、Embedding（記憶ベクトル）、LLM等の重みファイルが保存・参照されるフォルダです。大容量ドライブに変更可能です。
+                </div>
+              </div>
+
+              {/* 一括操作 & ステータスバー */}
+              <div className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#161718] border border-[#23252a]">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-[#d0d6e0] font-medium">
+                    Models Ready: <span className="text-[#e4f222] font-semibold">{modelsList.filter((m) => m.is_installed).length}</span> / {modelsList.length}
+                  </span>
+                  {modelsList.some((m) => m.required && !m.is_installed) && (
+                    <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-red-500/20 text-red-400 border border-red-500/30">
+                      ⚠️ 必須モデルが不足しています
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => fetchModels()}
+                    disabled={isRefreshingModels}
+                    className="px-2.5 py-1 linear-btn-ghost text-xs text-[#8a8f98] hover:text-white flex items-center gap-1.5"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingModels ? 'animate-spin' : ''}`} />
+                    <span>Check</span>
+                  </button>
+                  {modelsList.some((m) => !m.is_installed) && (
+                    <button
+                      onClick={handleDownloadAllMissing}
+                      className="px-3.5 py-1 linear-btn-primary text-xs font-semibold flex items-center gap-1.5 shadow-lg shadow-[#e4f222]/10"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download All Missing</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* モデル一覧カード */}
+              <div className="flex flex-col gap-3">
+                {modelsList.map((model) => {
+                  const prog = downloadProgressMap[model.id];
+                  const isDownloading = prog?.status === 'downloading';
+                  const isError = prog?.status === 'error';
+                  const isCancelled = prog?.status === 'cancelled';
+
+                  const formatBytes = (bytes: number) => {
+                    if (bytes === 0) return '0 B';
+                    const k = 1024;
+                    const sizes = ['B', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(k));
+                    return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+                  };
+
+                  return (
+                    <div
+                      key={model.id}
+                      className={`p-3.5 rounded-[8px] bg-[#08090a] border transition-all flex flex-col gap-2.5 ${
+                        isDownloading
+                          ? 'border-[#e4f222]/50 ring-1 ring-[#e4f222]/20'
+                          : model.is_installed
+                          ? 'border-[#23252a] hover:border-[#383b3f]'
+                          : 'border-red-500/30 bg-red-950/5'
+                      }`}
+                    >
+                      {/* 上段: タイトル & バッジ & アクション */}
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-white font-semibold text-xs">{model.name}</span>
+                            <span
+                              className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                                model.category === 'ASR'
+                                  ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                                  : model.category === 'Embedding'
+                                  ? 'bg-purple-500/15 text-purple-400 border border-purple-500/30'
+                                  : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                              }`}
+                            >
+                              {model.category}
+                            </span>
+                            {model.required && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-red-500/20 text-red-400 border border-red-500/30">
+                                Required
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-[#8a8f98] mt-1 leading-relaxed">
+                            {model.description}
+                          </div>
+                          <div className="flex items-center gap-3 text-[10px] font-mono text-[#62666d] mt-1.5">
+                            <span>HF: {model.hf_repo}</span>
+                            <span>•</span>
+                            <span>
+                              Size: {model.is_installed ? formatBytes(model.actual_size_bytes) : `~${formatBytes(model.estimated_size_bytes)}`}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* ステータス & ボタン */}
+                        <div className="flex flex-col items-end gap-2 shrink-0">
+                          {isDownloading ? (
+                            <button
+                              onClick={() => handleCancelDownloadModel(model.id)}
+                              className="px-3 py-1 rounded bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/40 text-xs font-semibold flex items-center gap-1"
+                            >
+                              <XCircle className="w-3.5 h-3.5" />
+                              <span>Cancel</span>
+                            </button>
+                          ) : model.is_installed ? (
+                            <div className="flex items-center gap-2">
+                              <span className="flex items-center gap-1 text-[11px] text-[#4ade80] font-medium bg-[#27a644]/10 border border-[#27a644]/30 px-2 py-0.5 rounded-full">
+                                <CheckCircle2 className="w-3 h-3" />
+                                <span>Ready</span>
+                              </span>
+                              <button
+                                onClick={() => handleStartDownloadModel(model.id)}
+                                className="px-2 py-0.5 linear-btn-ghost text-[10px] text-[#8a8f98] hover:text-white"
+                                title="モデルを再ダウンロードします"
+                              >
+                                Re-download
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              onClick={() => handleStartDownloadModel(model.id)}
+                              className="px-3 py-1 linear-btn-primary text-xs font-semibold flex items-center gap-1.5 shadow-md shadow-[#e4f222]/15"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>Download</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* ダウンロード進捗バー */}
+                      {isDownloading && (
+                        <div className="mt-1 p-2.5 rounded-[6px] bg-[#0f1011] border border-[#23252a] flex flex-col gap-1.5 animate-fade-in">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-[#d0d6e0] font-mono flex items-center gap-1.5">
+                              <Loader2 className="w-3.5 h-3.5 text-[#e4f222] animate-spin" />
+                              <span>Downloading from Hugging Face...</span>
+                            </span>
+                            <div className="flex items-center gap-2 font-mono text-[#e4f222] font-semibold">
+                              <span>{prog.speed_mbps.toFixed(1)} MB/s</span>
+                              <span>•</span>
+                              <span>{prog.percent.toFixed(1)}%</span>
+                            </div>
+                          </div>
+                          {/* プログレスバー */}
+                          <div className="w-full h-1.5 bg-[#161718] rounded-full overflow-hidden border border-[#23252a]">
+                            <div
+                              className="h-full bg-[#e4f222] transition-all duration-200"
+                              style={{ width: `${Math.max(2, prog.percent)}%` }}
+                            />
+                          </div>
+                          <div className="flex justify-between text-[10px] font-mono text-[#62666d]">
+                            <span>{formatBytes(prog.current_bytes)}</span>
+                            <span>{formatBytes(prog.total_bytes)}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* エラー表示 */}
+                      {isError && (
+                        <div className="text-[11px] text-red-400 bg-red-950/30 p-2 rounded border border-red-500/30 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                          <span>エラー: {prog.error_message || 'ダウンロードに失敗しました (ミラーの接続を確認してください)'}</span>
+                        </div>
+                      )}
+
+                      {isCancelled && (
+                        <div className="text-[11px] text-[#8a8f98] bg-[#161718] p-1.5 rounded border border-[#23252a]">
+                          ダウンロードがキャンセルされました
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* 3. System Prompts タブ */}
           {activeTab === 'prompts' && (
             <PromptsTab
               prompts={prompts}

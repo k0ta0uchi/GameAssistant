@@ -24,18 +24,41 @@ logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logger = logging.getLogger("ASR-Server")
 logger.setLevel(logging.INFO)
 
-MODEL_ID = "kotoba-tech/kotoba-whisper-v2.0-faster"
+# モデル保存先ディレクトリの取得
+def get_models_dir() -> str:
+    # 1. 環境変数
+    if "MODELS_DIR" in os.environ and os.path.exists(os.environ["MODELS_DIR"]):
+        return os.environ["MODELS_DIR"]
+    # 2. settings.json
+    try:
+        if os.path.exists("settings.json"):
+            with open("settings.json", "r", encoding="utf-8") as f:
+                st = json.load(f)
+                if "models_dir" in st and os.path.exists(st["models_dir"]):
+                    return st["models_dir"]
+    except Exception:
+        pass
+    # 3. デフォルト
+    return "./models"
+
+MODELS_DIR = get_models_dir()
 PORT = 18088
 
 # 1. Faster-Whisper ASR モデルロード
-logger.info(f"Loading Faster-Whisper model from: {MODEL_ID} (CUDA INT8)...")
+local_whisper_path = os.path.join(MODELS_DIR, "kotoba-whisper-v2.0-faster")
+if os.path.exists(local_whisper_path) and (os.path.exists(os.path.join(local_whisper_path, "model.bin")) or os.path.exists(os.path.join(local_whisper_path, "model.safetensors"))):
+    whisper_model_source = local_whisper_path
+    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)...")
+else:
+    whisper_model_source = "kotoba-tech/kotoba-whisper-v2.0-faster"
+    logger.info(f"Loading Faster-Whisper model from Hugging Face: {whisper_model_source} (CUDA INT8)...")
 
 try:
-    whisper_model = WhisperModel(MODEL_ID, device="cuda", compute_type="int8")
+    whisper_model = WhisperModel(whisper_model_source, device="cuda", compute_type="int8")
     logger.info("Faster-Whisper model successfully loaded on CUDA (INT8)!")
 except Exception as e:
     logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU INT8...")
-    whisper_model = WhisperModel(MODEL_ID, device="cpu", compute_type="int8")
+    whisper_model = WhisperModel(whisper_model_source, device="cpu", compute_type="int8")
 
 # 2. GLuCoSE-base-ja ローカル Embedding モデル
 _embedding_model = None
@@ -43,14 +66,14 @@ _embedding_model = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        local_path = "./models/GLuCoSE-base-ja"
+        local_path = os.path.join(get_models_dir(), "GLuCoSE-base-ja")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if os.path.exists(local_path):
             model_name = local_path
             logger.info(f"Loading local embedding model from: {model_name} ({device})...")
         else:
             model_name = "pkshatech/GLuCoSE-base-ja"
-            logger.info(f"Loading embedding model: {model_name} ({device})...")
+            logger.info(f"Loading embedding model from Hugging Face: {model_name} ({device})...")
         try:
             _embedding_model = SentenceTransformer(model_name, device=device)
             logger.info(f"GLuCoSE-base-ja embedding model successfully loaded on {device}!")

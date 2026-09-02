@@ -36,8 +36,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "../scripts/*",
-      "../skills/*"
+      "../scripts/*"
     ]
   }
 }

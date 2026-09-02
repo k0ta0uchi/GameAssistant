@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { SystemStatus, ResourceInfo, WsMessage, LogEntry, PromptItem, AsrEntry } from '../types';
+import { SystemStatus, ResourceInfo, WsMessage, LogEntry, PromptItem, AsrEntry, ModelStatus } from '../types';
 import { useWebSocket } from './useWebSocket';
 
 const API_BASE = 'http://127.0.0.1:18080';
@@ -15,6 +15,10 @@ export function useAppState() {
 
   // プロンプト設定
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
+
+  // モデル状態
+  const [modelsStatus, setModelsStatus] = useState<ModelStatus[]>([]);
+  const [missingRequiredModels, setMissingRequiredModels] = useState<boolean>(false);
 
   // システム状態
   const [status, setStatus] = useState<SystemStatus>({
@@ -550,9 +554,25 @@ export function useAppState() {
     }
   }, []);
 
+  const fetchModelsStatus = useCallback(async () => {
+    try {
+      if (isTauriEnv()) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const list = await invoke<ModelStatus[]>('get_models_status', { customDir: null });
+        setModelsStatus(list);
+        const hasMissing = list.some((m) => m.required && !m.is_installed);
+        setMissingRequiredModels(hasMissing);
+        return list;
+      }
+    } catch (e) {
+      console.warn('Failed to fetch models status:', e);
+    }
+    return [];
+  }, []);
+
   const fetchAllData = useCallback(async () => {
     await fetchSettings();
-    await Promise.all([fetchDevices(), fetchWindows(), fetchPrompts()]);
+    await Promise.all([fetchDevices(), fetchWindows(), fetchPrompts(), fetchModelsStatus()]);
     fetchLogs();
 
     // GUI 画面の初期描画完了後に、バックグラウンドで ASR ウォームアップを非同期トリガー（完全一意実行）
@@ -568,7 +588,7 @@ export function useAppState() {
         });
       }, 500);
     }
-  }, [fetchSettings, fetchDevices, fetchWindows, fetchPrompts, fetchLogs, showToast]);
+  }, [fetchSettings, fetchDevices, fetchWindows, fetchPrompts, fetchModelsStatus, fetchLogs, showToast]);
 
   useEffect(() => {
     fetchAllData();
@@ -760,5 +780,8 @@ export function useAppState() {
     clearLogs,
     toast,
     showToast,
+    modelsStatus,
+    missingRequiredModels,
+    fetchModelsStatus,
   };
 }

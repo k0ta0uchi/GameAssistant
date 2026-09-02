@@ -40,10 +40,17 @@ export function App() {
     fetchPreview,
     clearLogs,
     toast,
+    missingRequiredModels,
   } = useAppState();
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'engines' | 'models' | 'prompts' | 'twitch' | 'preferences' | 'blog_skills'>('engines');
   const [isMemoryOpen, setIsMemoryOpen] = useState(false);
+
+  const handleOpenSettings = (tab: 'engines' | 'models' | 'prompts' | 'twitch' | 'preferences' | 'blog_skills' = 'engines') => {
+    setSettingsInitialTab(tab);
+    setIsSettingsOpen(true);
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#08090a] text-[#d0d6e0]">
@@ -73,13 +80,33 @@ export function App() {
         onFetchPreview={fetchPreview}
         vram={vram}
         ram={ram}
-        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenSettings={() => handleOpenSettings('engines')}
         onOpenMemory={() => setIsMemoryOpen(true)}
         isConnected={isConnected}
       />
 
       {/* メインエリア (右側: 上部ダッシュボード + 下部ログコンソール) */}
       <main className="flex-1 flex flex-col h-screen overflow-hidden">
+        {/* 必須モデル未ダウンロード時の警告バナー */}
+        {missingRequiredModels && (
+          <div className="bg-red-950/40 border-b border-red-500/40 px-4 py-2 flex items-center justify-between text-xs text-red-200 animate-fade-in z-20">
+            <div className="flex items-center gap-2 font-medium">
+              <span className="flex h-2 w-2 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+              </span>
+              <span>⚠️ 音声認識・埋め込みモデル（Kotoba-Whisper / GLuCoSE）が未ダウンロードです。</span>
+            </div>
+            <button
+              onClick={() => handleOpenSettings('models')}
+              className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-white border border-red-500/40 rounded text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+            >
+              <span>モデル設定を開いてダウンロード</span>
+              <span>→</span>
+            </button>
+          </div>
+        )}
+
         <MainDashboard
           status={status}
           geminiResponse={geminiResponse}
@@ -101,6 +128,7 @@ export function App() {
         prompts={prompts}
         onSavePrompt={savePrompt}
         onResetPrompt={resetPrompt}
+        initialTab={settingsInitialTab}
       />
 
       {/* 記憶管理モーダル */}

@@ -129,11 +129,12 @@ impl WhisperWsClient {
             return Err(format!("ASR server script not found at: {:?}", script_path));
         }
 
-        println!("[INFO] [ASR] Spawning Faster-Whisper ASR server: {:?} with python: {:?}", script_path, python_path);
+        let models_dir = crate::model_manager::ModelManager::get_effective_models_dir(&root_dir, None);
 
         let mut cmd = Command::new(&python_path);
         cmd.arg(&script_path)
             .current_dir(&root_dir)
+            .env("MODELS_DIR", models_dir.to_string_lossy().to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 

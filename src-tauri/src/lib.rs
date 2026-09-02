@@ -13,6 +13,8 @@ pub mod asr;
 pub mod audio_input;
 pub mod prompts;
 
+pub mod model_manager;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +31,7 @@ use web_search::{WebSearchClient, WebSearchResponse};
 use ai_client::{AiClient, AiGenerateOptions, ChatMessage};
 use session::{SessionEvent, SessionManager};
 use logger::{LogEntry, LogManager};
+use model_manager::{ModelManager, ModelStatus};
 
 struct AppState {
     root_dir: PathBuf,
@@ -39,6 +42,7 @@ struct AppState {
     ai_client: Arc<AiClient>,
     session_mgr: Arc<SessionManager>,
     log_mgr: Arc<LogManager>,
+    model_mgr: Arc<ModelManager>,
 }
 
 pub fn resolve_project_root() -> PathBuf {
@@ -372,6 +376,37 @@ async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
     Ok("Whisper GPU worker restarted successfully".to_string())
 }
 
+// --- モデル管理 (Models Manager) ---
+#[tauri::command]
+fn get_models_status(state: State<AppState>, custom_dir: Option<String>) -> Vec<ModelStatus> {
+    ModelManager::scan_models_status(&state.root_dir, custom_dir)
+}
+
+#[tauri::command]
+async fn download_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    model_id: String,
+    custom_dir: Option<String>,
+) -> Result<(), String> {
+    let model_mgr = state.model_mgr.clone();
+    let root_dir = state.root_dir.clone();
+    state.log_mgr.info("Model", &format!("Starting download for model: {}", model_id));
+    let res = model_mgr.download_model(app, root_dir, model_id.clone(), custom_dir).await;
+    if let Err(ref e) = res {
+        state.log_mgr.error("Model", &format!("Failed to download {}: {}", model_id, e));
+    } else {
+        state.log_mgr.info("Model", &format!("Successfully downloaded model: {}", model_id));
+    }
+    res
+}
+
+#[tauri::command]
+fn cancel_download_model(state: State<AppState>, model_id: String) {
+    state.log_mgr.info("Model", &format!("Cancelled download for model: {}", model_id));
+    state.model_mgr.cancel_download(&model_id);
+}
+
 #[tauri::command]
 fn session_get_events(state: State<AppState>) -> Vec<SessionEvent> {
     state.session_mgr.get_events()
@@ -471,6 +506,7 @@ pub fn run() {
     let web_search_client = Arc::new(WebSearchClient::new());
     let ai_client = Arc::new(AiClient::new());
     let session_mgr = Arc::new(SessionManager::new(root_dir.clone(), tts_mgr.clone(), log_mgr.clone()));
+    let model_mgr = Arc::new(ModelManager::new());
 
     let app_state = AppState {
         root_dir: root_dir.clone(),
@@ -481,6 +517,7 @@ pub fn run() {
         ai_client,
         session_mgr: session_mgr.clone(),
         log_mgr: log_mgr.clone(),
+        model_mgr,
     };
 
     tauri::Builder::default()
@@ -528,6 +565,9 @@ pub fn run() {
             session_generate_blog,
             warmup_asr,
             restart_whisper,
+            get_models_status,
+            download_model,
+            cancel_download_model,
             get_app_logs,
             clear_app_logs,
         ])
