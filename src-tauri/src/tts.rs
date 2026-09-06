@@ -1,18 +1,18 @@
+use rodio::{Decoder, OutputStream, Sink};
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use rodio::{Decoder, OutputStream, Sink};
-use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TtsSettings {
-    pub tts_engine: String,       // "voicevox" | "style_bert_vits2" | "gemini"
-    pub speaker_id: i32,          // VOICEVOX speaker id (default: 46)
-    pub vits2_speaker_id: i32,    // Style-Bert-VITS2 speaker id (default: 0)
-    pub voicevox_url: String,     // default "http://127.0.0.1:50021"
+    pub tts_engine: String,    // "voicevox" | "style_bert_vits2" | "gemini"
+    pub speaker_id: i32,       // VOICEVOX speaker id (default: 46)
+    pub vits2_speaker_id: i32, // Style-Bert-VITS2 speaker id (default: 0)
+    pub voicevox_url: String,  // default "http://127.0.0.1:50021"
 }
 
 impl Default for TtsSettings {
@@ -35,6 +35,12 @@ pub struct TtsManager {
     client: reqwest::Client,
     tx: mpsc::UnboundedSender<AudioCommand>,
     is_speaking: Arc<AtomicBool>,
+}
+
+impl Default for TtsManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TtsManager {
@@ -147,7 +153,10 @@ impl TtsManager {
                     .await
                     .map_err(|e| format!("Failed to parse query JSON: {}", e))?;
 
-                let synth_url = format!("{}/synthesis?speaker={}", base_url, settings.vits2_speaker_id);
+                let synth_url = format!(
+                    "{}/synthesis?speaker={}",
+                    base_url, settings.vits2_speaker_id
+                );
                 let synth_res = self
                     .client
                     .post(&synth_url)
@@ -218,7 +227,10 @@ impl TtsManager {
     pub async fn play_random_nod(&self, root_dir: &Path) -> Result<(), String> {
         let nod_indices = [0, 1, 2, 4, 5];
         let idx = nod_indices[rand::random::<usize>() % nod_indices.len()];
-        let nod_path = root_dir.join("wav").join("nod").join(format!("{}.wav", idx));
+        let nod_path = root_dir
+            .join("wav")
+            .join("nod")
+            .join(format!("{}.wav", idx));
 
         if nod_path.exists() {
             if let Ok(bytes) = tokio::fs::read(&nod_path).await {

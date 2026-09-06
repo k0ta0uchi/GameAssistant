@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
@@ -48,6 +48,12 @@ pub struct TwitchService {
     app_handle: Arc<Mutex<Option<AppHandle>>>,
 }
 
+impl Default for TwitchService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TwitchService {
     pub fn new() -> Self {
         Self {
@@ -73,7 +79,10 @@ impl TwitchService {
     }
 
     /// アクセストークンの検証
-    pub async fn validate_token(&self, access_token: &str) -> Result<TwitchValidateResponse, String> {
+    pub async fn validate_token(
+        &self,
+        access_token: &str,
+    ) -> Result<TwitchValidateResponse, String> {
         let clean_token = access_token.trim().trim_start_matches("oauth:");
         let resp = self
             .http_client
@@ -181,7 +190,8 @@ impl TwitchService {
 
         let raw = format!("PRIVMSG {} :{}\r\n", chan, message);
         if let Some(tx) = self.sender.lock().as_ref() {
-            tx.send(raw).map_err(|e| format!("Failed to send chat: {}", e))?;
+            tx.send(raw)
+                .map_err(|e| format!("Failed to send chat: {}", e))?;
             Ok(())
         } else {
             Err("No sender channel available".to_string())
@@ -247,10 +257,24 @@ impl TwitchService {
         } else {
             format!("PASS {}\r\n", token)
         };
-        write.send(Message::Text(pass_cmd)).await.map_err(|e| e.to_string())?;
-        write.send(Message::Text(format!("NICK {}\r\n", nick))).await.map_err(|e| e.to_string())?;
-        write.send(Message::Text("CAP REQ :twitch.tv/tags twitch.tv/commands\r\n".to_string())).await.map_err(|e| e.to_string())?;
-        write.send(Message::Text(format!("JOIN {}\r\n", chan_with_hash))).await.map_err(|e| e.to_string())?;
+        write
+            .send(Message::Text(pass_cmd))
+            .await
+            .map_err(|e| e.to_string())?;
+        write
+            .send(Message::Text(format!("NICK {}\r\n", nick)))
+            .await
+            .map_err(|e| e.to_string())?;
+        write
+            .send(Message::Text(
+                "CAP REQ :twitch.tv/tags twitch.tv/commands\r\n".to_string(),
+            ))
+            .await
+            .map_err(|e| e.to_string())?;
+        write
+            .send(Message::Text(format!("JOIN {}\r\n", chan_with_hash)))
+            .await
+            .map_err(|e| e.to_string())?;
 
         let is_connected = self.is_connected.clone();
 
@@ -305,7 +329,7 @@ impl TwitchService {
                 }
             }
             is_connected.store(false, Ordering::SeqCst);
-            let _ = write_task.abort();
+            write_task.abort();
         });
 
         Ok(())
@@ -345,7 +369,11 @@ pub fn parse_irc_privmsg(raw: &str, default_channel: &str) -> Option<TwitchChatM
     let timestamp = chrono::Local::now().to_rfc3339();
 
     Some(TwitchChatMessage {
-        channel: if channel.is_empty() { default_channel.to_string() } else { channel },
+        channel: if channel.is_empty() {
+            default_channel.to_string()
+        } else {
+            channel
+        },
         author,
         content,
         is_mod,
@@ -353,4 +381,3 @@ pub fn parse_irc_privmsg(raw: &str, default_channel: &str) -> Option<TwitchChatM
         timestamp,
     })
 }
-

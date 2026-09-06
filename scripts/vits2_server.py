@@ -1,26 +1,84 @@
-# -*- coding: utf-8 -*-
-import os
-import json
 import logging
+import os
+import stat
 import sys
 import time
-from typing import Optional, List
-from fastapi import FastAPI, Request, Response, Query
-from fastapi.responses import JSONResponse
-import uvicorn
-import torch
-import numpy as np
+from pathlib import Path
+from typing import Mapping, Optional
 
-# インポート前に環境変数を設定
-MODEL_DIR = "models/vits2"
+import numpy as np
+import torch
+import uvicorn
+from fastapi import FastAPI, Query, Request, Response
+from fastapi.responses import JSONResponse
+
+
+class ModelsDirError(RuntimeError):
+    """MODELS_DIR が未設定・空・相対パスのときの起動失敗 (fail closed)。"""
+
+
+def resolve_models_root(environ: Optional[Mapping[str, str]] = None) -> str:
+    """MODELS_DIR を厳格に解決する (fail closed)。
+
+    ポータブル不変則: モデル保存先は必ず明示的に設定された「絶対パス」の
+    MODELS_DIR からのみ得る。未設定・空文字・相対パスの場合は、CWD 相対の
+    任意のユーザープロファイルや作業ディレクトリへの暗黙フォールバックを禁止するため、
+    いかなる推測も行わず例外で起動を失敗させる。エラーメッセージには
+    設定値そのものを含めない (秘密情報の混入を防ぐ)。
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get("MODELS_DIR")
+    if raw is None or not raw.strip():
+        raise ModelsDirError(
+            "MODELS_DIR is not set or empty: refusing to start. "
+            "Set MODELS_DIR to an absolute directory path that contains "
+            "the vits2 models (no implicit profile or CWD fallback is allowed)."
+        )
+    if not Path(raw).is_absolute():
+        raise ModelsDirError(
+            "MODELS_DIR must be an absolute path; relative paths are "
+            "rejected (no CWD-relative fallback is allowed). Set MODELS_DIR "
+            "to an absolute directory path that contains the vits2 models."
+        )
+    resolved = os.path.abspath(raw)
+    if has_link_component(Path(resolved)):
+        raise ModelsDirError(
+            "MODELS_DIR contains a symlink or reparse point; refusing to start."
+        )
+    return resolved
+
+
+def has_link_component(path: Path) -> bool:
+    """Return true when an existing component is a link/reparse point."""
+    current = Path(path.anchor) if path.anchor else Path()
+    for component in path.parts[1:] if path.anchor else path.parts:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or (
+            getattr(metadata, "st_file_attributes", 0) & 0x400
+        ):
+            return True
+    return False
+
+
+# モデル保存先は ASR と同じ MODELS_DIR 契約を使う。未設定・空・相対パスは
+# モデル解決の前にこの時点で fail closed し、CWD 相対 ./models への
+# 黙示フォールバックは行わない。
+MODELS_ROOT = resolve_models_root()
+MODEL_DIR = os.path.join(MODELS_ROOT, "vits2")
 BERT_DIR = os.path.abspath(os.path.join(MODEL_DIR, "bert"))
+if has_link_component(Path(BERT_DIR)):
+    raise ModelsDirError("the portable BERT path contains a symlink or reparse point")
 os.environ["BERT_MODELS_DIR"] = BERT_DIR
 
 # Style-Bert-VITS2 関連のインポート
 try:
-    from style_bert_vits2.tts_model import TTSModel
     from style_bert_vits2.constants import Languages
     from style_bert_vits2.nlp import bert_models
+    from style_bert_vits2.tts_model import TTSModel
 except ImportError as e:
     logging.critical(f"style-bert-vits2 のインポートに失敗しました: {e}", exc_info=True)
     sys.exit(1)
@@ -36,6 +94,7 @@ speakers_info = []
 # BERTモデルがロード済みかどうかのフラグ
 bert_loaded = False
 
+
 def scan_models():
     """ディレクトリをスキャンして利用可能なモデルのリストを作成する"""
     global speakers_info, model_configs_cache
@@ -43,75 +102,102 @@ def scan_models():
     model_configs_cache.clear()
 
     if not os.path.exists(MODEL_DIR):
-        os.makedirs(MODEL_DIR)
+        try:
+            os.makedirs(MODEL_DIR)
+        except OSError as e:
+            logging.error(f"モデルディレクトリの作成に失敗しました: {MODEL_DIR}: {e}")
+            raise
         return
 
     logging.info(f"モデルディレクトリをスキャン中: {MODEL_DIR}")
     speaker_id_counter = 0
-    
-    for model_name in os.listdir(MODEL_DIR):
+
+    try:
+        model_names = os.listdir(MODEL_DIR)
+    except OSError as e:
+        logging.error(f"モデルディレクトリのスキャンに失敗しました: {MODEL_DIR}: {e}")
+        raise
+    for model_name in model_names:
         model_path = os.path.join(MODEL_DIR, model_name)
         if os.path.isdir(model_path) and model_name not in [".cache", "bert"]:
             config_file = os.path.join(model_path, "config.json")
             style_vec_path = os.path.join(model_path, "style_vectors.npy")
-            
+
             if not os.path.exists(config_file) or not os.path.exists(style_vec_path):
                 continue
 
             model_file = None
             for ext in [".safetensors", ".onnx"]:
-                found_files = [f for f in os.listdir(model_path) if f.endswith(ext) and not f.startswith(("D_", "WD_"))]
+                try:
+                    dir_entries = os.listdir(model_path)
+                except OSError as e:
+                    logging.warning(
+                        f"モデルディレクトリの読み取りに失敗したためスキップします: {model_path}: {e}"
+                    )
+                    continue
+                found_files = [
+                    f
+                    for f in dir_entries
+                    if f.endswith(ext) and not f.startswith(("D_", "WD_"))
+                ]
                 if found_files:
                     g_files = [f for f in found_files if f.startswith("G_")]
-                    model_file = os.path.join(model_path, sorted(g_files)[-1] if g_files else found_files[0])
+                    model_file = os.path.join(
+                        model_path, sorted(g_files)[-1] if g_files else found_files[0]
+                    )
                     break
-            
+
             if model_file:
                 model_configs_cache[speaker_id_counter] = {
                     "model_path": model_file,
                     "config_path": config_file,
                     "style_vec_path": style_vec_path,
-                    "name": model_name
+                    "name": model_name,
                 }
                 # 話者リストに追加（わんコメ等の外部アプリ互換性のため拡張）
-                speakers_info.append({
-                    "name": model_name,
-                    "speaker_uuid": f"vits2-{model_name}", # 簡易的なUUID
-                    "styles": [
-                        {
-                            "name": "Normal", 
-                            "id": speaker_id_counter,
-                            "type": "talk" # 必須フィールド
-                        }
-                    ],
-                    "version": "1.0.0",
-                    "supported_features": {
-                        "permitted_synthesis_morphing": "ALL" # 必須フィールド
+                speakers_info.append(
+                    {
+                        "name": model_name,
+                        "speaker_uuid": f"vits2-{model_name}",  # 簡易的なUUID
+                        "styles": [
+                            {
+                                "name": "Normal",
+                                "id": speaker_id_counter,
+                                "type": "talk",  # 必須フィールド
+                            }
+                        ],
+                        "version": "1.0.0",
+                        "supported_features": {
+                            "permitted_synthesis_morphing": "ALL"  # 必須フィールド
+                        },
                     }
-                })
+                )
                 speaker_id_counter += 1
 
     logging.info(f"スキャン完了。見つかったモデル数: {len(speakers_info)}")
+
 
 def ensure_model_loaded(speaker_id: int):
     """リクエストされたモデルとBERTが必要な場合にロードする"""
     global bert_loaded, models
     start_time = time.time()
-    
+
     # 1. BERTのロード
     if not bert_loaded:
         try:
             # os.sep を使用してパス区切り文字の問題を回避
-            bert_pt_dir = os.path.relpath(os.path.join(BERT_DIR, "deberta-v2-large-japanese-char-wwm")).replace(os.sep, "/")
+            bert_pt_dir = os.path.join(
+                BERT_DIR, "deberta-v2-large-japanese-char-wwm"
+            ).replace(os.sep, "/")
             logging.info(f"BERTモデル(PyTorch)のロードを開始します: {bert_pt_dir}")
-            
-            if os.path.exists(bert_pt_dir):
-                bert_models.load_tokenizer(Languages.JP, bert_pt_dir)
-                bert_models.load_model(Languages.JP, bert_pt_dir)
-            else:
-                logging.info("指定されたBERTパスが見つからないためデフォルトをロードします...")
-                bert_models.load_bert_models()
-            
+
+            if not os.path.isdir(bert_pt_dir) or has_link_component(Path(bert_pt_dir)):
+                raise FileNotFoundError(
+                    "portable BERT model is missing or unsafe; install it under MODELS_DIR"
+                )
+            bert_models.load_tokenizer(Languages.JP, bert_pt_dir)
+            bert_models.load_model(Languages.JP, bert_pt_dir)
+
             bert_loaded = True
             logging.info(f"BERTモデルロード完了 ({time.time() - start_time:.2f}秒)")
         except Exception as e:
@@ -122,26 +208,27 @@ def ensure_model_loaded(speaker_id: int):
     if speaker_id not in models:
         if speaker_id not in model_configs_cache:
             raise ValueError(f"Speaker ID {speaker_id} not found.")
-            
+
         conf = model_configs_cache[speaker_id]
         model_start_time = time.time()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logging.info(f"モデル '{conf['name']}' を {device} にロード中...")
-        
+
         try:
             model = TTSModel(
                 model_path=conf["model_path"],
                 config_path=conf["config_path"],
                 style_vec_path=conf["style_vec_path"],
-                device=device
+                device=device,
             )
-            
+
             # torch.compile (PyTorch 2.0+ & CUDA)
             if hasattr(torch, "compile") and device == "cuda":
                 try:
                     logging.info("モデル最適化中 (torch.compile)...")
                     # TTSModel 内部の Generator (net_g) をコンパイル
-                    model.net_g = torch.compile(model.net_g)
+                    # (net_g は TTSModel.__init__ で動的に生える属性のため type: ignore)
+                    model.net_g = torch.compile(model.net_g)  # type: ignore[attr-defined]
                     logging.info("最適化が有効になりました。")
                 except Exception as e:
                     logging.warning(f"最適化失敗（スキップ）: {e}")
@@ -157,15 +244,19 @@ def ensure_model_loaded(speaker_id: int):
             logging.warning(f"暖機運転中にエラー: {e}")
 
         models[speaker_id] = model
-        logging.info(f"モデル '{conf['name']}' 準備完了 ({time.time() - model_start_time:.2f}秒)")
-    
+        logging.info(
+            f"モデル '{conf['name']}' 準備完了 ({time.time() - model_start_time:.2f}秒)"
+        )
+
     total_time = time.time() - start_time
     if total_time > 0.5:
         logging.info(f"ロードプロセス終了 (総計: {total_time:.2f}秒)")
 
+
 @app.get("/speakers")
 async def get_speakers():
     return speakers_info
+
 
 @app.post("/initialize")
 def initialize_model(speaker: int = Query(0)):
@@ -176,6 +267,7 @@ def initialize_model(speaker: int = Query(0)):
         logging.error(f"事前ロード失敗: {e}")
         return JSONResponse(status_code=500, content={"detail": str(e)})
 
+
 @app.post("/audio_query")
 def audio_query(text: str, speaker: int):
     return {
@@ -185,8 +277,9 @@ def audio_query(text: str, speaker: int):
         "pitchScale": 0.0,
         "intonationScale": 1.0,
         "volumeScale": 1.0,
-        "outputSamplingRate": 44100
+        "outputSamplingRate": 44100,
     }
+
 
 @app.post("/synthesis")
 async def synthesis(request: Request, speaker: int):
@@ -199,42 +292,45 @@ async def synthesis(request: Request, speaker: int):
 
         # ロードと推論を同期的に実行
         ensure_model_loaded(speaker)
-        
+
         if speaker not in models:
-             raise RuntimeError(f"Speaker ID {speaker} not loaded.")
-             
+            raise RuntimeError(f"Speaker ID {speaker} not loaded.")
+
         model = models[speaker]
-        
+
         # デバッグログ：使用中のモデル名を確認
         model_name = model_configs_cache.get(speaker, {}).get("name", "Unknown")
         logging.info(f"合成に使用中のモデル: {model_name} (ID: {speaker})")
-        
+
         sr, wav = model.infer(
             text=text,
             language=Languages.JP,
             speaker_id=0,
-            sdp_ratio=0.0,      # リズムを固定して噛み・崩れを防止
-            noise=0.5,          # ノイズを抑えてクリアな声に
-            noise_w=0.9,        # 抑揚の強さ（デフォルト付近で維持）
-            length=(1.0 / speed_scale) * 1.1 if speed_scale > 0 else 1.1 # 1.1倍に
+            sdp_ratio=0.0,  # リズムを固定して噛み・崩れを防止
+            noise=0.5,  # ノイズを抑えてクリアな声に
+            noise_w=0.9,  # 抑揚の強さ（デフォルト付近で維持）
+            length=(1.0 / speed_scale) * 1.1 if speed_scale > 0 else 1.1,  # 1.1倍に
         )
-        
+
         # 正規化（ノイズ対策）
         wav = wav.astype(np.float32)
         max_val = np.abs(wav).max()
         if max_val > 0:
             wav = (wav / max_val) * 0.9
-        
+
         wav_int16 = (wav * 32767).astype(np.int16)
-        
+
         import io
+
         import scipy.io.wavfile as wavfile
+
         byte_io = io.BytesIO()
         wavfile.write(byte_io, sr, wav_int16)
         return Response(content=byte_io.getvalue(), media_type="audio/wav")
     except Exception as e:
         logging.error(f"合成エラー: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"detail": str(e)})
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)

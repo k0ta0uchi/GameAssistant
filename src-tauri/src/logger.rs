@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use chrono::Local;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,13 +16,15 @@ pub struct LogEntry {
 pub struct LogManager {
     logs: Arc<Mutex<Vec<LogEntry>>>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
+    runtime_root: std::path::PathBuf,
 }
 
 impl LogManager {
-    pub fn new() -> Self {
+    pub fn new(runtime_root: std::path::PathBuf) -> Self {
         Self {
             logs: Arc::new(Mutex::new(Vec::with_capacity(1000))),
             app_handle: Arc::new(Mutex::new(None)),
+            runtime_root,
         }
     }
 
@@ -54,10 +56,24 @@ impl LogManager {
             entry.timestamp, entry.level, entry.logger, entry.message
         );
 
-        // data/app.log に追記出力 (AIアシスタントやデバッグ用)
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("data/app.log") {
+        // Always write beneath the injected portable runtime root.  In
+        // particular, never resolve this path from the process CWD or a user
+        // profile directory: portable installs may be launched from either.
+        let log_path = self.runtime_root.join("data").join("app.log");
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+        {
             use std::io::Write;
-            let _ = writeln!(file, "[{}] [{}] [{}] {}", entry.timestamp, entry.level, entry.logger, entry.message);
+            let _ = writeln!(
+                file,
+                "[{}] [{}] [{}] {}",
+                entry.timestamp, entry.level, entry.logger, entry.message
+            );
         }
 
         // フロントエンドにリアルタイム送信 (単一の app_log イベントに一本化)
@@ -123,3 +139,32 @@ pub fn global_debug(logger_name: &str, message: &str) {
     global_log("DEBUG", logger_name, message);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::LogManager;
+    use std::fs;
+
+    #[test]
+    fn writes_app_log_under_the_injected_runtime_root() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-logger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let unrelated = root.join("unrelated-cwd");
+        fs::create_dir_all(&unrelated).unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&unrelated).unwrap();
+
+        let logger = LogManager::new(root.clone());
+        logger.info("Test", "rooted log");
+
+        std::env::set_current_dir(original).unwrap();
+        assert!(root.join("data").join("app.log").is_file());
+        assert!(!unrelated.join("data").join("app.log").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+}

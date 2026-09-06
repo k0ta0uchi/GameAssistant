@@ -57,6 +57,12 @@ pub struct AiClient {
     client: reqwest::Client,
 }
 
+impl Default for AiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AiClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
@@ -200,7 +206,13 @@ impl AiClient {
                     None => "Thinking=DEFAULT",
                 };
 
-                crate::logger::global_info("Gemini", &format!("Requesting model='{}', key_index={}, {}...", m_name, idx, budget_info));
+                crate::logger::global_info(
+                    "Gemini",
+                    &format!(
+                        "Requesting model='{}', key_index={}, {}...",
+                        m_name, idx, budget_info
+                    ),
+                );
 
                 let res = self.client.post(&url).json(&body).send().await;
                 match res {
@@ -213,19 +225,31 @@ impl AiClient {
                                 .map_err(|e| format!("Failed to parse Gemini response: {}", e))?;
 
                             let mut text_result = String::new();
-                            if let Some(candidates) = resp_json.get("candidates").and_then(|c| c.as_array()) {
+                            if let Some(candidates) =
+                                resp_json.get("candidates").and_then(|c| c.as_array())
+                            {
                                 if let Some(first) = candidates.first() {
-                                    if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                                    if let Some(parts) = first
+                                        .get("content")
+                                        .and_then(|c| c.get("parts"))
+                                        .and_then(|p| p.as_array())
+                                    {
                                         for part in parts {
                                             // 1. 思考プロセス (thought: true) パーツを完全に除外
-                                            let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
-                                            let has_thought_sig = part.get("thought_signature").is_some();
+                                            let is_thought = part
+                                                .get("thought")
+                                                .and_then(|t| t.as_bool())
+                                                .unwrap_or(false);
+                                            let has_thought_sig =
+                                                part.get("thought_signature").is_some();
                                             if is_thought || has_thought_sig {
                                                 continue;
                                             }
 
                                             // 2. 通常の回答テキストのみを抽出
-                                            if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
+                                            if let Some(txt) =
+                                                part.get("text").and_then(|t| t.as_str())
+                                            {
                                                 text_result.push_str(txt);
                                             }
                                         }
@@ -236,17 +260,34 @@ impl AiClient {
                             // 3. テキスト内に混入した思考タグ (<thought>...</thought> 等) を完全除去
                             let clean = strip_thought_artifacts(&text_result);
                             if !clean.is_empty() {
-                                crate::logger::global_info("Gemini", &format!("SUCCESS generation with model='{}', key_index={}: '{}'", m_name, idx, clean));
+                                crate::logger::global_info(
+                                    "Gemini",
+                                    &format!(
+                                        "Generation succeeded model='{}', key_index={}",
+                                        m_name, idx
+                                    ),
+                                );
                                 return Ok(clean);
                             }
                         } else {
-                            let err_text = resp.text().await.unwrap_or_default();
-                            crate::logger::global_warn("Gemini", &format!("Failed with status {} on model='{}', key_index={}: {}", status_code, m_name, idx, err_text));
-                            last_error = format!("Gemini API Error ({}, {}): {}", m_name, status_code, err_text);
+                            crate::logger::global_warn(
+                                "Gemini",
+                                &format!(
+                                    "Generation failed model='{}', key_index={}, status={}",
+                                    m_name, idx, status_code
+                                ),
+                            );
+                            last_error = format!("Gemini API error ({}, {})", m_name, status_code);
                         }
                     }
                     Err(e) => {
-                        crate::logger::global_error("Gemini", &format!("HTTP request error on model='{}', key_index={}: {}", m_name, idx, e));
+                        crate::logger::global_error(
+                            "Gemini",
+                            &format!(
+                                "HTTP request error on model='{}', key_index={}: {}",
+                                m_name, idx, e
+                            ),
+                        );
                         last_error = format!("HTTP request error ({}, {}): {}", m_name, idx, e);
                     }
                 }
@@ -298,8 +339,7 @@ impl AiClient {
             .map_err(|e| format!("llama.cpp request error: {}", e))?;
 
         if !resp.status().is_success() {
-            let err_text = resp.text().await.unwrap_or_default();
-            return Err(format!("llama.cpp error: {}", err_text));
+            return Err(format!("llama.cpp HTTP error: {}", resp.status()));
         }
 
         let resp_json: serde_json::Value = resp

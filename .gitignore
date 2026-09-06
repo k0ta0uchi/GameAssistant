@@ -13,6 +13,7 @@ run.ps1
 
 chromadb/
 models/
+.trash/
 output.mp3
 temp_*
 Obsidian/

@@ -1,11 +1,11 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::StreamConfig;
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::StreamConfig;
-use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 
 use crate::logger::LogManager;
@@ -58,12 +58,17 @@ impl AudioInputManager {
 
                         let host = cpal::default_host();
                         let device = if let Some(name) = device_name {
-                            if name.is_empty() || name == "Default (System Default)" || name == "Default" {
+                            if name.is_empty()
+                                || name == "Default (System Default)"
+                                || name == "Default"
+                            {
                                 host.default_input_device()
                             } else {
                                 host.input_devices()
                                     .ok()
-                                    .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
+                                    .and_then(|mut devs| {
+                                        devs.find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                                    })
                                     .or_else(|| host.default_input_device())
                             }
                         } else {
@@ -81,13 +86,24 @@ impl AudioInputManager {
                         let default_cfg = match dev.default_input_config() {
                             Ok(c) => c,
                             Err(e) => {
-                                log_mgr_clone.error("Audio", &format!("Failed to get default config: {}", e));
+                                log_mgr_clone.error(
+                                    "Audio",
+                                    &format!("Failed to get default config: {}", e),
+                                );
                                 continue;
                             }
                         };
 
                         let dev_name = dev.name().unwrap_or_else(|_| "Unknown".to_string());
-                        log_mgr_clone.info("Audio", &format!("Connecting to microphone: '{}' (sample_rate: {}, channels: {})", dev_name, default_cfg.sample_rate().0, default_cfg.channels()));
+                        log_mgr_clone.info(
+                            "Audio",
+                            &format!(
+                                "Connecting to microphone: '{}' (sample_rate: {}, channels: {})",
+                                dev_name,
+                                default_cfg.sample_rate().0,
+                                default_cfg.channels()
+                            ),
+                        );
 
                         let stream_config: StreamConfig = default_cfg.into();
                         let in_sample_rate = stream_config.sample_rate.0;
@@ -115,7 +131,8 @@ impl AudioInputManager {
                                 for i in (0..data.len()).step_by(in_channels) {
                                     sum_sq += data[i] * data[i];
                                 }
-                                let rms = (sum_sq / (data.len() / in_channels).max(1) as f32).sqrt();
+                                let rms =
+                                    (sum_sq / (data.len() / in_channels).max(1) as f32).sqrt();
 
                                 if last_meter_emit.lock().elapsed() >= Duration::from_millis(50) {
                                     *last_meter_emit.lock() = Instant::now();
@@ -126,7 +143,12 @@ impl AudioInputManager {
                                 }
 
                                 // 2. 16kHz モノラルへリサンプリングし、ストリーミングキューへ直接送信
-                                let resampled = resample_linear(data, in_sample_rate, target_sample_rate, in_channels);
+                                let resampled = resample_linear(
+                                    data,
+                                    in_sample_rate,
+                                    target_sample_rate,
+                                    in_channels,
+                                );
                                 if !resampled.is_empty() {
                                     on_pcm_cb(resampled);
                                 }
@@ -137,14 +159,15 @@ impl AudioInputManager {
 
                         match stream_res {
                             Ok(stream) => {
-                                if let Ok(_) = stream.play() {
+                                if stream.play().is_ok() {
                                     mic_stream = Some(stream);
                                     is_running_clone.store(true, Ordering::SeqCst);
                                     log_mgr_clone.info("Audio", "Microphone stream active");
                                 }
                             }
                             Err(e) => {
-                                log_mgr_clone.error("Audio", &format!("Failed to build mic stream: {}", e));
+                                log_mgr_clone
+                                    .error("Audio", &format!("Failed to build mic stream: {}", e));
                             }
                         }
                     }
@@ -158,12 +181,17 @@ impl AudioInputManager {
 
                         let host = cpal::default_host();
                         let device = if let Some(name) = device_name {
-                            if name.is_empty() || name == "Default (System Default)" || name == "Default" {
+                            if name.is_empty()
+                                || name == "Default (System Default)"
+                                || name == "Default"
+                            {
                                 host.default_input_device()
                             } else {
                                 host.input_devices()
                                     .ok()
-                                    .and_then(|mut devs| devs.find(|d| d.name().map(|n| n == name).unwrap_or(false)))
+                                    .and_then(|mut devs| {
+                                        devs.find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                                    })
                                     .or_else(|| host.default_input_device())
                             }
                         } else {
@@ -174,7 +202,10 @@ impl AudioInputManager {
                             let default_cfg = match dev.default_input_config() {
                                 Ok(c) => c,
                                 Err(e) => {
-                                    log_mgr_clone.error("Discord", &format!("Failed to get default config: {}", e));
+                                    log_mgr_clone.error(
+                                        "Discord",
+                                        &format!("Failed to get default config: {}", e),
+                                    );
                                     continue;
                                 }
                             };
@@ -201,7 +232,12 @@ impl AudioInputManager {
                                         return;
                                     }
 
-                                    let resampled = resample_linear(data, in_sample_rate, target_sample_rate, in_channels);
+                                    let resampled = resample_linear(
+                                        data,
+                                        in_sample_rate,
+                                        target_sample_rate,
+                                        in_channels,
+                                    );
                                     if !resampled.is_empty() {
                                         on_pcm_cb(resampled);
                                     }
@@ -209,7 +245,7 @@ impl AudioInputManager {
                                 err_fn,
                                 None,
                             ) {
-                                if let Ok(_) = stream.play() {
+                                if stream.play().is_ok() {
                                     discord_stream = Some(stream);
                                     log_mgr_clone.info("Discord", "Discord Audio stream active");
                                 }

@@ -1,21 +1,21 @@
+use crate::session::normalize_kana;
+use candle_core::{Device, IndexOp, Tensor};
+use candle_transformers::models::whisper::{audio, model::Whisper, Config};
+use futures::{SinkExt, StreamExt};
+use hound::{WavSpec, WavWriter};
+use parking_lot::Mutex;
 use std::io::{BufRead, BufReader, Cursor};
-use std::process::{Command, Stdio, Child};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use parking_lot::Mutex;
-use hound::{WavSpec, WavWriter};
-use candle_core::{Device, Tensor, IndexOp};
-use candle_transformers::models::whisper::{Config, model::Whisper, audio};
 use tokenizers::Tokenizer;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use futures::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicBool, Ordering};
-use crate::session::normalize_kana;
 
-use tokio::sync::oneshot;
 use std::collections::HashMap;
+use tokio::sync::oneshot;
 
 type AsrCallback = Arc<dyn Fn(String, String, bool, Option<f64>) + Send + Sync>;
 
@@ -26,6 +26,12 @@ pub struct WhisperWsClient {
     callback: Arc<Mutex<Option<AsrCallback>>>,
     pending_embeds: Arc<Mutex<HashMap<String, oneshot::Sender<Vec<Vec<f32>>>>>>,
     is_started: AtomicBool,
+}
+
+impl Default for WhisperWsClient {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WhisperWsClient {
@@ -61,7 +67,8 @@ impl WhisperWsClient {
             "cmd": "embed",
             "id": req_id,
             "texts": texts,
-        }).to_string();
+        })
+        .to_string();
 
         if let Some(ref sender) = *self.cmd_tx.lock() {
             sender.send(msg).map_err(|e| e.to_string())?;
@@ -80,7 +87,8 @@ impl WhisperWsClient {
         let msg = serde_json::json!({
             "cmd": "preallocate_vram",
             "enable": enable,
-        }).to_string();
+        })
+        .to_string();
 
         if let Some(ref sender) = *self.cmd_tx.lock() {
             sender.send(msg).map_err(|e| e.to_string())?;
@@ -97,7 +105,7 @@ impl WhisperWsClient {
     {
         self.set_callback(on_result);
 
-        if self.is_started.swap(true, Ordering::SeqCst) {
+        if self.is_started.load(Ordering::SeqCst) {
             // 既に起動済みの場合はコールバックの更新のみで即時有効化
             return Ok(());
         }
@@ -106,35 +114,62 @@ impl WhisperWsClient {
 
         let root_dir = crate::resolve_project_root();
 
-        // scripts/asr_server.py の探索
-        let script_path = if root_dir.join("scripts").join("asr_server.py").exists() {
-            root_dir.join("scripts").join("asr_server.py")
-        } else if std::path::Path::new("C:/Workspace/GameAssistant/scripts/asr_server.py").exists() {
-            std::path::PathBuf::from("C:/Workspace/GameAssistant/scripts/asr_server.py")
-        } else {
-            root_dir.join("scripts").join("asr_server.py")
-        };
-
-        // python.exe の探索
-        let python_path = if root_dir.join("venv").join("Scripts").join("python.exe").exists() {
-            root_dir.join("venv").join("Scripts").join("python.exe")
-        } else if std::path::Path::new("C:/Workspace/GameAssistant/venv/Scripts/python.exe").exists() {
-            std::path::PathBuf::from("C:/Workspace/GameAssistant/venv/Scripts/python.exe")
-        } else {
-            std::path::PathBuf::from("python")
-        };
+        // Portable releases must never fall back to a checkout path or a
+        // system-wide Python.  The bootstrap manager extracts this script and
+        // creates the venv beside the EXE before ASR is started.
+        let script_path = root_dir.join("scripts").join("asr_server.py");
+        let python_path = root_dir.join("venv").join("Scripts").join("python.exe");
 
         if !script_path.exists() {
-            eprintln!("[ERROR] [ASR] ASR server script not found at: {:?}", script_path);
+            eprintln!(
+                "[ERROR] [ASR] ASR server script not found at: {:?}",
+                script_path
+            );
             return Err(format!("ASR server script not found at: {:?}", script_path));
         }
+        if !python_path.exists() {
+            eprintln!(
+                "[ERROR] [ASR] Portable Python environment is not ready at: {:?}",
+                python_path
+            );
+            return Err(format!(
+                "Portable Python environment is not ready at: {:?}; run first-launch setup",
+                python_path
+            ));
+        }
 
-        let models_dir = crate::model_manager::ModelManager::get_effective_models_dir(&root_dir, None);
+        if self.is_started.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
+        let models_dir =
+            crate::model_manager::ModelManager::get_effective_models_dir(&root_dir, None);
+        let cache_dir = root_dir.join(".hf-cache");
 
         let mut cmd = Command::new(&python_path);
         cmd.arg(&script_path)
             .current_dir(&root_dir)
+            .env("RUNTIME_ROOT", root_dir.to_string_lossy().to_string())
+            .env(
+                "SETTINGS_PATH",
+                root_dir.join("settings.json").to_string_lossy().to_string(),
+            )
             .env("MODELS_DIR", models_dir.to_string_lossy().to_string())
+            .env("CACHE_DIR", cache_dir.to_string_lossy().to_string())
+            .env("HF_HOME", cache_dir.to_string_lossy().to_string())
+            .env(
+                "TRANSFORMERS_CACHE",
+                cache_dir.to_string_lossy().to_string(),
+            )
+            .env("HF_HUB_CACHE", cache_dir.to_string_lossy().to_string())
+            .env(
+                "HUGGINGFACE_HUB_CACHE",
+                cache_dir.to_string_lossy().to_string(),
+            )
+            .env(
+                "SENTENCE_TRANSFORMERS_HOME",
+                cache_dir.to_string_lossy().to_string(),
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -144,7 +179,13 @@ impl WhisperWsClient {
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
 
-        let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn ASR server: {}", e))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                self.is_started.store(false, Ordering::SeqCst);
+                return Err(format!("Failed to spawn ASR server: {}", error));
+            }
+        };
 
         if let Some(stdout) = child.stdout.take() {
             thread::spawn(move || {
@@ -228,12 +269,20 @@ impl WhisperWsClient {
                             if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
                                 if msg_type == "embed_res" {
                                     if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
-                                        if let Some(resp_tx) = pending_embeds_arc.lock().remove(id) {
+                                        if let Some(resp_tx) = pending_embeds_arc.lock().remove(id)
+                                        {
                                             let mut vecs = Vec::new();
-                                            if let Some(raw_arr) = val.get("vectors").and_then(|v| v.as_array()) {
+                                            if let Some(raw_arr) =
+                                                val.get("vectors").and_then(|v| v.as_array())
+                                            {
                                                 for row in raw_arr {
                                                     if let Some(arr) = row.as_array() {
-                                                        let f_row: Vec<f32> = arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
+                                                        let f_row: Vec<f32> = arr
+                                                            .iter()
+                                                            .filter_map(|x| {
+                                                                x.as_f64().map(|f| f as f32)
+                                                            })
+                                                            .collect();
                                                         vecs.push(f_row);
                                                     }
                                                 }
@@ -246,8 +295,15 @@ impl WhisperWsClient {
                             }
 
                             if let Some(text) = val.get("text").and_then(|v| v.as_str()) {
-                                let stream_name = val.get("stream").and_then(|v| v.as_str()).unwrap_or("mic").to_string();
-                                let is_final = val.get("is_final").and_then(|v| v.as_bool()).unwrap_or(false);
+                                let stream_name = val
+                                    .get("stream")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("mic")
+                                    .to_string();
+                                let is_final = val
+                                    .get("is_final")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
                                 let latency_ms = val.get("latency_ms").and_then(|v| v.as_f64());
                                 if let Some(ref cb) = *callback_arc.lock() {
                                     cb(stream_name, text.to_string(), is_final, latency_ms);
@@ -273,7 +329,7 @@ impl WhisperWsClient {
     /// WebSocket 接続が成功するまで非同期で待機して完了を返す
     pub async fn warmup(&self) -> Result<(), String> {
         if self.child.lock().is_none() {
-            let _ = self.start(|_, _, _, _| {});
+            self.start(|_, _, _, _| {})?;
         }
 
         for _ in 0..40 {
@@ -322,7 +378,7 @@ impl WhisperWsClient {
             {
                 use std::os::windows::process::CommandExt;
                 let _ = Command::new("taskkill")
-                    .args(&["/F", "/T", "/PID", &pid.to_string()])
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
                     .creation_flags(0x08000000)
                     .output();
             }
@@ -342,7 +398,7 @@ pub fn kill_process_on_port(port: u16) {
     {
         use std::os::windows::process::CommandExt;
         if let Ok(out) = Command::new("cmd")
-            .args(&["/C", &format!("netstat -ano -p tcp | findstr :{}", port)])
+            .args(["/C", &format!("netstat -ano -p tcp | findstr :{}", port)])
             .creation_flags(0x08000000)
             .output()
         {
@@ -354,7 +410,7 @@ pub fn kill_process_on_port(port: u16) {
                         if let Ok(pid) = pid_str.parse::<u32>() {
                             if pid > 0 && pid != std::process::id() {
                                 let _ = Command::new("taskkill")
-                                    .args(&["/F", "/T", "/PID", &pid.to_string()])
+                                    .args(["/F", "/T", "/PID", &pid.to_string()])
                                     .creation_flags(0x08000000)
                                     .output();
                             }
@@ -383,6 +439,12 @@ pub struct CandleWhisperModel {
 pub struct AsrEngine {
     cached_model: Arc<Mutex<Option<CandleWhisperModel>>>,
     pub ws_client: Arc<WhisperWsClient>,
+}
+
+impl Default for AsrEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AsrEngine {
@@ -414,7 +476,9 @@ impl AsrEngine {
                     .write_sample(sample_i16)
                     .map_err(|e| format!("WavWriter write error: {}", e))?;
             }
-            writer.finalize().map_err(|e| format!("WavWriter finalize error: {}", e))?;
+            writer
+                .finalize()
+                .map_err(|e| format!("WavWriter finalize error: {}", e))?;
         }
 
         Ok(cursor.into_inner())
@@ -423,44 +487,47 @@ impl AsrEngine {
     /// Pure Rust Native Whisper モデルのロード（Kotoba-Whisper-v2.0-faster）
     fn load_native_model() -> Result<CandleWhisperModel, String> {
         let device = Device::Cpu;
-        let local_candidates = [
-            std::path::PathBuf::from("models/kotoba-whisper-v2.0-faster"),
-            std::path::PathBuf::from("../models/kotoba-whisper-v2.0-faster"),
-        ];
+        let root_dir = crate::resolve_project_root();
+        let models_dir =
+            crate::model_manager::ModelManager::get_effective_models_dir(&root_dir, None);
+        let local_dir = models_dir.join("kotoba-whisper-v2.0-faster");
+        let config_path = local_dir.join("config.json");
+        let tokenizer_path = local_dir.join("tokenizer.json");
+        let weights_path = local_dir.join("model.safetensors");
+        if !weights_path.exists() {
+            return Err(format!(
+                "Kotoba-Whisper model is not installed at {:?}; complete first-launch setup",
+                local_dir
+            ));
+        }
+        eprintln!(
+            "[ASR-Native] Found local Kotoba-Whisper-v2.0-faster model directory at: {:?}",
+            local_dir
+        );
 
-        let (config_path, tokenizer_path, weights_path) = if let Some(local_dir) = local_candidates.iter().find(|p| p.join("model.safetensors").exists()) {
-            eprintln!("[ASR-Native] Found local Kotoba-Whisper-v2.0-faster model directory at: {:?}", local_dir);
-            (
-                local_dir.join("config.json"),
-                local_dir.join("tokenizer.json"),
-                local_dir.join("model.safetensors"),
-            )
-        } else {
-            let repo_id = "kotoba-tech/kotoba-whisper-v2.0";
-            eprintln!("[ASR-Native] Initializing Kotoba-Whisper-v2.0-faster from HuggingFace cache...");
+        let config_str = std::fs::read_to_string(&config_path)
+            .map_err(|e| format!("Failed to read config: {}", e))?;
+        let config: Config = serde_json::from_str(&config_str)
+            .map_err(|e| format!("Failed to parse config: {}", e))?;
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
 
-            let api = hf_hub::api::sync::Api::new().map_err(|e| format!("HF Hub API init error: {}", e))?;
-            let repo = api.model(repo_id.to_string());
-
-            eprintln!("[ASR-Native] Fetching config, tokenizer, and safetensors weights for '{}'...", repo_id);
-            let c_path = repo.get("config.json").map_err(|e| format!("Failed to get config.json for {}: {}", repo_id, e))?;
-            let t_path = repo.get("tokenizer.json").map_err(|e| format!("Failed to get tokenizer.json for {}: {}", repo_id, e))?;
-            let w_path = repo.get("model.safetensors").map_err(|e| format!("Failed to get model.safetensors for {}: {}", repo_id, e))?;
-            (c_path, t_path, w_path)
-        };
-
-        let config_str = std::fs::read_to_string(&config_path).map_err(|e| format!("Failed to read config: {}", e))?;
-        let config: Config = serde_json::from_str(&config_str).map_err(|e| format!("Failed to parse config: {}", e))?;
-        let tokenizer = Tokenizer::from_file(&tokenizer_path).map_err(|e| format!("Failed to load tokenizer: {}", e))?;
-
-        eprintln!("[ASR-Native] Loading weights from '{:?}' into memory...", weights_path);
+        eprintln!(
+            "[ASR-Native] Loading weights from '{:?}' into memory...",
+            weights_path
+        );
         let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&[weights_path], candle_core::DType::F32, &device)
-                .map_err(|e| format!("Failed to load safetensors: {}", e))?
+            candle_nn::VarBuilder::from_mmaped_safetensors(
+                &[weights_path],
+                candle_core::DType::F32,
+                &device,
+            )
+            .map_err(|e| format!("Failed to load safetensors: {}", e))?
         };
 
-        let model = Whisper::load(&vb, config.clone()).map_err(|e| format!("Failed to build whisper model: {}", e))?;
-        
+        let model = Whisper::load(&vb, config.clone())
+            .map_err(|e| format!("Failed to build whisper model: {}", e))?;
+
         let mel_bytes: &[u8] = if config.num_mel_bins == 128 {
             include_bytes!("../resources/melfilters128.bytes")
         } else {
@@ -468,9 +535,16 @@ impl AsrEngine {
         };
 
         let mut mel_filters = vec![0f32; mel_bytes.len() / 4];
-        <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(mel_bytes, &mut mel_filters);
+        <byteorder::LittleEndian as byteorder::ByteOrder>::read_f32_into(
+            mel_bytes,
+            &mut mel_filters,
+        );
 
-        eprintln!("[ASR-Native] Mel filters loaded from embedded binary ({} bins, {} floats)", config.num_mel_bins, mel_filters.len());
+        eprintln!(
+            "[ASR-Native] Mel filters loaded from embedded binary ({} bins, {} floats)",
+            config.num_mel_bins,
+            mel_filters.len()
+        );
         eprintln!("[ASR-Native] Kotoba-Whisper-v2.0-faster successfully loaded and cached on CPU!");
 
         Ok(CandleWhisperModel {
@@ -526,33 +600,54 @@ impl AsrEngine {
             padded.resize(padded.len() + (hop_size - remainder), 0.0f32);
         }
         let n_frames = padded.len() / hop_size;
-        if n_frames % 2 != 0 {
+        if !n_frames.is_multiple_of(2) {
             padded.resize(padded.len() + hop_size, 0.0f32);
         }
 
         let mel = audio::pcm_to_mel(&m_ref.config, &padded, &m_ref.mel_filters);
         let mel_len = mel.len();
         let mel_frames = mel_len / m_ref.config.num_mel_bins;
-        let mel_tensor = Tensor::from_vec(mel, (1, m_ref.config.num_mel_bins, mel_frames), &m_ref.device)
-            .map_err(|e| format!("Tensor conversion error: {}", e))?;
+        let mel_tensor = Tensor::from_vec(
+            mel,
+            (1, m_ref.config.num_mel_bins, mel_frames),
+            &m_ref.device,
+        )
+        .map_err(|e| format!("Tensor conversion error: {}", e))?;
 
         let mel_segment = if mel_frames > 3000 {
-            mel_tensor.narrow(2, 0, 3000).map_err(|e| format!("Mel narrow error: {}", e))?
+            mel_tensor
+                .narrow(2, 0, 3000)
+                .map_err(|e| format!("Mel narrow error: {}", e))?
         } else {
             mel_tensor
         };
 
-        let enc = m_ref.model.encoder.forward(&mel_segment, true)
+        let enc = m_ref
+            .model
+            .encoder
+            .forward(&mel_segment, true)
             .map_err(|e| format!("Encoder forward error: {}", e))?;
 
         m_ref.model.reset_kv_cache();
 
         // 日本語言語指定トークン (<|ja|>: 50266) を確実に含める
-        let sot_token = m_ref.tokenizer.token_to_id("<|startoftranscript|>").unwrap_or(50258);
+        let sot_token = m_ref
+            .tokenizer
+            .token_to_id("<|startoftranscript|>")
+            .unwrap_or(50258);
         let ja_token = m_ref.tokenizer.token_to_id("<|ja|>").unwrap_or(50266);
-        let transcribe_token = m_ref.tokenizer.token_to_id("<|transcribe|>").unwrap_or(50360);
-        let notimestamps_token = m_ref.tokenizer.token_to_id("<|notimestamps|>").unwrap_or(50364);
-        let eot_token = m_ref.tokenizer.token_to_id("<|endoftext|>").unwrap_or(50257);
+        let transcribe_token = m_ref
+            .tokenizer
+            .token_to_id("<|transcribe|>")
+            .unwrap_or(50360);
+        let notimestamps_token = m_ref
+            .tokenizer
+            .token_to_id("<|notimestamps|>")
+            .unwrap_or(50364);
+        let eot_token = m_ref
+            .tokenizer
+            .token_to_id("<|endoftext|>")
+            .unwrap_or(50257);
 
         let initial_tokens = vec![sot_token, ja_token, transcribe_token, notimestamps_token];
         let mut current_tokens = initial_tokens.clone();
@@ -566,15 +661,28 @@ impl AsrEngine {
                 .unsqueeze(0)
                 .map_err(|e| format!("Unsqueeze error: {}", e))?;
 
-            let ys = m_ref.model.decoder.forward(&token_tensor, &enc, true)
+            let ys = m_ref
+                .model
+                .decoder
+                .forward(&token_tensor, &enc, true)
                 .map_err(|e| format!("Decoder forward error: {}", e))?;
-            let logits = m_ref.model.decoder.final_linear(&ys)
+            let logits = m_ref
+                .model
+                .decoder
+                .final_linear(&ys)
                 .map_err(|e| format!("Decoder final linear error: {}", e))?;
 
-            let (_, seq_len, _) = logits.dims3().map_err(|e| format!("Logits shape error: {}", e))?;
-            let next_token_logits = logits.i((0, seq_len - 1, ..)).map_err(|e| format!("Logits index error: {}", e))?;
-            let next_token = next_token_logits.argmax(0).map_err(|e| format!("Argmax error: {}", e))?
-                .to_scalar::<u32>().map_err(|e| format!("Scalar read error: {}", e))?;
+            let (_, seq_len, _) = logits
+                .dims3()
+                .map_err(|e| format!("Logits shape error: {}", e))?;
+            let next_token_logits = logits
+                .i((0, seq_len - 1, ..))
+                .map_err(|e| format!("Logits index error: {}", e))?;
+            let next_token = next_token_logits
+                .argmax(0)
+                .map_err(|e| format!("Argmax error: {}", e))?
+                .to_scalar::<u32>()
+                .map_err(|e| format!("Scalar read error: {}", e))?;
 
             if next_token == eot_token {
                 break;
@@ -595,7 +703,9 @@ impl AsrEngine {
         }
 
         let decoded_text = if !generated_tokens.is_empty() {
-            m_ref.tokenizer.decode(&generated_tokens, true)
+            m_ref
+                .tokenizer
+                .decode(&generated_tokens, true)
                 .map_err(|e| format!("Tokenizer decode error: {}", e))?
         } else {
             String::new()
@@ -618,7 +728,11 @@ impl AsrEngine {
         };
 
         if !clean.is_empty() {
-            eprintln!("[ASR-Native] Transcribed ({} tokens): '{}'", generated_tokens.len(), clean);
+            eprintln!(
+                "[ASR-Native] Transcribed ({} tokens): '{}'",
+                generated_tokens.len(),
+                clean
+            );
         }
 
         Ok(clean)
@@ -673,21 +787,28 @@ mod tests {
 
         let mut reader = hound::WavReader::open(wav_path).expect("Failed to open WAV file");
         let spec = reader.spec();
-        println!("WAV spec: sample_rate={}, channels={}, bits_per_sample={}", spec.sample_rate, spec.channels, spec.bits_per_sample);
+        println!(
+            "WAV spec: sample_rate={}, channels={}, bits_per_sample={}",
+            spec.sample_rate, spec.channels, spec.bits_per_sample
+        );
 
         let samples: Vec<f32> = match spec.sample_format {
             hound::SampleFormat::Int => {
                 let max_val = (1 << (spec.bits_per_sample - 1)) as f32;
-                reader.samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+                reader
+                    .samples::<i32>()
+                    .map(|s| s.unwrap() as f32 / max_val)
+                    .collect()
             }
-            hound::SampleFormat::Float => {
-                reader.samples::<f32>().map(|s| s.unwrap()).collect()
-            }
+            hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
         };
 
         // モノラル 16kHz にリサンプリング
         let mono_samples = if spec.channels > 1 {
-            samples.chunks(spec.channels as usize).map(|ch| ch[0]).collect()
+            samples
+                .chunks(spec.channels as usize)
+                .map(|ch| ch[0])
+                .collect()
         } else {
             samples
         };
@@ -719,7 +840,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let res = client.start(move |stream, text, is_final, _latency| {
-            println!("[TEST-CALLBACK] Stream: {}, Text: '{}', Final: {}", stream, text, is_final);
+            println!(
+                "[TEST-CALLBACK] Stream: {}, Text: '{}', Final: {}",
+                stream, text, is_final
+            );
             let _ = tx.send((stream, text, is_final));
         });
 
@@ -733,12 +857,18 @@ mod tests {
             let samples: Vec<f32> = match spec.sample_format {
                 hound::SampleFormat::Int => {
                     let max_val = (1 << (spec.bits_per_sample - 1)) as f32;
-                    reader.samples::<i32>().map(|s| s.unwrap() as f32 / max_val).collect()
+                    reader
+                        .samples::<i32>()
+                        .map(|s| s.unwrap() as f32 / max_val)
+                        .collect()
                 }
                 hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
             };
             let mono_samples = if spec.channels > 1 {
-                samples.chunks(spec.channels as usize).map(|ch| ch[0]).collect()
+                samples
+                    .chunks(spec.channels as usize)
+                    .map(|ch| ch[0])
+                    .collect()
             } else {
                 samples
             };
@@ -764,7 +894,9 @@ mod tests {
             let mut got_any = false;
             let start = std::time::Instant::now();
             while start.elapsed() < std::time::Duration::from_secs(10) {
-                if let Ok((_stream, text, is_final)) = rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                if let Ok((_stream, text, is_final)) =
+                    rx.recv_timeout(std::time::Duration::from_millis(500))
+                {
                     println!("[TEST-RECV] Text: '{}', is_final: {}", text, is_final);
                     got_any = true;
                     if is_final {

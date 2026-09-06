@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use sysinfo::System;
 use nvml_wrapper::Nvml;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use sysinfo::System;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourceInfo {
@@ -19,6 +19,12 @@ pub struct SystemResources {
 pub struct ResourceManager {
     sys: Mutex<System>,
     nvml: Option<Nvml>,
+}
+
+impl Default for ResourceManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceManager {
@@ -54,7 +60,11 @@ impl ResourceManager {
                 if let Ok(mem_info) = device.memory_info() {
                     let total = (mem_info.total as f64) / (1024.0 * 1024.0);
                     let used = (mem_info.used as f64) / (1024.0 * 1024.0);
-                    let pct = if total > 0.0 { (used / total) * 100.0 } else { 0.0 };
+                    let pct = if total > 0.0 {
+                        (used / total) * 100.0
+                    } else {
+                        0.0
+                    };
                     (used, total, pct)
                 } else {
                     (0.0, 0.0, 0.0)

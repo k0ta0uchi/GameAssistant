@@ -30,61 +30,114 @@ async fn main() {
     // Test 1: Settings
     print!("[TEST 1/8] Settings Load & Save ... ");
     match test_settings().await {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 2: Skills Scan
     print!("[TEST 2/8] Skills Scan & Extraction ... ");
     match test_skills().await {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 3: LanceDB Memory CRUD
     print!("[TEST 3/8] LanceDB Vector Memory CRUD ... ");
     match test_lance_memory().await {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 4: Kana Normalization
     print!("[TEST 4/8] Kana / Text Normalization ... ");
     match test_kana() {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 5: Session Manager Lifecycle & Trimming
     print!("[TEST 5/8] Session Manager Event Lifecycle ... ");
     match test_session().await {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 6: Twitch IRC PRIVMSG Parser
     print!("[TEST 6/8] Twitch IRC Message Parsing ... ");
     match test_twitch() {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 7: Web Search Response Formatter
     print!("[TEST 7/8] Web Search Summary Formatting ... ");
     match test_search() {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     // Test 8: Logger & Window Capture
     print!("[TEST 8/8] Logger Lifecycle & Window Capture ... ");
     match test_logger_and_capture() {
-        Ok(_) => { println!("PASS"); passed += 1; }
-        Err(e) => { println!("FAIL: {}", e); failed += 1; }
+        Ok(_) => {
+            println!("PASS");
+            passed += 1;
+        }
+        Err(e) => {
+            println!("FAIL: {}", e);
+            failed += 1;
+        }
     }
 
     println!("------------------------------------------------------------");
-    println!("Test Summary: {} passed, {} failed in {:.2?}", passed, failed, start_all.elapsed());
+    println!(
+        "Test Summary: {} passed, {} failed in {:.2?}",
+        passed,
+        failed,
+        start_all.elapsed()
+    );
     println!("============================================================");
 
     if failed > 0 {
@@ -171,7 +224,8 @@ async fn test_lance_memory() -> Result<(), String> {
         user_id: None,
     };
 
-    let count = lance_memory::insert_memory_batch(root, vec![item1.clone(), item2.clone()], None).await?;
+    let count =
+        lance_memory::insert_memory_batch(root, vec![item1.clone(), item2.clone()], None).await?;
     if count != 2 {
         let _ = fs::remove_dir_all(&temp_dir);
         return Err(format!("Expected 2 inserted, got {}", count));
@@ -218,7 +272,7 @@ fn test_kana() -> Result<(), String> {
 async fn test_session() -> Result<(), String> {
     let temp_dir = create_unique_temp_dir()?;
     let root = temp_dir.clone();
-    let log_mgr = Arc::new(LogManager::new());
+    let log_mgr = Arc::new(LogManager::new(temp_dir.clone()));
     let tts_mgr = Arc::new(TtsManager::new());
     let session = SessionManager::new(root, tts_mgr, log_mgr);
 
@@ -245,7 +299,10 @@ async fn test_session() -> Result<(), String> {
     }
     if events.first().unwrap().id != "ev_20" {
         let _ = fs::remove_dir_all(&temp_dir);
-        return Err(format!("Expected first event ev_20, got {}", events.first().unwrap().id));
+        return Err(format!(
+            "Expected first event ev_20, got {}",
+            events.first().unwrap().id
+        ));
     }
 
     session.stop_session();
@@ -260,13 +317,18 @@ async fn test_session() -> Result<(), String> {
 
 fn test_twitch() -> Result<(), String> {
     let raw_mod = "@badge-info=;badges=moderator/1;display-name=ModUser;mod=1;subscriber=0 :moduser!moduser@moduser.tmi.twitch.tv PRIVMSG #streamer_channel :こんにちは！ナイスプレイ！";
-    let parsed_mod = parse_irc_privmsg(raw_mod, "default_channel").ok_or("Failed to parse mod message")?;
-    if parsed_mod.author != "ModUser" || parsed_mod.channel != "streamer_channel" || !parsed_mod.is_mod {
+    let parsed_mod =
+        parse_irc_privmsg(raw_mod, "default_channel").ok_or("Failed to parse mod message")?;
+    if parsed_mod.author != "ModUser"
+        || parsed_mod.channel != "streamer_channel"
+        || !parsed_mod.is_mod
+    {
         return Err("Mod parsed mismatch".to_string());
     }
 
     let raw_sub = "@badge-info=subscriber/6;badges=subscriber/6;display-name=SubUser;mod=0;subscriber=1 :subuser!subuser@subuser.tmi.twitch.tv PRIVMSG #streamer_channel :いつも応援してます！";
-    let parsed_sub = parse_irc_privmsg(raw_sub, "default_channel").ok_or("Failed to parse sub message")?;
+    let parsed_sub =
+        parse_irc_privmsg(raw_sub, "default_channel").ok_or("Failed to parse sub message")?;
     if parsed_sub.author != "SubUser" || !parsed_sub.is_subscriber {
         return Err("Sub parsed mismatch".to_string());
     }
@@ -274,32 +336,43 @@ fn test_twitch() -> Result<(), String> {
 }
 
 fn test_search() -> Result<(), String> {
-    let items = vec![
-        SearchResultItem {
-            title: "エルデンリング攻略".to_string(),
-            url: "https://example.com/elden".to_string(),
-            description: "ボス攻略まとめ".to_string(),
-        },
-    ];
+    let items = [SearchResultItem {
+        title: "エルデンリング攻略".to_string(),
+        url: "https://example.com/elden".to_string(),
+        description: "ボス攻略まとめ".to_string(),
+    }];
     let mut lines = Vec::new();
     for (i, r) in items.iter().enumerate() {
-        lines.push(format!("{}. 【{}】\n   {}\n   URL: {}", i + 1, r.title, r.description, r.url));
+        lines.push(format!(
+            "{}. 【{}】\n   {}\n   URL: {}",
+            i + 1,
+            r.title,
+            r.description,
+            r.url
+        ));
     }
     let summary = format!("### Web検索結果: エルデンリング\n\n{}", lines.join("\n\n"));
-    if !summary.contains("【エルデンリング攻略】") || !summary.contains("URL: https://example.com/elden") {
+    if !summary.contains("【エルデンリング攻略】")
+        || !summary.contains("URL: https://example.com/elden")
+    {
         return Err("Search format mismatch".to_string());
     }
     Ok(())
 }
 
 fn test_logger_and_capture() -> Result<(), String> {
-    let log_mgr = LogManager::new();
+    let log_root = create_unique_temp_dir()?;
+    let log_mgr = LogManager::new(log_root.clone());
     log_mgr.info("TestLogger", "テスト情報ログ");
     log_mgr.warn("TestLogger", "テスト警告ログ");
     log_mgr.error("TestLogger", "テストエラーログ");
 
     let logs = log_mgr.get_logs();
-    if logs.len() != 3 || logs[0].level != "INFO" || logs[1].level != "WARNING" || logs[2].level != "ERROR" {
+    if logs.len() != 3
+        || logs[0].level != "INFO"
+        || logs[1].level != "WARNING"
+        || logs[2].level != "ERROR"
+    {
         return Err("Log levels mismatch".to_string());
     }
 
@@ -314,5 +387,6 @@ fn test_logger_and_capture() -> Result<(), String> {
             return Err("Window filter violation".to_string());
         }
     }
+    let _ = fs::remove_dir_all(log_root);
     Ok(())
 }

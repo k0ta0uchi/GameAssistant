@@ -1,7 +1,7 @@
-use std::fs;
-use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillItem {
@@ -43,8 +43,7 @@ pub fn save_setting_key(root_dir: &Path, key: &str, value: Value) -> Result<Valu
         current_json = Value::Object(map);
     }
 
-    let pretty_str = serde_json::to_string_pretty(&current_json)
-        .map_err(|e| e.to_string())?;
+    let pretty_str = serde_json::to_string_pretty(&current_json).map_err(|e| e.to_string())?;
 
     fs::write(&settings_path, pretty_str).map_err(|e| e.to_string())?;
     Ok(current_json)
@@ -73,7 +72,11 @@ pub fn scan_skills(root_dir: &Path) -> SkillsResponse {
                     };
 
                     if let Some(target) = target_path {
-                        let dir_stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        let dir_stem = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
                         let raw_content = fs::read_to_string(&target).unwrap_or_default();
                         let (name, desc, body) = parse_frontmatter(&raw_content, &dir_stem);
 
@@ -89,7 +92,11 @@ pub fn scan_skills(root_dir: &Path) -> SkillsResponse {
                     // 2. 単一ファイル形式: skills/{skill_name}.md
                     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                     if ext == "md" || ext == "yaml" || ext == "yml" {
-                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                        let stem = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("")
+                            .to_string();
                         let raw_content = fs::read_to_string(&path).unwrap_or_default();
                         let (name, desc, body) = parse_frontmatter(&raw_content, &stem);
 
@@ -192,7 +199,11 @@ fn parse_frontmatter(raw: &str, default_id: &str) -> (String, String, String) {
                 let l = line.trim();
                 if let Some(pos) = l.find(':') {
                     let key = l[..pos].trim().to_lowercase();
-                    let val = l[pos + 1..].trim().trim_matches('"').trim_matches('\'').to_string();
+                    let val = l[pos + 1..]
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string();
                     if key == "name" && !val.is_empty() {
                         name = val;
                     } else if key == "description" && !val.is_empty() {
@@ -214,4 +225,3 @@ fn parse_frontmatter(raw: &str, default_id: &str) -> (String, String, String) {
 
     (name, description, body)
 }
-

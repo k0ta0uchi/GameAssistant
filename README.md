@@ -48,6 +48,23 @@
 
 ### インストール手順
 
+#### ポータブル版（推奨）
+
+`GameAssistant-v0.2.0-portable.exe` を書き込み可能なフォルダへ置いて起動してください。初回起動時にセットアップ画面が表示され、同じフォルダへ次のランタイムを自動準備します。
+
+- `.python/` — `uv python install 3.12` で取得した管理対象Python
+- `venv/` — アプリ専用仮想環境
+- `models/` — 必須モデル
+- `.uv-cache/`、`logs/`、`scripts/`、`setup-state.json`、`uv.lock`
+
+Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップでは、同梱の `NOTICE-GEMMA.txt` と [Gemma Terms](https://ai.google.dev/gemma/terms) を確認して同意すると、固定リビジョンから取得します。
+
+依存パッケージとモデルの取得にはネットワーク接続と数GBの空き容量が必要です。`Program Files` など書き込み禁止の場所では、画面の「管理者としてセットアップ」からUACを承認するか、書き込み可能なフォルダへEXEを移動してください。途中でキャンセルしても、次回起動時に完了済みの段階から再開します。
+
+モデルはすべて EXE 隣の `models/` に保存されます。旧バージョンの `settings.json` に `models_dir` が残っていても、セットアップ、状態表示、ダウンロード、実行時のモデル探索からは無視されます（`LOCALAPPDATA` へはリダイレクトしません）。
+
+要約用 llama-server は空きポートを一時確保して起動します。Phase 3 のワーカー分離では、ポート割り当てと子プロセスのライフサイクルを同一ワーカー内で管理する設計へ移行する予定ですが、現行版では「確保直後に別プロセスがポートを取得する」小さな競合窓を完全にはなくせません。
+
 1. **リポジトリをクローン:**
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git

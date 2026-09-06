@@ -1,0 +1,23 @@
+# GameAssistant embedded runtime dependencies (Windows x64 + NVIDIA CUDA)
+# Versions are pinned for reproducible first-run setup.  The bootstrapper
+# selects the CUDA wheel family with uv's --torch-backend=cu128 option so that
+# generic packages remain on PyPI.
+faster-whisper==1.1.1
+sentence-transformers==5.2.0
+style-bert-vits2==2.5.0
+fastapi==0.116.1
+uvicorn==0.35.0
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1
+websockets==15.0.1
+numpy==1.26.4
+soundfile==0.13.1
+aiohttp==3.12.15
+requests==2.32.5
+transformers==4.56.1
+tokenizers==0.22.0
+huggingface-hub==0.34.4
+safetensors==0.6.2
+ctranslate2==4.6.0
+onnxruntime-gpu==1.23.2

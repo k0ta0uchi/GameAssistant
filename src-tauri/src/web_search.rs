@@ -19,6 +19,12 @@ pub struct WebSearchClient {
     client: reqwest::Client,
 }
 
+impl Default for WebSearchClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebSearchClient {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
@@ -29,7 +35,12 @@ impl WebSearchClient {
     }
 
     /// Brave Search API による Web 検索
-    pub async fn search_brave(&self, query: &str, api_key: &str, count: usize) -> Result<Vec<SearchResultItem>, String> {
+    pub async fn search_brave(
+        &self,
+        query: &str,
+        api_key: &str,
+        count: usize,
+    ) -> Result<Vec<SearchResultItem>, String> {
         if api_key.trim().is_empty() {
             return Err("BRAVE_API_KEY is not set".to_string());
         }
@@ -46,7 +57,10 @@ impl WebSearchClient {
             .map_err(|e| format!("Brave search request failed: {}", e))?;
 
         if !res.status().is_success() {
-            return Err(format!("Brave search API returned status: {}", res.status()));
+            return Err(format!(
+                "Brave search API returned status: {}",
+                res.status()
+            ));
         }
 
         let data: serde_json::Value = res
@@ -55,11 +69,27 @@ impl WebSearchClient {
             .map_err(|e| format!("Failed to parse Brave search response: {}", e))?;
 
         let mut items = Vec::new();
-        if let Some(results) = data.get("web").and_then(|w| w.get("results")).and_then(|r| r.as_array()) {
+        if let Some(results) = data
+            .get("web")
+            .and_then(|w| w.get("results"))
+            .and_then(|r| r.as_array())
+        {
             for item in results {
-                let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let url = item.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let description = item.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let title = item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let url = item
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = item
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 if !title.is_empty() && !url.is_empty() {
                     items.push(SearchResultItem {
@@ -96,8 +126,16 @@ impl WebSearchClient {
         let mut items = Vec::new();
         if let Some(abstract_text) = data.get("AbstractText").and_then(|v| v.as_str()) {
             if !abstract_text.is_empty() {
-                let title = data.get("Heading").and_then(|v| v.as_str()).unwrap_or(query).to_string();
-                let url = data.get("AbstractURL").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let title = data
+                    .get("Heading")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(query)
+                    .to_string();
+                let url = data
+                    .get("AbstractURL")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 items.push(SearchResultItem {
                     title,
                     url,
@@ -109,7 +147,11 @@ impl WebSearchClient {
         if let Some(related) = data.get("RelatedTopics").and_then(|r| r.as_array()) {
             for topic in related.iter().take(5) {
                 if let Some(text) = topic.get("Text").and_then(|v| v.as_str()) {
-                    let first_url = topic.get("FirstURL").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let first_url = topic
+                        .get("FirstURL")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     items.push(SearchResultItem {
                         title: text.chars().take(40).collect(),
                         url: first_url,
@@ -137,13 +179,23 @@ impl WebSearchClient {
 
         let mut summary_lines = Vec::new();
         for (i, r) in results.iter().enumerate() {
-            summary_lines.push(format!("{}. 【{}】\n   {}\n   URL: {}", i + 1, r.title, r.description, r.url));
+            summary_lines.push(format!(
+                "{}. 【{}】\n   {}\n   URL: {}",
+                i + 1,
+                r.title,
+                r.description,
+                r.url
+            ));
         }
 
         let summary_text = if summary_lines.is_empty() {
             "関連するWeb検索結果は見つかりませんでした。".to_string()
         } else {
-            format!("### Web検索結果: {}\n\n{}", clean_query, summary_lines.join("\n\n"))
+            format!(
+                "### Web検索結果: {}\n\n{}",
+                clean_query,
+                summary_lines.join("\n\n")
+            )
         };
 
         WebSearchResponse {
@@ -153,4 +205,3 @@ impl WebSearchClient {
         }
     }
 }
-

@@ -14,6 +14,7 @@ crate-type = ["lib"]
 
 [build-dependencies]
 tauri-build = { version = "2.0.0", features = [] }
+embed-resource = "3.0.11"
 
 [dependencies]
 tauri = { version = "2.0.0", features = [] }
@@ -27,10 +28,15 @@ nvml-wrapper = "0.10"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_System_IO",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
+    "Win32_System_JobObjects",
 ] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
@@ -53,12 +59,12 @@ candle-core = "0.8"
 candle-nn = "0.8"
 candle-transformers = "0.8"
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
-hf-hub = { version = "0.4", default-features = false, features = ["tokio", "native-tls", "ureq"] }
 byteorder = "1.5"
+sha2 = "0.10"
+libc = "0.2"
 
 [profile.dev.package."*"]
 opt-level = 3
 
 [profile.test.package."*"]
 opt-level = 3
-

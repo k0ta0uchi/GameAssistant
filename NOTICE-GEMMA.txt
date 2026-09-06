@@ -1,0 +1,10 @@
+GameAssistant downloads and uses the required Gemma 3 1B model for local
+memory-summary processing. The model weights are not bundled with this application.
+
+Before downloading the model, review and accept the applicable Gemma Terms of
+Use: https://ai.google.dev/gemma/terms
+
+Attribution: Gemma 3 1B IT, GGUF Q4_K_S, from unsloth/gemma-3-1b-it-GGUF.
+Pinned model revision: 477b13ec8f37fac41688958d088232adcd6e0836
+Expected file size: 780993056 bytes
+Expected SHA-256: f1536b0b60e53ffd98c945a3295f51154db3ffdd95329d86971c83c86c56899f

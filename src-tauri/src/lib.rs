@@ -1,40 +1,44 @@
-pub mod resource;
-pub mod window_capture;
-pub mod settings;
+pub mod ai_client;
+pub mod asr;
 pub mod audio;
+pub mod audio_input;
+pub mod bootstrap;
 pub mod lance_memory;
+pub mod local_summary;
+pub mod logger;
+pub mod prompts;
+pub mod resource;
+pub mod session;
+pub mod settings;
+pub mod summary_failure;
 pub mod tts;
 pub mod twitch;
 pub mod web_search;
-pub mod ai_client;
-pub mod session;
-pub mod logger;
-pub mod asr;
-pub mod audio_input;
-pub mod prompts;
+pub mod window_capture;
 
+pub mod memory_v2;
 pub mod model_manager;
 
+use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use resource::{ResourceManager, SystemResources};
-use settings::SkillsResponse;
+use ai_client::{AiClient, AiGenerateOptions, ChatMessage};
 use audio::AudioDevicesResponse;
 use lance_memory::{MemoryItem, MemoryListResponse};
+use logger::{LogEntry, LogManager};
+use model_manager::{ModelManager, ModelStatus};
+use resource::{ResourceManager, SystemResources};
+use session::{SessionEvent, SessionManager};
+use settings::SkillsResponse;
 use tts::{TtsManager, TtsSettings};
 use twitch::{TwitchBotSettings, TwitchService};
 use web_search::{WebSearchClient, WebSearchResponse};
-use ai_client::{AiClient, AiGenerateOptions, ChatMessage};
-use session::{SessionEvent, SessionManager};
-use logger::{LogEntry, LogManager};
-use model_manager::{ModelManager, ModelStatus};
 
-struct AppState {
-    root_dir: PathBuf,
+pub struct AppState {
+    pub(crate) root_dir: PathBuf,
     resource_mgr: ResourceManager,
     tts_mgr: Arc<TtsManager>,
     twitch_service: Arc<TwitchService>,
@@ -43,42 +47,13 @@ struct AppState {
     session_mgr: Arc<SessionManager>,
     log_mgr: Arc<LogManager>,
     model_mgr: Arc<ModelManager>,
+    migration_progress: lance_memory::MigrationProgressHandle,
 }
 
 pub fn resolve_project_root() -> PathBuf {
-    // 1. カレントディレクトリ
-    if let Ok(current) = std::env::current_dir() {
-        if current.join("settings.json").exists() || current.join("scripts").join("asr_server.py").exists() {
-            return current;
-        }
-        if let Some(parent) = current.parent() {
-            if parent.join("settings.json").exists() || parent.join("scripts").join("asr_server.py").exists() {
-                return parent.to_path_buf();
-            }
-        }
-    }
-
-    // 2. 実行ファイル（EXE）のディレクトリ及びその上位
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            if exe_dir.join("settings.json").exists() || exe_dir.join("scripts").join("asr_server.py").exists() {
-                return exe_dir.to_path_buf();
-            }
-            if let Some(parent) = exe_dir.parent() {
-                if parent.join("settings.json").exists() || parent.join("scripts").join("asr_server.py").exists() {
-                    return parent.to_path_buf();
-                }
-            }
-        }
-    }
-
-    // 3. 既知のワークスペースパス
-    let default_path = PathBuf::from("C:/Workspace/GameAssistant");
-    if default_path.exists() {
-        return default_path;
-    }
-
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // Release builds are portable: all runtime data is rooted beside the EXE.
+    // Debug builds retain project-root discovery for the checked-out development tree.
+    bootstrap::resolve_runtime_root()
 }
 
 // -------------------------------------------------------------
@@ -97,12 +72,20 @@ fn list_windows() -> Vec<String> {
 
 #[tauri::command]
 fn capture_window_preview(state: State<AppState>, title: String) -> Option<String> {
-    state.log_mgr.info("Capture", &format!("Capturing window preview for: '{}'", title));
+    state.log_mgr.info(
+        "Capture",
+        &format!("Capturing window preview for: '{}'", title),
+    );
     let result = window_capture::capture_window_base64(&title);
     if result.is_some() {
-        state.log_mgr.info("Capture", "Window preview captured successfully");
+        state
+            .log_mgr
+            .info("Capture", "Window preview captured successfully");
     } else {
-        state.log_mgr.warn("Capture", &format!("Failed to capture window preview for: '{}'", title));
+        state.log_mgr.warn(
+            "Capture",
+            &format!("Failed to capture window preview for: '{}'", title),
+        );
     }
     result
 }
@@ -116,11 +99,45 @@ fn load_settings(state: State<AppState>) -> Value {
 fn save_setting(state: State<AppState>, key: String, value: Value) -> Result<Value, String> {
     if key == "preallocate_vram" {
         if let Some(enable) = value.as_bool() {
-            let _ = state.session_mgr.asr_engine.ws_client.set_preallocate_vram(enable);
-            state.log_mgr.info("System", &format!("VRAM Preallocation updated: {}", enable));
+            let _ = state
+                .session_mgr
+                .asr_engine
+                .ws_client
+                .set_preallocate_vram(enable);
+            state
+                .log_mgr
+                .info("System", &format!("VRAM Preallocation updated: {}", enable));
         }
     }
-    settings::save_setting_key(&state.root_dir, &key, value)
+    if key == "gemma_terms_accepted" && value.as_bool() == Some(true) {
+        // Keep the legacy boolean for compatibility, but only a complete
+        // version/source/model-hash record authorizes Gemma setup and use.
+        settings::save_setting_key(&state.root_dir, &key, Value::Bool(true))?;
+        settings::save_setting_key(
+            &state.root_dir,
+            "gemma_terms_version",
+            Value::String(model_manager::GEMMA_TERMS_VERSION.to_string()),
+        )?;
+        settings::save_setting_key(
+            &state.root_dir,
+            "gemma_terms_model_sha256",
+            Value::String(model_manager::GEMMA_EXPECTED_SHA256.to_string()),
+        )?;
+        settings::save_setting_key(
+            &state.root_dir,
+            "gemma_terms_source",
+            Value::String(model_manager::GEMMA_TERMS_SOURCE.to_string()),
+        )?;
+        bootstrap::clear_setup_error(&state.root_dir)?;
+        Ok(settings::load_settings_file(&state.root_dir))
+    } else {
+        settings::save_setting_key(&state.root_dir, &key, value)
+    }
+}
+
+#[tauri::command]
+fn accept_gemma_terms(state: State<AppState>) -> Result<Value, String> {
+    save_setting(state, "gemma_terms_accepted".to_string(), Value::Bool(true))
 }
 
 #[tauri::command]
@@ -134,9 +151,16 @@ fn get_skill_content(state: State<AppState>, id: String) -> Result<String, Strin
 }
 
 #[tauri::command]
-fn save_skill_content(state: State<AppState>, id: String, content: String) -> Result<SkillsResponse, String> {
+fn save_skill_content(
+    state: State<AppState>,
+    id: String,
+    content: String,
+) -> Result<SkillsResponse, String> {
     settings::save_skill_content(&state.root_dir, &id, &content)?;
-    state.log_mgr.info("Settings", &format!("Saved customized skill content: '{}'", id));
+    state.log_mgr.info(
+        "Settings",
+        &format!("Saved customized skill content: '{}'", id),
+    );
     Ok(settings::scan_skills(&state.root_dir))
 }
 
@@ -146,16 +170,24 @@ fn get_prompts(state: State<AppState>) -> Vec<prompts::PromptItem> {
 }
 
 #[tauri::command]
-fn save_prompt(state: State<AppState>, id: String, value: String) -> Result<Vec<prompts::PromptItem>, String> {
+fn save_prompt(
+    state: State<AppState>,
+    id: String,
+    value: String,
+) -> Result<Vec<prompts::PromptItem>, String> {
     prompts::save_prompt_value(&state.root_dir, &id, &value)?;
-    state.log_mgr.info("Settings", &format!("Saved customized prompt: '{}'", id));
+    state
+        .log_mgr
+        .info("Settings", &format!("Saved customized prompt: '{}'", id));
     Ok(prompts::get_all_prompts(&state.root_dir))
 }
 
 #[tauri::command]
 fn reset_prompt(state: State<AppState>, id: String) -> Result<Vec<prompts::PromptItem>, String> {
     prompts::reset_prompt_value(&state.root_dir, &id)?;
-    state.log_mgr.info("Settings", &format!("Reset prompt to default: '{}'", id));
+    state
+        .log_mgr
+        .info("Settings", &format!("Reset prompt to default: '{}'", id));
     Ok(prompts::get_all_prompts(&state.root_dir))
 }
 
@@ -165,8 +197,23 @@ fn list_audio_devices() -> AudioDevicesResponse {
 }
 
 #[tauri::command]
-async fn list_lance_memories(state: State<'_, AppState>, limit: Option<usize>, offset: Option<usize>) -> Result<MemoryListResponse, String> {
-    lance_memory::list_memories(&state.root_dir, limit, offset).await
+async fn list_lance_memories(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+) -> Result<MemoryListResponse, String> {
+    lance_memory::list_memories_with_progress(
+        &state.root_dir,
+        limit,
+        offset,
+        Some(state.migration_progress.clone()),
+    )
+    .await
+}
+
+#[tauri::command]
+fn get_lance_migration_status(state: State<AppState>) -> lance_memory::MemoryMigrationStatus {
+    state.migration_progress.snapshot()
 }
 
 #[tauri::command]
@@ -175,7 +222,10 @@ async fn delete_lance_memory(state: State<'_, AppState>, id: String) -> Result<b
 }
 
 #[tauri::command]
-async fn delete_lance_memories_bulk(state: State<'_, AppState>, ids: Vec<String>) -> Result<usize, String> {
+async fn delete_lance_memories_bulk(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<usize, String> {
     lance_memory::delete_memories_bulk(&state.root_dir, &ids).await
 }
 
@@ -191,7 +241,9 @@ async fn import_memories_to_lance(
 #[tauri::command]
 fn lance_backup(state: State<AppState>) -> Result<String, String> {
     let res = lance_memory::backup_lance_db(&state.root_dir)?;
-    state.log_mgr.info("LanceDB", &format!("Created LanceDB backup: {}", res));
+    state
+        .log_mgr
+        .info("LanceDB", &format!("Created LanceDB backup: {}", res));
     Ok(res)
 }
 
@@ -203,12 +255,18 @@ fn lance_list_backups(state: State<AppState>) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn lance_restore(state: State<AppState>, backup_name: String) -> Result<(), String> {
     lance_memory::restore_lance_backup(&state.root_dir, &backup_name)?;
-    state.log_mgr.info("LanceDB", &format!("Restored LanceDB from backup: {}", backup_name));
+    state.log_mgr.info(
+        "LanceDB",
+        &format!("Restored LanceDB from backup: {}", backup_name),
+    );
     Ok(())
 }
 
 #[tauri::command]
-async fn lance_export_json(state: State<'_, AppState>, output_filename: Option<String>) -> Result<String, String> {
+async fn lance_export_json(
+    state: State<'_, AppState>,
+    output_filename: Option<String>,
+) -> Result<String, String> {
     let res = lance_memory::export_lance_memories_json(&state.root_dir, output_filename).await?;
     state.log_mgr.info("LanceDB", &res);
     Ok(res)
@@ -216,7 +274,11 @@ async fn lance_export_json(state: State<'_, AppState>, output_filename: Option<S
 
 // --- TTS 音声合成 & 再生 ---
 #[tauri::command]
-async fn tts_speak(state: State<'_, AppState>, text: String, settings: Option<TtsSettings>) -> Result<(), String> {
+async fn tts_speak(
+    state: State<'_, AppState>,
+    text: String,
+    settings: Option<TtsSettings>,
+) -> Result<(), String> {
     let tts_cfg = settings.unwrap_or_default();
     state.tts_mgr.speak(&text, &tts_cfg).await
 }
@@ -233,8 +295,15 @@ async fn tts_play_nod(state: State<'_, AppState>) -> Result<(), String> {
 
 // --- Twitch IRC 連携 ---
 #[tauri::command]
-async fn twitch_connect(app: AppHandle, state: State<'_, AppState>, settings: TwitchBotSettings) -> Result<(), String> {
-    state.twitch_service.connect(settings, Some(app), None).await
+async fn twitch_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    settings: TwitchBotSettings,
+) -> Result<(), String> {
+    state
+        .twitch_service
+        .connect(settings, Some(app), None)
+        .await
 }
 
 #[tauri::command]
@@ -262,18 +331,26 @@ async fn twitch_register_code(
     code: String,
     redirect_uri: Option<String>,
 ) -> Result<twitch::TwitchTokenResponse, String> {
-    let redir = redirect_uri.unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
-    state.twitch_service.exchange_code(&client_id, &client_secret, &code, &redir).await
+    let redir = redirect_uri
+        .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
+    state
+        .twitch_service
+        .exchange_code(&client_id, &client_secret, &code, &redir)
+        .await
 }
 
 #[tauri::command]
 fn twitch_get_auth_url(client_id: String, redirect_uri: Option<String>) -> String {
-    let redir = redirect_uri.unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
+    let redir = redirect_uri
+        .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
     TwitchService::get_auth_url(&client_id, &redir)
 }
 
 #[tauri::command]
-async fn twitch_validate_token(state: State<'_, AppState>, access_token: String) -> Result<twitch::TwitchValidateResponse, String> {
+async fn twitch_validate_token(
+    state: State<'_, AppState>,
+    access_token: String,
+) -> Result<twitch::TwitchValidateResponse, String> {
     state.twitch_service.validate_token(&access_token).await
 }
 
@@ -284,14 +361,24 @@ async fn twitch_refresh_token(
     client_secret: String,
     refresh_token: String,
 ) -> Result<twitch::TwitchTokenResponse, String> {
-    state.twitch_service.refresh_token(&client_id, &client_secret, &refresh_token).await
+    state
+        .twitch_service
+        .refresh_token(&client_id, &client_secret, &refresh_token)
+        .await
 }
 
 // --- Web 検索 ---
 #[tauri::command]
-async fn web_search_query(state: State<'_, AppState>, query: String, brave_api_key: Option<String>) -> Result<WebSearchResponse, String> {
+async fn web_search_query(
+    state: State<'_, AppState>,
+    query: String,
+    brave_api_key: Option<String>,
+) -> Result<WebSearchResponse, String> {
     let key = brave_api_key.unwrap_or_default();
-    Ok(state.web_search_client.search_and_format(&query, &key).await)
+    Ok(state
+        .web_search_client
+        .search_and_format(&query, &key)
+        .await)
 }
 
 // --- AI 生成 ---
@@ -311,7 +398,10 @@ async fn ai_generate(
     }];
 
     let st = settings::load_settings_file(&state.root_dir);
-    let disable_thinking = st.get("disable_thinking_mode").and_then(|v| v.as_bool()).unwrap_or(true);
+    let disable_thinking = st
+        .get("disable_thinking_mode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let thinking_budget = if disable_thinking { Some(0) } else { None };
 
     let options = AiGenerateOptions {
@@ -321,18 +411,27 @@ async fn ai_generate(
         image_base64,
         thinking_budget,
     };
-    state.ai_client.generate_gemini(&gemini_api_key, &model_name, &messages, &options).await
+    state
+        .ai_client
+        .generate_gemini(&gemini_api_key, &model_name, &messages, &options)
+        .await
 }
 
 // --- AI / セッション オーケストレーション ---
 #[tauri::command]
-fn session_start(app: AppHandle, state: State<AppState>) {
-    state.session_mgr.start_session_with_services(Some(app), Some(state.twitch_service.clone()));
+fn session_start(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    bootstrap::runtime_is_ready(&state.root_dir)?;
+    state
+        .session_mgr
+        .start_session_with_services(Some(app), Some(state.twitch_service.clone()));
+    Ok(())
 }
 
 #[tauri::command]
 fn session_stop(app: AppHandle, state: State<AppState>) {
-    state.session_mgr.stop_session_with_services(Some(&state.twitch_service), Some(app));
+    state
+        .session_mgr
+        .stop_session_with_services(Some(&state.twitch_service), Some(app));
 }
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -348,13 +447,20 @@ async fn warmup_asr(state: State<'_, AppState>) -> Result<String, String> {
 
     if IS_WARMING_UP.swap(true, Ordering::SeqCst) {
         let asr_engine = state.session_mgr.asr_engine.clone();
-        return asr_engine.ws_client.warmup().await.map(|_| "Warmup completed".to_string());
+        return asr_engine
+            .ws_client
+            .warmup()
+            .await
+            .map(|_| "Warmup completed".to_string());
     }
 
     let asr_engine = state.session_mgr.asr_engine.clone();
     let log_mgr = state.log_mgr.clone();
 
-    log_mgr.info("ASR", "Warmup requested: Preloading Faster-Whisper CUDA INT8 server into VRAM...");
+    log_mgr.info(
+        "ASR",
+        "Warmup requested: Preloading Faster-Whisper CUDA INT8 server into VRAM...",
+    );
 
     if let Err(e) = asr_engine.ws_client.warmup().await {
         IS_WARMING_UP.store(false, Ordering::SeqCst);
@@ -364,15 +470,23 @@ async fn warmup_asr(state: State<'_, AppState>) -> Result<String, String> {
     IS_WARMED_UP.store(true, Ordering::SeqCst);
     IS_WARMING_UP.store(false, Ordering::SeqCst);
 
-    log_mgr.info("ASR", "Faster-Whisper CUDA INT8 warmup complete! Ready for instant transcription.");
+    log_mgr.info(
+        "ASR",
+        "Faster-Whisper CUDA INT8 warmup complete! Ready for instant transcription.",
+    );
     Ok("Warmup completed for Faster-Whisper CUDA INT8".to_string())
 }
 
 #[tauri::command]
 async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
-    state.log_mgr.info("ASR", "Restarting Whisper GPU worker...");
+    state
+        .log_mgr
+        .info("ASR", "Restarting Whisper GPU worker...");
     state.session_mgr.asr_engine.ws_client.restart().await?;
-    state.log_mgr.info("ASR", "Whisper GPU worker restarted and warmed up successfully.");
+    state.log_mgr.info(
+        "ASR",
+        "Whisper GPU worker restarted and warmed up successfully.",
+    );
     Ok("Whisper GPU worker restarted successfully".to_string())
 }
 
@@ -391,20 +505,91 @@ async fn download_model(
 ) -> Result<(), String> {
     let model_mgr = state.model_mgr.clone();
     let root_dir = state.root_dir.clone();
-    state.log_mgr.info("Model", &format!("Starting download for model: {}", model_id));
-    let res = model_mgr.download_model(app, root_dir, model_id.clone(), custom_dir).await;
+    state.log_mgr.info(
+        "Model",
+        &format!("Starting download for model: {}", model_id),
+    );
+    let res = model_mgr
+        .download_model(app, root_dir, model_id.clone(), custom_dir)
+        .await;
     if let Err(ref e) = res {
-        state.log_mgr.error("Model", &format!("Failed to download {}: {}", model_id, e));
+        state
+            .log_mgr
+            .error("Model", &format!("Failed to download {}: {}", model_id, e));
     } else {
-        state.log_mgr.info("Model", &format!("Successfully downloaded model: {}", model_id));
+        state.log_mgr.info(
+            "Model",
+            &format!("Successfully downloaded model: {}", model_id),
+        );
     }
     res
 }
 
 #[tauri::command]
-fn cancel_download_model(state: State<AppState>, model_id: String) {
-    state.log_mgr.info("Model", &format!("Cancelled download for model: {}", model_id));
-    state.model_mgr.cancel_download(&model_id);
+fn cancel_download_model(state: State<AppState>, model_id: String) -> bool {
+    state.log_mgr.info(
+        "Model",
+        &format!("Cancelled download for model: {}", model_id),
+    );
+    state.model_mgr.cancel_download(&model_id)
+}
+
+// --- Portable runtime bootstrap ---
+#[tauri::command]
+fn get_runtime_status(state: State<AppState>) -> Result<bootstrap::RuntimeStatus, String> {
+    bootstrap::runtime_status(&state.root_dir)
+}
+
+#[tauri::command]
+fn get_setup_status(state: State<AppState>) -> Result<bootstrap::RuntimeStatus, String> {
+    bootstrap::runtime_status(&state.root_dir)
+}
+
+#[tauri::command]
+async fn setup_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bootstrap::RuntimeStatus, String> {
+    let root_dir = state.root_dir.clone();
+    let model_mgr = state.model_mgr.clone();
+    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
+}
+
+#[tauri::command]
+async fn run_setup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bootstrap::RuntimeStatus, String> {
+    let root_dir = state.root_dir.clone();
+    let model_mgr = state.model_mgr.clone();
+    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
+}
+
+#[tauri::command]
+fn cancel_runtime_setup(state: State<AppState>) {
+    bootstrap::cancel_setup();
+    for model in model_manager::get_defined_models()
+        .into_iter()
+        .filter(|model| model.required)
+    {
+        state.model_mgr.cancel_download(&model.id);
+    }
+}
+
+#[tauri::command]
+fn cancel_setup(state: State<AppState>) {
+    bootstrap::cancel_setup();
+    for model in model_manager::get_defined_models()
+        .into_iter()
+        .filter(|model| model.required)
+    {
+        state.model_mgr.cancel_download(&model.id);
+    }
+}
+
+#[tauri::command]
+fn request_setup_elevation() -> Result<bootstrap::ElevationRequestResult, String> {
+    bootstrap::relaunch_setup_elevated()
 }
 
 #[tauri::command]
@@ -471,6 +656,33 @@ fn clear_app_logs(state: State<AppState>) {
     state.log_mgr.clear();
 }
 
+#[tauri::command]
+async fn unload_local_summary_model(state: State<'_, AppState>) -> Result<(), String> {
+    state.session_mgr.unload_local_summary_model().await;
+    Ok(())
+}
+
+/// Return the local-summary runtime state using the camelCase payload consumed
+/// by the Settings UI.  Status is deliberately a successful response even
+/// when the optional model is missing or the last inference failed: those are
+/// actionable runtime states, not IPC failures.
+#[tauri::command]
+async fn get_local_summary_status(
+    state: State<'_, AppState>,
+) -> Result<local_summary::SummaryRuntimeStatus, String> {
+    Ok(state.session_mgr.local_summary().status().await)
+}
+
+/// Run the Settings UI's fixed local-summary probe.  This path only exercises
+/// the summary runtime and never persists the returned decision to memory.
+#[tauri::command]
+async fn test_local_summary(
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<local_summary::SummaryDecision, String> {
+    state.session_mgr.local_summary().test_summary(&text).await
+}
+
 // -------------------------------------------------------------
 // アプリケーションエントリポイント
 // -------------------------------------------------------------
@@ -496,17 +708,33 @@ fn load_dotenv(root_dir: &std::path::Path) {
 
 pub fn run() {
     let root_dir = resolve_project_root();
+    // Several legacy helpers (for example the app log and nod WAV lookup) use
+    // relative paths.  Normalize the process working directory once so those
+    // paths stay beside the portable EXE even when it is launched from a
+    // desktop shortcut or another working directory.
+    if let Err(error) = std::env::set_current_dir(&root_dir) {
+        eprintln!(
+            "[Bootstrap] unable to set portable working directory {:?}: {}",
+            root_dir, error
+        );
+    }
     load_dotenv(&root_dir);
 
-    let log_mgr = Arc::new(LogManager::new());
+    let log_mgr = Arc::new(LogManager::new(root_dir.clone()));
     logger::set_global_logger(log_mgr.clone());
 
     let tts_mgr = Arc::new(TtsManager::new());
     let twitch_service = Arc::new(TwitchService::new());
     let web_search_client = Arc::new(WebSearchClient::new());
     let ai_client = Arc::new(AiClient::new());
-    let session_mgr = Arc::new(SessionManager::new(root_dir.clone(), tts_mgr.clone(), log_mgr.clone()));
+    let session_mgr = Arc::new(SessionManager::new(
+        root_dir.clone(),
+        tts_mgr.clone(),
+        log_mgr.clone(),
+    ));
     let model_mgr = Arc::new(ModelManager::new());
+    let model_mgr_for_setup = model_mgr.clone();
+    let migration_progress = Arc::new(lance_memory::MemoryMigrationProgress::default());
 
     let app_state = AppState {
         root_dir: root_dir.clone(),
@@ -518,6 +746,7 @@ pub fn run() {
         session_mgr: session_mgr.clone(),
         log_mgr: log_mgr.clone(),
         model_mgr,
+        migration_progress,
     };
 
     tauri::Builder::default()
@@ -530,6 +759,7 @@ pub fn run() {
             capture_window_preview,
             load_settings,
             save_setting,
+            accept_gemma_terms,
             list_skills,
             get_skill_content,
             save_skill_content,
@@ -538,9 +768,23 @@ pub fn run() {
             reset_prompt,
             list_audio_devices,
             list_lance_memories,
+            get_lance_migration_status,
             delete_lance_memory,
             delete_lance_memories_bulk,
             import_memories_to_lance,
+            memory_v2::api::memory_manager_list_raw,
+            memory_v2::api::memory_manager_list_facts,
+            memory_v2::api::memory_manager_list_summaries,
+            memory_v2::api::memory_manager_get_fact_evidence,
+            memory_v2::api::memory_manager_get_raw_event,
+            memory_v2::api::memory_manager_get_fact_conflict,
+            memory_v2::api::memory_manager_confirm_facts,
+            memory_v2::api::memory_manager_edit_fact,
+            memory_v2::api::memory_manager_edit_facts_bulk,
+            memory_v2::api::memory_manager_delete_facts,
+            memory_v2::api::memory_manager_undo,
+            memory_v2::api::memory_manager_retry_summary,
+            memory_v2::api::memory_manager_process_all,
             lance_backup,
             lance_list_backups,
             lance_restore,
@@ -568,17 +812,108 @@ pub fn run() {
             get_models_status,
             download_model,
             cancel_download_model,
+            get_runtime_status,
+            setup_runtime,
+            cancel_runtime_setup,
+            get_setup_status,
+            run_setup,
+            cancel_setup,
+            request_setup_elevation,
             get_app_logs,
             clear_app_logs,
+            unload_local_summary_model,
+            get_local_summary_status,
+            test_local_summary,
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
             log_mgr.set_app_handle(app_handle.clone());
+            session_mgr
+                .local_summary()
+                .set_status_emitter(app_handle.clone());
 
             // 1. Rust ネイティブエンジンの起動通知ログ
-            log_mgr.info("RustNative", "Pure Rust Native Core & LanceDB Engine Online");
-            log_mgr.info("LanceDB", &format!("Database path initialized at: {:?}", root_dir.join("data/lancedb")));
+            log_mgr.info(
+                "RustNative",
+                "Pure Rust Native Core & LanceDB Engine Online",
+            );
+            log_mgr.info(
+                "LanceDB",
+                &format!(
+                    "Database path initialized at: {:?}",
+                    root_dir.join("data/lancedb")
+                ),
+            );
             log_mgr.info("System", &format!("Project root directory: {:?}", root_dir));
+
+            // Extract embedded scripts/uv immediately, then continue long-running
+            // Python/dependency/model setup in the background so the UI can poll
+            // get_runtime_status and show progress/retry controls.
+            log_mgr.info("Bootstrap", "prepare_runtime starting");
+            match bootstrap::prepare_runtime(&root_dir) {
+                Err(error) => {
+                    log_mgr.error("Bootstrap", &error);
+                }
+                Ok(status) => {
+                    log_mgr.info(
+                        "Bootstrap",
+                        &format!(
+                            "prepare_runtime complete: ready={} setup_required={} stage={:?}",
+                            status.ready, status.setup_required, status.current_stage
+                        ),
+                    );
+                    // Do not re-enter the setup worker once the portable runtime
+                    // is already healthy.  Re-running it on every launch creates
+                    // a transient stage transition while the main UI initializes.
+                    if status.ready {
+                        log_mgr.info("Bootstrap", "runtime already ready; setup worker skipped");
+                    } else if model_manager::gemma_terms_accepted(&root_dir) {
+                        let setup_root = root_dir.clone();
+                        let setup_manager = model_mgr_for_setup.clone();
+                        let setup_app = app.handle().clone();
+                        let setup_log = log_mgr.clone();
+                        let elevated_setup = std::env::args().any(|arg| arg == "--elevated-setup");
+                        if elevated_setup {
+                            // The elevated process is a setup worker only.  Keep the
+                            // original standard-user window visible and avoid showing
+                            // a duplicate UI while the UAC-approved worker runs.
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
+                            }
+                        }
+                        tauri::async_runtime::spawn(async move {
+                            setup_log.info("Bootstrap", "setup worker starting");
+                            let setup_result = bootstrap::run_setup(
+                                &setup_root,
+                                Some(setup_manager),
+                                Some(setup_app.clone()),
+                            )
+                            .await;
+                            if let Err(error) = setup_result {
+                                setup_log.error("Bootstrap", &error);
+                                if elevated_setup {
+                                    setup_app.exit(1);
+                                }
+                            } else {
+                                setup_log.info("Bootstrap", "setup worker completed");
+                                if elevated_setup {
+                                    // The elevated helper is only a setup worker; return to
+                                    // the original standard-user process once it completes.
+                                    setup_app.exit(0);
+                                }
+                            }
+                        });
+                    } else {
+                        // Terms are a mandatory user acknowledgement. Keep the first
+                        // launch screen actionable without running a setup attempt that
+                        // would only persist a misleading error state.
+                        log_mgr.info(
+                            "Bootstrap",
+                            "Waiting for Gemma Terms acknowledgement before starting setup",
+                        );
+                    }
+                }
+            }
 
             // 2. バックグラウンドでシステムリソースを 1 秒ごとにフロントエンドに emit
             let app_handle_res = app.handle().clone();
@@ -599,6 +934,7 @@ pub fn run() {
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     state.session_mgr.stop_session();
+                    tauri::async_runtime::block_on(state.session_mgr.unload_local_summary_model());
                 }
             }
         });

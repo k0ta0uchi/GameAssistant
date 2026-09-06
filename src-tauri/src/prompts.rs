@@ -1,6 +1,6 @@
-use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 pub const SYSTEM_INSTRUCTION_CHARACTER: &str = r#"あなたは、ユーザーの質問に答える優秀なAIアシスタントです。
 あなたは**優しい女の子の犬のキャラクター**として振る舞います。以下の指示に従って応答してください。
@@ -150,9 +150,11 @@ pub const MEMORY_SUMMARIZE_PROMPT: &str = r#"ユーザーの発言から重要�
 発言: {text}
 記録:"#;
 
-pub const SESSION_SUMMARIZE_PROMPT: &str = "以下の会話履歴を要約し、重要な情報のみを抽出してください。\n\n";
+pub const SESSION_SUMMARIZE_PROMPT: &str =
+    "以下の会話履歴を要約し、重要な情報のみを抽出してください。\n\n";
 
-pub const TTS_STYLE_INSTRUCTION: &str = "優しく控えめでオドオドしていて、萌え声でかわいく高く透明感のある声で: ";
+pub const TTS_STYLE_INSTRUCTION: &str =
+    "優しく控えめでオドオドしていて、萌え声でかわいく高く透明感のある声で: ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptItem {
@@ -291,12 +293,17 @@ pub fn save_prompt_value(root_dir: &Path, id: &str, value: &str) -> Result<(), S
     // トップレベルと prompts 両方を更新して同期を維持
     if id == "system_instruction_character" {
         if let Value::Object(ref mut map) = current_settings {
-            map.insert("system_prompt".to_string(), Value::String(value.to_string()));
+            map.insert(
+                "system_prompt".to_string(),
+                Value::String(value.to_string()),
+            );
         }
     }
 
     if let Value::Object(ref mut map) = current_settings {
-        let prompts_val = map.entry("prompts".to_string()).or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let prompts_val = map
+            .entry("prompts".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if let Value::Object(ref mut p_map) = prompts_val {
             p_map.insert(id.to_string(), Value::String(value.to_string()));
         }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import './LoadingScreen.css';
+import { dismissStartupLoader } from '../../startupLoader';
 
 interface LoadingScreenProps {
   isConnected: boolean;
@@ -20,13 +21,7 @@ export const LoadingScreen: React.FC<LoadingScreenProps> = ({ isConnected, onRea
 
   // React マウント時に HTML インラインプレローダーを消去
   useEffect(() => {
-    const startupLoader = document.getElementById('app-startup-loader');
-    if (startupLoader) {
-      startupLoader.classList.add('loaded');
-      setTimeout(() => {
-        startupLoader.remove();
-      }, 300);
-    }
+    dismissStartupLoader();
   }, []);
 
   // 接続待機メッセージの更新

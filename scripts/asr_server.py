@@ -8,6 +8,22 @@ import json
 import logging
 import os
 import sys
+
+# Keep a dependency-free executable contract check for the portable launcher.
+# It is intentionally handled before optional ML packages are imported so setup
+# and behavior tests can verify the path/env contract without model fixtures.
+if "--validate-runtime-contract" in sys.argv:
+    _contract_keys = ("RUNTIME_ROOT", "SETTINGS_PATH", "MODELS_DIR", "CACHE_DIR")
+    try:
+        _contract = {
+            key: os.path.abspath(os.environ[key]) for key in _contract_keys
+        }
+    except KeyError as error:
+        print(f"missing required runtime environment variable: {error}", file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps(_contract, sort_keys=True))
+    raise SystemExit(0)
+
 import numpy as np
 import websockets
 from faster_whisper import WhisperModel
@@ -24,25 +40,23 @@ logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logger = logging.getLogger("ASR-Server")
 logger.setLevel(logging.INFO)
 
-# モデル保存先ディレクトリの取得
-def get_models_dir() -> str:
-    # 1. 環境変数
-    if "MODELS_DIR" in os.environ and os.path.exists(os.environ["MODELS_DIR"]):
-        return os.environ["MODELS_DIR"]
-    # 2. settings.json
-    try:
-        if os.path.exists("settings.json"):
-            with open("settings.json", "r", encoding="utf-8") as f:
-                st = json.load(f)
-                if "models_dir" in st and os.path.exists(st["models_dir"]):
-                    return st["models_dir"]
-    except Exception:
-        pass
-    # 3. デフォルト
-    return "./models"
-
-MODELS_DIR = get_models_dir()
+# Rust passes the complete portable runtime contract explicitly.  Do not
+# consult inherited settings or model/cache settings: those can point outside
+# the EXE directory or vary with the process CWD.
+RUNTIME_ROOT = os.path.abspath(os.environ["RUNTIME_ROOT"])
+SETTINGS_PATH = os.path.abspath(os.environ["SETTINGS_PATH"])
+MODELS_DIR = os.path.abspath(os.environ["MODELS_DIR"])
+HF_CACHE_DIR = os.path.abspath(os.environ["CACHE_DIR"])
 PORT = 18088
+# Keep any library-managed cache beside the portable EXE as well.  Required
+# models are downloaded by GameAssistant's Models Manager before this server
+# starts; there is deliberately no user-profile/HF-cache fallback.
+os.makedirs(HF_CACHE_DIR, exist_ok=True)
+os.environ["HF_HOME"] = HF_CACHE_DIR
+os.environ["TRANSFORMERS_CACHE"] = HF_CACHE_DIR
+os.environ["HF_HUB_CACHE"] = HF_CACHE_DIR
+os.environ["HUGGINGFACE_HUB_CACHE"] = HF_CACHE_DIR
+os.environ["SENTENCE_TRANSFORMERS_HOME"] = HF_CACHE_DIR
 
 # 1. Faster-Whisper ASR モデルロード
 local_whisper_path = os.path.join(MODELS_DIR, "kotoba-whisper-v2.0-faster")
@@ -50,8 +64,10 @@ if os.path.exists(local_whisper_path) and (os.path.exists(os.path.join(local_whi
     whisper_model_source = local_whisper_path
     logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)...")
 else:
-    whisper_model_source = "kotoba-tech/kotoba-whisper-v2.0-faster"
-    logger.info(f"Loading Faster-Whisper model from Hugging Face: {whisper_model_source} (CUDA INT8)...")
+    raise RuntimeError(
+        f"Required Kotoba-Whisper model is missing at {local_whisper_path}; "
+        "complete first-launch setup before starting ASR."
+    )
 
 try:
     whisper_model = WhisperModel(whisper_model_source, device="cuda", compute_type="int8")
@@ -66,14 +82,17 @@ _embedding_model = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        local_path = os.path.join(get_models_dir(), "GLuCoSE-base-ja")
+        local_path = os.path.join(MODELS_DIR, "GLuCoSE-base-ja")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if os.path.exists(local_path):
             model_name = local_path
             logger.info(f"Loading local embedding model from: {model_name} ({device})...")
         else:
-            model_name = "pkshatech/GLuCoSE-base-ja"
-            logger.info(f"Loading embedding model from Hugging Face: {model_name} ({device})...")
+            logger.error(
+                f"Required GLuCoSE-base-ja model is missing at {local_path}; "
+                "complete first-launch setup before using embeddings."
+            )
+            return None
         try:
             _embedding_model = SentenceTransformer(model_name, device=device)
             logger.info(f"GLuCoSE-base-ja embedding model successfully loaded on {device}!")
@@ -108,7 +127,7 @@ def set_vram_preallocation(enable: bool) -> bool:
 
 # 起動時の設定読み込み
 try:
-    with open("settings.json", "r", encoding="utf-8") as f:
+    with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
         st = json.load(f)
         if st.get("preallocate_vram", False):
             set_vram_preallocation(True)

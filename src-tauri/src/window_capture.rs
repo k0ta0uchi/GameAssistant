@@ -1,19 +1,18 @@
-use std::ffi::OsString;
-use std::os::windows::ffi::OsStringExt;
-use std::io::Cursor;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use image::{ImageBuffer, Rgba};
+use std::ffi::OsString;
+use std::io::Cursor;
+use std::os::windows::ffi::OsStringExt;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC,
-    GetDIBits, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    HDC, SRCCOPY,
+    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetDesktopWindow, GetSystemMetrics, GetWindowLongW,
-    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed,
-    GWL_EXSTYLE, SM_CXSCREEN, SM_CYSCREEN, WS_EX_TOOLWINDOW,
+    EnumWindows, GetDesktopWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
+    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, GWL_EXSTYLE,
+    SM_CXSCREEN, SM_CYSCREEN, WS_EX_TOOLWINDOW,
 };
 
 #[link(name = "user32")]
@@ -148,7 +147,8 @@ unsafe extern "system" fn find_window_callback(hwnd: HWND, lparam: LPARAM) -> BO
 /// 3. プライマリスクリーン全体
 pub fn capture_window_base64(title: &str) -> Option<String> {
     let clean_title = title.trim();
-    if clean_title.is_empty() || clean_title == "(No active windows)" || clean_title == "全画面" {
+    if clean_title.is_empty() || clean_title == "(No active windows)" || clean_title == "全画面"
+    {
         return capture_primary_screen_base64();
     }
 
@@ -275,7 +275,9 @@ pub fn capture_window_base64(title: &str) -> Option<String> {
                 let bmp2 = CreateCompatibleBitmap(hdc_window, crop_w, crop_h);
                 let old2 = SelectObject(hdc2, bmp2);
 
-                let _ = BitBlt(hdc2, 0, 0, crop_w, crop_h, hdc_window, crop_x, crop_y, SRCCOPY);
+                let _ = BitBlt(
+                    hdc2, 0, 0, crop_w, crop_h, hdc_window, crop_x, crop_y, SRCCOPY,
+                );
 
                 SelectObject(hdc2, old2);
 
@@ -315,7 +317,17 @@ pub fn capture_window_base64(title: &str) -> Option<String> {
                 let hbitmap = CreateCompatibleBitmap(hdc_desktop, full_w, full_h);
                 let old = SelectObject(hdc_mem, hbitmap);
 
-                let _ = BitBlt(hdc_mem, 0, 0, full_w, full_h, hdc_desktop, rect.left, rect.top, SRCCOPY);
+                let _ = BitBlt(
+                    hdc_mem,
+                    0,
+                    0,
+                    full_w,
+                    full_h,
+                    hdc_desktop,
+                    rect.left,
+                    rect.top,
+                    SRCCOPY,
+                );
 
                 SelectObject(hdc_mem, old);
 
@@ -358,10 +370,11 @@ pub fn capture_window_base64(title: &str) -> Option<String> {
             chunk[3] = 255;
         }
 
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> = match ImageBuffer::from_raw(final_w as u32, final_h as u32, rgba_buffer) {
-            Some(im) => im,
-            None => return capture_primary_screen_base64(),
-        };
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            match ImageBuffer::from_raw(final_w as u32, final_h as u32, rgba_buffer) {
+                Some(im) => im,
+                None => return capture_primary_screen_base64(),
+            };
 
         // メモリ上で PNG エンコード（ファイルウォッチャーの再起動ループを防止）
         let mut png_bytes: Vec<u8> = Vec::new();
