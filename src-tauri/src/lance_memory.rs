@@ -136,7 +136,10 @@ pub const VECTOR_SOURCE_SUMMARY: &str = "summary";
 pub const VECTOR_SOURCE_NONE: &str = "none";
 
 pub const SUMMARY_MODEL_ID: &str = "gemma-3-1b-it-Q4_K_S.gguf";
-pub const SUMMARY_PROMPT_VERSION: &str = "v2";
+/// Version of the local-summary input contract.  Bump the storage-facing
+/// constant whenever the prompt or admission policy changes so an explicit
+/// Process-all pass can safely re-evaluate rows produced by an older contract.
+pub const SUMMARY_PROMPT_VERSION: &str = crate::memory_v2::repository::SUMMARY_PROMPT_VERSION;
 
 /// The only event types that may enter the local summary model.  Keep this
 /// allowlist in the storage-facing module so live capture, retry, queueing,
@@ -161,11 +164,68 @@ pub fn summary_admission(event_type: &str, content: &str) -> SummaryAdmission {
     if !is_summary_candidate_type(event_type) {
         return SummaryAdmission::NotApplicable;
     }
-    if redacted_summary_document(content).is_some() {
+    if let Some(redacted) = redacted_summary_document(content) {
+        if is_ephemeral_summary_text(&redacted) {
+            return SummaryAdmission::Invalid;
+        }
         SummaryAdmission::Eligible
     } else {
         SummaryAdmission::Invalid
     }
+}
+
+/// Deterministically remove the tiny, high-volume utterances that cannot
+/// carry a durable fact.  This keeps Process all from spending a model call
+/// on stream noise while leaving all other human text for Gemma's decision.
+/// The list is intentionally conservative and exact-match only; raw rows are
+/// never deleted or rewritten by this admission check.
+fn is_ephemeral_summary_text(content: &str) -> bool {
+    let normalized = content
+        .trim()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if normalized.chars().count() <= 1 {
+        return true;
+    }
+    matches!(
+        normalized.as_str(),
+        "ああ"
+            | "あー"
+            | "ええ"
+            | "えー"
+            | "おお"
+            | "おー"
+            | "はい"
+            | "はいはい"
+            | "うん"
+            | "うんうん"
+            | "そう"
+            | "そうそう"
+            | "そうですね"
+            | "なるほど"
+            | "なるほどね"
+            | "いいね"
+            | "どうも"
+            | "こんにちは"
+            | "こんばんは"
+            | "よろしく"
+            | "よろしくお願いします"
+            | "ありがとう"
+            | "ありがとうございます"
+            | "またね"
+            | "お疲れ様"
+            | "お疲れ様でした"
+            | "おつかれさま"
+            | "おつかれさまでした"
+            | "了解"
+            | "わかりました"
+            | "分かりました"
+            | "ok"
+            | "ｗ"
+            | "www"
+    )
 }
 
 /// Return the redaction-safe document for an admitted candidate.  Callers use
@@ -1946,6 +2006,9 @@ pub async fn queue_summary_backfill_batch_ids_with_repository(
                     durable_statuses
                         .get(&event_id)
                         .map(|status| status.status.as_str()),
+                    durable_statuses
+                        .get(&event_id)
+                        .and_then(|status| status.prompt_version.as_deref()),
                 )
         })
         .collect::<Vec<_>>();
@@ -2032,7 +2095,11 @@ pub async fn queue_summary_backfill_batch_ids_with_repository(
     Ok(admitted)
 }
 
-fn summary_backfill_snapshot_candidate(row: &StoredMemory, durable_status: Option<&str>) -> bool {
+fn summary_backfill_snapshot_candidate(
+    row: &StoredMemory,
+    durable_status: Option<&str>,
+    durable_prompt_version: Option<&str>,
+) -> bool {
     if summary_admission(&row.memory_type, &row.document) != SummaryAdmission::Eligible {
         return false;
     }
@@ -2040,6 +2107,15 @@ fn summary_backfill_snapshot_candidate(row: &StoredMemory, durable_status: Optio
     // marker is intentionally recoverable: its Fact may have been lost before
     // the journal transaction committed.
     let status = durable_status.or(row.summary_status.as_deref());
+    // A changed prompt/admission contract makes prior terminal decisions
+    // stale.  Reopen them during an explicit Process-all pass so a new
+    // contract can repair a previous false decline or malformed summary.
+    let stale_prompt = durable_prompt_version
+        .or(row.summary_prompt_version.as_deref())
+        .is_some_and(|version| version != SUMMARY_PROMPT_VERSION);
+    if stale_prompt {
+        return !matches!(status, Some(SUMMARY_STATUS_DELETED));
+    }
     matches!(
         status,
         None | Some(SUMMARY_STATUS_PENDING)
@@ -4131,6 +4207,31 @@ mod tests {
     }
 
     #[test]
+    fn candidate_admission_rejects_exact_ephemeral_filler_before_gemma() {
+        for content in [
+            "はい",
+            " は い ",
+            "うんうん",
+            "こんにちは",
+            "ありがとうございます",
+            "OK",
+            "www",
+            "あ",
+        ] {
+            assert_eq!(
+                summary_admission("user_speech", content),
+                SummaryAdmission::Invalid,
+                "ephemeral content must not reach the model: {content:?}"
+            );
+        }
+        assert_eq!(
+            summary_admission("user_speech", "はい、猫を2匹飼っています。"),
+            SummaryAdmission::Eligible,
+            "exact-match filtering must remain conservative"
+        );
+    }
+
+    #[test]
     fn noncandidate_rows_are_never_backfill_candidates_or_marked_skipped() {
         for memory_type in [
             "ai_response",
@@ -4157,8 +4258,8 @@ mod tests {
     }
 
     #[test]
-    fn new_summary_attempts_use_contract_v2() {
-        assert_eq!(SUMMARY_PROMPT_VERSION, "v2");
+    fn new_summary_attempts_use_contract_v3() {
+        assert_eq!(SUMMARY_PROMPT_VERSION, "v3");
         assert_eq!(SUMMARY_MODEL_ID, "gemma-3-1b-it-Q4_K_S.gguf");
     }
 

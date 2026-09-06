@@ -3336,7 +3336,7 @@ mod tests {
             summary: None,
             summary_status: Some(lance_memory::SUMMARY_STATUS_COMPLETED.into()),
             summary_model: Some("model".into()),
-            summary_prompt_version: Some("v2".into()),
+            summary_prompt_version: Some(lance_memory::SUMMARY_PROMPT_VERSION.into()),
             vector_source: Some(lance_memory::VECTOR_SOURCE_SUMMARY.into()),
         };
         let rows = vec![row("done-1"), row("done-2"), row("new-1")];
@@ -3352,7 +3352,7 @@ mod tests {
                     super::SummaryStatusRecord {
                         entity_id: item.id.clone(),
                         status: "completed".into(),
-                        prompt_version: Some("v2".into()),
+                        prompt_version: Some(lance_memory::SUMMARY_PROMPT_VERSION.into()),
                         ..Default::default()
                     },
                 )

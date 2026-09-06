@@ -37,8 +37,11 @@ const VECTOR_DIM: i32 = EMBEDDING_DIMENSIONS as i32;
 
 /// Contract version for all newly-created summary attempts.  The version
 /// covers the source fields, prompt serialization, output schema, and
-/// validator together; it is not merely a display label.
-pub const SUMMARY_PROMPT_VERSION: &str = "v2";
+/// validator together; it is not merely a display label.  Keep this as the
+/// single storage-facing source of truth; the compatibility adapter and local
+/// model service re-export it so a prompt bump cannot leave terminal rows
+/// permanently stale.
+pub const SUMMARY_PROMPT_VERSION: &str = "v3";
 const SUMMARY_MAX_CHARS: usize = 240;
 pub const SUMMARY_MODEL_ID: &str = "gemma-3-1b-it-Q4_K_S.gguf";
 
@@ -719,7 +722,10 @@ impl MemoryRepository {
     /// this API makes the durable attempt contract explicit at the boundary.
     pub async fn append_summary_attempt(&self, attempt: SummaryAttempt) -> StoreResult<bool> {
         if attempt.prompt_version != SUMMARY_PROMPT_VERSION {
-            return Err("summary attempts must use prompt_version v2".to_string());
+            return Err(format!(
+                "summary attempts must use prompt_version {}",
+                SUMMARY_PROMPT_VERSION
+            ));
         }
         let envelope = summary_status_envelope_with_lease(
             &attempt.event_id,
@@ -3601,7 +3607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_summary_attempts_have_explicit_v2_metadata() {
+    async fn new_summary_attempts_have_explicit_v3_metadata() {
         let root = std::env::temp_dir().join(format!(
             "memory-v2-summary-attempt-metadata-{}",
             Uuid::new_v4()
@@ -3630,7 +3636,7 @@ mod tests {
         assert_eq!(payload["attempt_id"], "attempt-1");
         assert_eq!(payload["event_id"], payload["entity_id"]);
         assert_eq!(payload["model_id"], "gemma-test");
-        assert_eq!(payload["prompt_version"], "v2");
+        assert_eq!(payload["prompt_version"], "v3");
         assert_eq!(payload["status"], "pending");
         assert!(payload.get("reason").is_some());
         let _ = std::fs::remove_dir_all(root);
@@ -3665,7 +3671,10 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(status.status, "fallback");
-        assert_eq!(status.prompt_version.as_deref(), Some("v2"));
+        assert_eq!(
+            status.prompt_version.as_deref(),
+            Some(SUMMARY_PROMPT_VERSION)
+        );
         assert_eq!(status.attempt_id.as_deref(), Some("attempt-fallback"));
         let _ = std::fs::remove_dir_all(root);
     }
