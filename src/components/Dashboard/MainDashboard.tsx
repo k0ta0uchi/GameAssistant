@@ -3,6 +3,8 @@ import { StatusBadges } from './StatusBadges';
 import { GeminiCard } from './GeminiCard';
 import { AsrCard, AsrData } from './AsrCard';
 import { SystemStatus, AsrEntry, FactEntry } from '../../types';
+import type { RuntimeInitializationStatus } from '../../types';
+import { RuntimeInitializationCard } from './RuntimeInitializationCard';
 
 interface MainDashboardProps {
   status: SystemStatus;
@@ -12,6 +14,8 @@ interface MainDashboardProps {
   factHistory: FactEntry[];
   commentaryProgress: number;
   commentaryRemaining: number;
+  runtimeInitialization: RuntimeInitializationStatus;
+  onRetryRuntimeInitialization: () => void;
 }
 
 export const MainDashboard: React.FC<MainDashboardProps> = ({
@@ -22,6 +26,8 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
   factHistory,
   commentaryProgress,
   commentaryRemaining,
+  runtimeInitialization,
+  onRetryRuntimeInitialization,
 }) => {
   return (
     <div className="flex-1 flex flex-col p-4 gap-3 overflow-hidden bg-[#08090a]">
@@ -32,6 +38,11 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
         </div>
         <StatusBadges status={status} />
       </div>
+
+      <RuntimeInitializationCard
+        status={runtimeInitialization}
+        onRetry={onRetryRuntimeInitialization}
+      />
 
       {/* メインエリア (Gemini AI 回答 & ASR 文字起こし) */}
       <div className="flex-1 flex flex-col gap-3 min-h-0">

@@ -4,6 +4,8 @@ import { Play, Square, RotateCcw } from 'lucide-react';
 interface ActionButtonsProps {
   sessionRunning: boolean;
   sessionStarting?: boolean;
+  enginesReady?: boolean;
+  enginesInitializing?: boolean;
   onStart: () => void;
   onStop: () => void;
   onRestartWhisper: () => void;
@@ -12,6 +14,8 @@ interface ActionButtonsProps {
 export const ActionButtons: React.FC<ActionButtonsProps> = ({
   sessionRunning,
   sessionStarting = false,
+  enginesReady = true,
+  enginesInitializing = false,
   onStart,
   onStop,
   onRestartWhisper,
@@ -29,18 +33,26 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({
       ) : (
         <button
           onClick={onStart}
-          disabled={sessionStarting}
-          aria-busy={sessionStarting}
+          disabled={sessionStarting || !enginesReady}
+          aria-busy={sessionStarting || enginesInitializing}
           className="w-full flex items-center justify-center gap-2 py-2.5 px-4 linear-btn-primary active:scale-[0.98] disabled:cursor-wait disabled:opacity-60"
         >
           <Play className="w-4 h-4 fill-current" />
-          <span>{sessionStarting ? "Preparing ASR..." : "Start Session"}</span>
+          <span>
+            {sessionStarting
+              ? "Preparing ASR..."
+              : enginesInitializing
+                ? "Initializing engines..."
+                : !enginesReady
+                  ? "Engines unavailable"
+                  : "Start Session"}
+          </span>
         </button>
       )}
 
       <button
         onClick={onRestartWhisper}
-        disabled={sessionStarting}
+        disabled={sessionStarting || enginesInitializing}
         className="w-full flex items-center justify-center gap-2 py-1.5 px-3 linear-btn-ghost text-xs text-[#8a8f98] hover:text-[#d0d6e0] disabled:cursor-wait disabled:opacity-40"
         title="音声認識エンジン (Whisper) を再起動します"
       >

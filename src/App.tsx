@@ -23,6 +23,8 @@ export function App() {
     ram,
     commentaryTimer,
     sessionStarting,
+    runtimeInitialization,
+    initializeRuntime,
     logs,
     inputDevices,
     discordDevices,
@@ -109,6 +111,10 @@ export function App() {
           <Sidebar
             sessionRunning={status.session}
             sessionStarting={sessionStarting}
+            enginesReady={
+              !tauriEnvironment || runtimeInitialization.status === "completed"
+            }
+            enginesInitializing={runtimeInitialization.status === "running"}
             onStartSession={startSession}
             onStopSession={stopSession}
             onRestartWhisper={restartWhisper}
@@ -171,6 +177,10 @@ export function App() {
               factHistory={factHistory}
               commentaryProgress={commentaryTimer.progress}
               commentaryRemaining={commentaryTimer.remaining}
+              runtimeInitialization={runtimeInitialization}
+              onRetryRuntimeInitialization={() => {
+                void initializeRuntime();
+              }}
             />
             <LiveLogTerminal logs={logs} onClear={clearLogs} />
           </main>

@@ -1578,28 +1578,29 @@ impl MemoryRepository {
     async fn commit_operation(&self, envelope: OperationEnvelope) -> StoreResult<bool> {
         let _write_guard = journal_write_lock().lock().await;
         let journal = self.journal.clone();
-        let report = journal.recover().map_err(|error| error.to_string())?;
+        // The compact index validates the journal stream without retaining all
+        // historical JSON payloads. A live raw append must not rebuild a
+        // several-hundred-megabyte RecoveryReport before and after every
+        // operation; the full report remains reserved for small-journal crash
+        // recovery and compatibility callers.
+        let index = journal.recover_index().map_err(|error| error.to_string())?;
         if envelope.kind() == OperationKind::RawEvent {
             // Raw events are immutable by event identity.  Operation IDs are
             // content-addressed, so accepting a second envelope for the same
             // event ID would otherwise append a second journal operation that
             // becomes a silent no-op in the materialized table.
-            for record in report.records().iter().filter(|record| {
-                record.state() == JournalState::Operation
-                    && record.operation_kind() == OperationKind::RawEvent.as_str()
-            }) {
-                let existing: OperationEnvelope = serde_json::from_value(record.payload().clone())
-                    .map_err(|error| format!("invalid raw event journal envelope: {error}"))?;
-                if existing.entity_id() == envelope.entity_id()
-                    && existing.operation_id() != envelope.operation_id()
-                {
-                    // Older compatibility imports used the wall clock when a
-                    // legacy timestamp could not be parsed.  Such an import
-                    // can leave the same event with a different operation ID
-                    // after a retry.  The event identity and content are the
-                    // durable truth; tolerate only that historical timestamp
-                    // drift and continue rejecting actual content conflicts.
-                    if same_raw_event_except_timestamp(existing.payload(), envelope.payload()) {
+            if let Some(existing) = index.raw_events.get(envelope.entity_id()) {
+                if existing.operation_id != envelope.operation_id() {
+                    // The compact raw-event fingerprint excludes only the
+                    // legacy timestamp drift tolerated by the old importer.
+                    // Never accept an absent fingerprint as proof of equality.
+                    let incoming_fingerprint = raw_event_fingerprint(envelope.payload());
+                    if existing
+                        .fingerprint
+                        .as_ref()
+                        .zip(incoming_fingerprint.as_ref())
+                        .is_some_and(|(left, right)| left == right)
+                    {
                         return Ok(false);
                     }
                     return Err(format!(
@@ -1609,44 +1610,34 @@ impl MemoryRepository {
                 }
             }
         }
-        let already_present = report.records().iter().any(|record| {
-            record.state() == JournalState::Operation
-                && record.operation_id() == envelope.operation_id()
-        });
-        if let Some(record) = report
-            .replayable_record_refs()
-            .into_iter()
-            .find(|record| record.operation_id() == envelope.operation_id())
-        {
-            self.apply_record(record, false).await?;
-            self.publish_manifest(&journal)?;
+        let operation_id = envelope.operation_id().to_string();
+        let already_present = index.operation_ids.contains(&operation_id);
+        if index.committed_operation_ids.contains(&operation_id) {
+            let record = synthetic_operation_record(envelope.clone())?;
+            self.apply_record(&record, false).await?;
+            self.publish_manifest_for_sequence(index.next_sequence.saturating_sub(1))?;
             return Ok(false);
         }
 
-        if let Some(record) = report.records().iter().find(|record| {
-            record.state() == JournalState::Operation
-                && record.operation_id() == envelope.operation_id()
-        }) {
+        if let Some(operation) = index.operations.get(&operation_id) {
             // An operation record can survive a crash before its commit frame.
             // Finish that existing batch rather than treating it as a retry
             // and leaving the durable intent unapplied forever.
             self.journal
-                .commit_batch(record.batch_id())
+                .commit_batch(operation.batch_id.as_str())
                 .map_err(|error| error.to_string())?;
-        } else if let Some(begin) = report.records().iter().find(|record| {
-            record.state() == JournalState::Begin
-                && !report.records().iter().any(|operation| {
-                    operation.batch_id() == record.batch_id()
-                        && operation.state() == JournalState::Operation
-                })
-        }) {
+        } else if let Some(begin) = index
+            .open_batch
+            .as_ref()
+            .filter(|batch| batch.operations.is_empty())
+        {
             // Likewise, complete a batch that only made it through its begin
             // frame after an interrupted write.
             self.journal
-                .append_operation_envelope(begin.batch_id(), &envelope)
+                .append_operation_envelope(begin.batch_id.as_str(), &envelope)
                 .map_err(|error| error.to_string())?;
             self.journal
-                .commit_batch(begin.batch_id())
+                .commit_batch(begin.batch_id.as_str())
                 .map_err(|error| error.to_string())?;
         } else {
             let batch_id = format!("batch-{}", Uuid::new_v4());
@@ -1661,15 +1652,23 @@ impl MemoryRepository {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        let committed_report = self.journal.recover().map_err(|error| error.to_string())?;
-        if let Some(record) = committed_report
-            .replayable_record_refs()
-            .into_iter()
-            .find(|record| record.operation_id() == envelope.operation_id())
+        let committed_index = self
+            .journal
+            .recover_index()
+            .map_err(|error| error.to_string())?;
+        if committed_index
+            .committed_operation_ids
+            .contains(&operation_id)
         {
-            self.apply_record(record, true).await?;
+            let record = synthetic_operation_record(envelope)?;
+            self.apply_record(&record, true).await?;
+        } else {
+            return Err(format!(
+                "journal operation was not committed: {}",
+                operation_id
+            ));
         }
-        self.publish_manifest(&self.journal)?;
+        self.publish_manifest_for_sequence(committed_index.next_sequence.saturating_sub(1))?;
         Ok(!already_present)
     }
 
@@ -1694,10 +1693,13 @@ impl MemoryRepository {
             for envelope in &envelopes {
                 if envelope.kind() == OperationKind::RawEvent {
                     if let Some(existing) = index.raw_events.get(envelope.entity_id()) {
-                        if existing.operation_id != envelope.operation_id()
-                            && existing.fingerprint.as_deref()
-                                != raw_event_fingerprint(envelope.payload()).as_deref()
-                        {
+                        let incoming_fingerprint = raw_event_fingerprint(envelope.payload());
+                        let same_fingerprint = existing
+                            .fingerprint
+                            .as_ref()
+                            .zip(incoming_fingerprint.as_ref())
+                            .is_some_and(|(left, right)| left == right);
+                        if existing.operation_id != envelope.operation_id() && !same_fingerprint {
                             return Err(format!(
                                 "conflicting raw event operation for event {}",
                                 envelope.entity_id()
@@ -2192,8 +2194,8 @@ impl MemoryRepository {
     }
 
     fn publish_manifest(&self, journal: &Journal) -> StoreResult<()> {
-        let report = journal.recover().map_err(|error| error.to_string())?;
-        self.publish_manifest_for_report(&report)
+        let index = journal.recover_index().map_err(|error| error.to_string())?;
+        self.publish_manifest_for_sequence(index.next_sequence.saturating_sub(1))
     }
 
     fn publish_manifest_for_report(
@@ -3296,6 +3298,45 @@ mod tests {
         // spans an await point.
         drop(gate);
         assert!(task.await.unwrap().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn large_journal_append_does_not_repeat_full_payload_recovery() {
+        let root =
+            std::env::temp_dir().join(format!("memory-v2-large-journal-append-{}", Uuid::new_v4()));
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "large-journal-seed".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                document: "x".repeat(64 * 1024 * 1024),
+            })
+            .await
+            .unwrap();
+
+        // The seed makes the journal take the indexed append path. A normal
+        // live raw event must reuse JournalIndex instead of reparsing every
+        // historical payload through RecoveryReport.
+        let full_recovery_count = repository.journal.read_report_count_for_test();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "large-journal-live".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-01-01T00:00:01Z".into(),
+                document: "small live event".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            repository.journal.read_report_count_for_test(),
+            full_recovery_count,
+            "large-journal live writes must use the bounded index path"
+        );
+
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -16,6 +16,7 @@ use crate::audio_input::AudioInputManager;
 use crate::lance_memory::{self, MemoryItem, StoredMemory, SummaryBackfillApplyResult};
 use crate::local_summary::LocalSummaryService;
 use crate::logger::LogManager;
+use crate::memory_v2::error::MemoryError;
 use crate::memory_v2::policy::{Policy, PrivacyAdmission};
 use crate::memory_v2::repository::{
     MemoryRepository, SummaryBatchInput, SummaryProcessDecision, SummaryProcessMode,
@@ -66,14 +67,155 @@ const SESSION_EVENT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// keep that path both session-scoped and bounded before it reaches Gemini.
 const BLOG_FALLBACK_MAX_EVENTS: usize = 200;
 const BLOG_MAX_SOURCE_BYTES: usize = 64 * 1024;
+// Keep the historical ASR guard (a one-character wake-stripped fragment is
+// usually an incomplete transcript), while manual/API input continues to
+// accept any non-empty normalized text.
+const MIN_ASR_PROMPT_CHARS: usize = 2;
+const MAX_CHAT_HISTORY_MESSAGES: usize = 40;
+const MAX_CHAT_HISTORY_CHARS: usize = 16 * 1024;
+const INPUT_WEB_SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const INPUT_SCREEN_CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputDropReason {
+    EmptyPrompt,
+    EmptyPromptAfterWakeRemoval,
+    WakeWordRequired,
+    WakeOnly,
+    DuplicateSuppressed,
+    StaleAtEntry,
+    StaleAfterMemorySearch,
+    StaleAfterWebSearch,
+    StaleAfterScreenCapture,
+    StaleBeforeGeneration,
+    StaleAfterGeneration,
+    StaleBeforeTts,
+    StaleAfterTts,
+    EmptyResponse,
+    StopWord,
+    UnsupportedAction,
+}
+
+impl InputDropReason {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::EmptyPrompt => "empty_prompt",
+            Self::EmptyPromptAfterWakeRemoval => "empty_prompt_after_wake_removal",
+            Self::WakeWordRequired => "wake_word_required",
+            Self::WakeOnly => "wake_only_waiting_for_prompt",
+            Self::DuplicateSuppressed => "duplicate_suppressed",
+            Self::StaleAtEntry => "stale_at_entry",
+            Self::StaleAfterMemorySearch => "stale_after_memory_search",
+            Self::StaleAfterWebSearch => "stale_after_web_search",
+            Self::StaleAfterScreenCapture => "stale_after_screen_capture",
+            Self::StaleBeforeGeneration => "stale_before_generation",
+            Self::StaleAfterGeneration => "stale_after_generation",
+            Self::StaleBeforeTts => "stale_before_tts",
+            Self::StaleAfterTts => "stale_after_tts",
+            Self::EmptyResponse => "empty_response",
+            Self::StopWord => "stop_word",
+            Self::UnsupportedAction => "unsupported_action",
+        }
+    }
+}
+
+fn should_emit_input_drop_toast(reason: InputDropReason) -> bool {
+    // Ordinary speech without a wake word is expected background input, not a
+    // user-visible error.  Keep the structured drop log for diagnostics while
+    // reserving toasts for accepted wake transitions and actionable failures.
+    !matches!(reason, InputDropReason::WakeWordRequired)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TtsOutcome {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputProcessingOutcome {
+    Generated { response: String, tts: TtsOutcome },
+    Dropped { reason: InputDropReason },
+}
+
+type InputProcessingResult = Result<InputProcessingOutcome, String>;
+
+/// Normalize only transport-level whitespace. The raw event is retained as
+/// captured; this value is used for prompt admission so full-width spaces and
+/// line breaks cannot make a valid prompt look empty.
+fn normalize_prompt_text(input: &str) -> String {
+    input
+        .chars()
+        .map(|character| {
+            if character == '\u{3000}' {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn prompt_is_sendable(prompt: &str) -> bool {
+    !prompt.is_empty()
+}
+
+fn asr_prompt_is_sendable(prompt: &str) -> bool {
+    prompt.chars().count() >= MIN_ASR_PROMPT_CHARS
+}
+
+fn stop_word_boundary_after(text: &str, word_end: usize, word: &str) -> bool {
+    let suffix = &text[word_end..];
+    if suffix.is_empty() {
+        return true;
+    }
+    if suffix
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_whitespace() || "、。！？!?.,".contains(character))
+    {
+        return true;
+    }
+
+    // Japanese stop commands commonly take a short polite/imperative ending;
+    // only those endings are accepted after the exact configured phrase.
+    match word {
+        "ストップ" => ["って", "して", "よ", "ね", "ください"]
+            .iter()
+            .any(|ending| suffix.starts_with(ending)),
+        "だまって" => ["て", "よ", "ね", "ください"]
+            .iter()
+            .any(|ending| suffix.starts_with(ending)),
+        "静かに" => ["して", "しろ", "よ", "ね", "ください"]
+            .iter()
+            .any(|ending| suffix.starts_with(ending)),
+        _ => false,
+    }
+}
 
 /// Utterances containing any of these fragments stop TTS playback and cancel
 /// prompt collection. The finalized utterance itself is still persisted; this
 /// predicate only decides the extra stop action.
 fn contains_stop_word(text: &str) -> bool {
-    ["ストップ", "だまって", "静かに"]
-        .iter()
-        .any(|stop_word| text.contains(stop_word))
+    let normalized = normalize_prompt_text(text);
+    ["ストップ", "だまって", "静かに"].iter().any(|stop_word| {
+        let mut search_from = 0;
+        while let Some(relative_start) = normalized[search_from..].find(stop_word) {
+            let start = search_from + relative_start;
+            let end = start + stop_word.len();
+            if stop_word_boundary_after(&normalized, end, stop_word) {
+                return true;
+            }
+            search_from = end;
+            if search_from >= normalized.len() {
+                break;
+            }
+        }
+        false
+    })
 }
 
 /// Build a collision-safe Markdown path for one session's article.  The stamp
@@ -237,19 +379,185 @@ fn persisted_blog_fallback_events(
     events
 }
 
+fn merge_persisted_blog_events(
+    events: &mut Vec<SessionEvent>,
+    persisted: impl IntoIterator<Item = SessionEvent>,
+) {
+    for persisted_event in persisted {
+        let canonical = MemoryRepository::canonical_event_id(&persisted_event.id);
+        if events.iter().any(|event| {
+            event.id == persisted_event.id
+                || MemoryRepository::canonical_event_id(&event.id) == canonical
+        }) {
+            continue;
+        }
+        events.push(persisted_event);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryAdmissionDropReason {
+    EmptyTranscript,
+    PolicyDenied,
+    RedactionNotStable,
+    UnknownStream,
+}
+
+impl MemoryAdmissionDropReason {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::EmptyTranscript => "empty_transcript",
+            Self::PolicyDenied => "policy_denied",
+            Self::RedactionNotStable => "redaction_not_stable",
+            Self::UnknownStream => "unknown_stream",
+        }
+    }
+}
+
 /// Admit text at the memory boundary.  The live session may retain the
 /// original text for an AI request, but every memory-facing copy must be a
-/// validated, idempotently redacted value.
-fn admit_redacted_memory_text(input: &str) -> Option<String> {
+/// validated, idempotently redacted value.  The error classification is kept
+/// separate from the returned text so callers can diagnose an early drop
+/// without ever writing the source transcript to a log.
+fn admit_redacted_memory_text_with_reason(
+    input: &str,
+) -> Result<String, MemoryAdmissionDropReason> {
     let input = input.trim();
     if input.is_empty() {
-        return None;
+        return Err(MemoryAdmissionDropReason::EmptyTranscript);
     }
-    Policy::default()
+    let redacted = Policy::default()
         .admit_raw_text(input, PrivacyAdmission::public())
-        .ok()
-        .map(|text| text.as_str().trim().to_string())
-        .filter(|text| !text.is_empty())
+        .map_err(|error| match error {
+            // Keep policy failures machine-readable and intentionally omit
+            // the category text: policy diagnostics must never echo input.
+            MemoryError::ProhibitedCategory(_) => MemoryAdmissionDropReason::PolicyDenied,
+            MemoryError::InvalidContent => MemoryAdmissionDropReason::RedactionNotStable,
+            _ => MemoryAdmissionDropReason::PolicyDenied,
+        })?;
+    let redacted = redacted.as_str().trim();
+    if redacted.is_empty() {
+        return Err(MemoryAdmissionDropReason::RedactionNotStable);
+    }
+    Ok(redacted.to_string())
+}
+
+/// Compatibility wrapper for non-diagnostic memory callers.
+fn admit_redacted_memory_text(input: &str) -> Option<String> {
+    admit_redacted_memory_text_with_reason(input).ok()
+}
+
+fn session_context_fields(
+    manager: &SessionManager,
+    context: Option<&SessionContext>,
+) -> (String, u64) {
+    context
+        .map(|context| (context.session_id.clone(), context.generation))
+        .unwrap_or_else(|| {
+            let session_id = manager.session_id.lock().clone();
+            (
+                if session_id.is_empty() {
+                    "-".to_string()
+                } else {
+                    session_id
+                },
+                manager.session_generation.load(Ordering::SeqCst),
+            )
+        })
+}
+
+fn raw_admission_drop_message(
+    manager: &SessionManager,
+    event_id: &str,
+    context: Option<&SessionContext>,
+    status: &str,
+    reason: MemoryAdmissionDropReason,
+) -> String {
+    let (session_id, generation) = session_context_fields(manager, context);
+    format!(
+        "session_id={} generation={} event_id={} status={} reason={}",
+        session_id,
+        generation,
+        event_id,
+        status,
+        reason.code()
+    )
+}
+
+fn raw_durability_gap_message(
+    manager: &SessionManager,
+    event_id: &str,
+    context: Option<&SessionContext>,
+    status: &str,
+) -> String {
+    let (session_id, generation) = session_context_fields(manager, context);
+    format!(
+        "session_id={} generation={} event_id={} status={}",
+        session_id, generation, event_id, status
+    )
+}
+
+fn emit_toast_notice(app_handle: Option<&AppHandle>, message: &str, kind: &str) {
+    if let Some(handle) = app_handle {
+        let _ = handle.emit(
+            "toast_notice",
+            serde_json::json!({
+                "message": message,
+                "type": kind,
+            }),
+        );
+    }
+}
+
+fn build_chat_messages(events: &[SessionEvent]) -> Vec<ChatMessage> {
+    let mut selected = Vec::new();
+    let mut used_chars = 0usize;
+
+    for event in events.iter().rev().take(MAX_CHAT_HISTORY_MESSAGES) {
+        let role = if event.r#type == "ai_response" || event.r#type == "auto_commentary" {
+            "assistant"
+        } else {
+            "user"
+        };
+        let content = format!("{}: {}", event.author, event.content);
+        let content_chars = content.chars().count();
+        if used_chars.saturating_add(content_chars) > MAX_CHAT_HISTORY_CHARS && !selected.is_empty()
+        {
+            break;
+        }
+
+        let bounded_content = if used_chars.saturating_add(content_chars) > MAX_CHAT_HISTORY_CHARS {
+            content
+                .chars()
+                .take(MAX_CHAT_HISTORY_CHARS.saturating_sub(used_chars))
+                .collect::<String>()
+        } else {
+            content
+        };
+        used_chars = used_chars.saturating_add(bounded_content.chars().count());
+        selected.push(ChatMessage {
+            role: role.to_string(),
+            content: bounded_content,
+        });
+    }
+    selected.reverse();
+    selected
+}
+
+fn ai_error_reason(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("api key") || lower.contains("key is not set") {
+        "api_key_configuration"
+    } else if lower.contains("http request")
+        || lower.contains("api error")
+        || lower.contains("timeout")
+    {
+        "http_or_api_failure"
+    } else if lower.contains("parse") || lower.contains("response") {
+        "invalid_api_response"
+    } else {
+        "generation_failure"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -940,6 +1248,238 @@ impl SessionManager {
         self.is_active.load(Ordering::SeqCst)
             && self.session_generation.load(Ordering::SeqCst) == context.generation
             && self.session_id.lock().as_str() == context.session_id
+    }
+
+    /// UI events belong to the session generation that initiated the work.
+    /// Context-free/manual calls retain the historical behavior and may emit
+    /// through the supplied app handle; session-scoped callbacks must be
+    /// checked at each asynchronous boundary.
+    fn context_allows_ui(&self, context: Option<&SessionContext>) -> bool {
+        context
+            .map(|value| self.is_current_session(value))
+            .unwrap_or(true)
+    }
+
+    /// Admit an ASR callback at the session boundary. Final frames are
+    /// allowed through after Stop so their already-produced transcript can
+    /// reach the raw journal; provisional partials remain session-local and
+    /// are discarded once the generation changes.
+    fn admit_asr_callback(&self, context: &SessionContext, is_final: bool) -> bool {
+        if self.is_current_session(context) {
+            return true;
+        }
+        let status = if is_final {
+            "stale_asr_final_accepted_for_raw"
+        } else {
+            "stale_asr_callback_dropped"
+        };
+        self.log_mgr.info(
+            "Session",
+            &format!(
+                "session_id={} generation={} status={}",
+                context.session_id, context.generation, status
+            ),
+        );
+        self.log_mgr.info(
+            "TTS",
+            &format!(
+                "session_id={} generation={} event_id=- status=nod_not_requested phase={} reason=stale_callback",
+                context.session_id,
+                context.generation,
+                if is_final { "final" } else { "partial" }
+            ),
+        );
+        is_final
+    }
+
+    fn record_input_drop(
+        &self,
+        context: Option<&SessionContext>,
+        event_id: &str,
+        reason: InputDropReason,
+        app_handle: Option<&AppHandle>,
+    ) {
+        let (session_id, generation) = session_context_fields(self, context);
+        self.log_mgr.warn(
+            "AI",
+            &format!(
+                "session_id={} generation={} event_id={} status=input_dropped reason={}",
+                session_id,
+                generation,
+                event_id,
+                reason.code()
+            ),
+        );
+        let message = match reason {
+            InputDropReason::StaleAtEntry
+            | InputDropReason::StaleAfterMemorySearch
+            | InputDropReason::StaleAfterWebSearch
+            | InputDropReason::StaleAfterScreenCapture
+            | InputDropReason::StaleBeforeGeneration
+            | InputDropReason::StaleAfterGeneration
+            | InputDropReason::StaleBeforeTts
+            | InputDropReason::StaleAfterTts => {
+                "⚠️ セッションが切り替わったため、発話の応答を破棄しました。"
+            }
+            InputDropReason::WakeWordRequired => {
+                "ℹ️ Wake Wordを含まない発話はGeminiへ送信しませんでした。"
+            }
+            InputDropReason::WakeOnly => {
+                "ℹ️ Wake Wordを受け付けました。続けて質問を話してください。"
+            }
+            InputDropReason::DuplicateSuppressed => "ℹ️ 重複した発話を抑制しました。",
+            InputDropReason::StopWord => "ℹ️ 停止語を受け付け、発話を停止しました。",
+            InputDropReason::EmptyPrompt | InputDropReason::EmptyPromptAfterWakeRemoval => {
+                "⚠️ 空の入力はGeminiへ送信できませんでした。"
+            }
+            InputDropReason::EmptyResponse => {
+                "⚠️ Geminiから空の応答が返ったため、発話を生成できませんでした。"
+            }
+            InputDropReason::UnsupportedAction => "ℹ️ この発話はGemini送信条件を満たしていません。",
+        };
+        let kind = if matches!(
+            reason,
+            InputDropReason::StaleAtEntry
+                | InputDropReason::StaleAfterMemorySearch
+                | InputDropReason::StaleAfterWebSearch
+                | InputDropReason::StaleAfterScreenCapture
+                | InputDropReason::StaleBeforeGeneration
+                | InputDropReason::StaleAfterGeneration
+                | InputDropReason::StaleBeforeTts
+                | InputDropReason::StaleAfterTts
+                | InputDropReason::WakeWordRequired
+                | InputDropReason::WakeOnly
+                | InputDropReason::DuplicateSuppressed
+                | InputDropReason::StopWord
+                | InputDropReason::UnsupportedAction
+        ) {
+            "info"
+        } else {
+            "warning"
+        };
+        // A stale generation is deliberately invisible to the current UI:
+        // showing a toast from an old callback can make a newly started
+        // session appear to have dropped its own input. Keep the structured
+        // log above for diagnostics, but only notify callers for the active
+        // generation (or context-free/manual work).
+        if should_emit_input_drop_toast(reason) && self.context_allows_ui(context) {
+            emit_toast_notice(app_handle, message, kind);
+        }
+    }
+
+    fn log_nod_not_requested(
+        &self,
+        context: &SessionContext,
+        event_id: &str,
+        phase: &str,
+        stream: &str,
+        decision: &WakeWordDecision,
+        reason: &str,
+    ) {
+        self.log_mgr.info(
+            "TTS",
+            &format!(
+                "session_id={} generation={} event_id={} status=nod_not_requested phase={} stream={} action={:?} should_acknowledge={} cooldown_active={} duplicate_suppressed={} reason={}",
+                context.session_id,
+                context.generation,
+                event_id,
+                phase,
+                stream,
+                decision.action,
+                decision.should_acknowledge,
+                decision.cooldown_active,
+                decision.duplicate_suppressed,
+                reason
+            ),
+        );
+    }
+
+    /// Schedule a nod without making Gemini wait for the audio duration. The
+    /// task carries the originating session identity and checks it again just
+    /// before touching the audio queue, so a stopped/restarted session cannot
+    /// inherit a delayed acknowledgement.
+    fn schedule_nod_ack(
+        &self,
+        context: &SessionContext,
+        event_id: &str,
+        phase: &str,
+        action: WakeWordAction,
+    ) {
+        if !self.is_current_session(context) {
+            self.log_mgr.info(
+                "TTS",
+                &format!(
+                    "session_id={} generation={} event_id={} status=nod_not_requested phase={} action={:?} reason=stale_before_schedule",
+                    context.session_id, context.generation, event_id, phase, action
+                ),
+            );
+            return;
+        }
+
+        self.log_mgr.info(
+            "TTS",
+            &format!(
+                "session_id={} generation={} event_id={} status=nod_scheduled phase={} action={:?} wait=background",
+                context.session_id, context.generation, event_id, phase, action
+            ),
+        );
+        let this = self.clone();
+        let context = context.clone();
+        let event_id = event_id.to_string();
+        let phase = phase.to_string();
+        tauri::async_runtime::spawn(async move {
+            if !this.is_current_session(&context) {
+                this.log_mgr.info(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=nod_not_requested phase={} action={:?} reason=stale_before_start",
+                        context.session_id, context.generation, event_id, phase, action
+                    ),
+                );
+                return;
+            }
+
+            let started = Instant::now();
+            this.log_mgr.info(
+                "TTS",
+                &format!(
+                    "session_id={} generation={} event_id={} status=nod_started phase={} action={:?}",
+                    context.session_id, context.generation, event_id, phase, action
+                ),
+            );
+            let result = this.tts_mgr.play_random_nod(&this.root_dir).await;
+            let duration_ms = started.elapsed().as_millis();
+            let current = this.is_current_session(&context);
+            match result {
+                Ok(()) => this.log_mgr.info(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=nod_succeeded phase={} action={:?} duration_ms={} current_session={}",
+                        context.session_id,
+                        context.generation,
+                        event_id,
+                        phase,
+                        action,
+                        duration_ms,
+                        current
+                    ),
+                ),
+                Err(error) => this.log_mgr.warn(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=nod_failed phase={} action={:?} reason={} duration_ms={} current_session={}",
+                        context.session_id,
+                        context.generation,
+                        event_id,
+                        phase,
+                        action,
+                        error.code(),
+                        duration_ms,
+                        current
+                    ),
+                ),
+            }
+        });
     }
 
     /// A summary that was admitted by a session may finish after Stop.  It is
@@ -1974,8 +2514,21 @@ impl SessionManager {
         context: Option<SessionContext>,
     ) -> bool {
         let _event_guard = self.begin_event_task();
-        let Some(doc_text) = admit_redacted_memory_text(&event.content) else {
-            return false;
+        let doc_text = match admit_redacted_memory_text_with_reason(&event.content) {
+            Ok(text) => text,
+            Err(reason) => {
+                self.log_mgr.warn(
+                    "Memory",
+                    &raw_admission_drop_message(
+                        self,
+                        &event.id,
+                        context.as_ref(),
+                        "raw_admission_dropped",
+                        reason,
+                    ),
+                );
+                return false;
+            }
         };
 
         let st = crate::settings::load_settings_file(&self.root_dir);
@@ -2046,7 +2599,7 @@ impl SessionManager {
                             this.log_mgr.warn(
                                 "Memory",
                                 &format!(
-                                    "{} projection_error={}",
+                                    "{} reason={}",
                                     memory_event_log_message(
                                         &event_id,
                                         &event_type,
@@ -2054,7 +2607,7 @@ impl SessionManager {
                                         &projection_text,
                                         "projection_deferred"
                                     ),
-                                    error
+                                    lance_memory::raw_persistence_failure_reason(&error)
                                 ),
                             );
                         }
@@ -2081,11 +2634,17 @@ impl SessionManager {
                 // §3.4.2: enqueue only the finalized ASR speech for live
                 // curation without blocking the caller. Older Twitch/raw
                 // rows remain pending for an explicit Memory Manager pass.
+                let summary_is_eligible = matches!(
+                    lance_memory::summary_admission(&event.r#type, &doc_text),
+                    lance_memory::SummaryAdmission::Eligible
+                );
+                let summary_context_is_current = context
+                    .as_ref()
+                    .map(|value| self.is_current_session(value))
+                    .unwrap_or(true);
                 if live_asr_summary_event(&event.r#type)
-                    && matches!(
-                        lance_memory::summary_admission(&event.r#type, &doc_text),
-                        lance_memory::SummaryAdmission::Eligible
-                    )
+                    && summary_is_eligible
+                    && summary_context_is_current
                 {
                     self.log_mgr.info(
                         "Memory",
@@ -2108,12 +2667,51 @@ impl SessionManager {
                         this.process_summary_candidate(snapshot, app_for_summary, summary_context)
                             .await;
                     });
+                } else if live_asr_summary_event(&event.r#type)
+                    && summary_is_eligible
+                    && !summary_context_is_current
+                {
+                    // A final ASR frame may arrive after Stop and still needs
+                    // its raw event persisted.  Its live summary, however,
+                    // belongs to the old session and must remain pending for
+                    // an explicit Memory Manager pass instead of mutating a
+                    // replacement session's Fact stream.
+                    self.log_mgr.info(
+                        "Session",
+                        &raw_durability_gap_message(
+                            self,
+                            &event.id,
+                            context.as_ref(),
+                            "stale_summary_dropped",
+                        ),
+                    );
                 }
                 true
             }
             Err(e) => {
-                self.log_mgr
-                    .error("Memory", &format!("Failed to save event to LanceDB: {}", e));
+                let reason = lance_memory::raw_persistence_failure_reason(&e);
+                let status = if e.starts_with("raw durable;") {
+                    "raw_durable_followup_failed"
+                } else {
+                    "raw_persist_failed"
+                };
+                self.log_mgr.error(
+                    "Memory",
+                    &format!(
+                        "session_id={} generation={} event_id={} status={} reason={}",
+                        context
+                            .as_ref()
+                            .map(|value| value.session_id.as_str())
+                            .unwrap_or("-"),
+                        context
+                            .as_ref()
+                            .map(|value| value.generation)
+                            .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
+                        event.id,
+                        status,
+                        reason,
+                    ),
+                );
                 false
             }
         }
@@ -2126,8 +2724,19 @@ impl SessionManager {
         source: &str,
         content: &str,
     ) {
-        let Some(content) = admit_redacted_memory_text(content) else {
-            return;
+        let content = match admit_redacted_memory_text_with_reason(content) {
+            Ok(content) => content,
+            Err(reason) => {
+                self.log_mgr.warn(
+                    "Memory",
+                    &format!(
+                        "event_id={} status=document_embedding_dropped reason={}",
+                        event_id,
+                        reason.code()
+                    ),
+                );
+                return;
+            }
         };
         let result = self
             .asr_engine
@@ -2667,15 +3276,25 @@ impl SessionManager {
         } else {
             text.to_string()
         };
-        Self::emit_asr_result(
-            app_handle,
-            &display_text,
-            stream,
-            false,
-            decision.is_prompt,
-            latency_ms,
-            None,
-        );
+        if detector_is_current {
+            Self::emit_asr_result(
+                app_handle,
+                &display_text,
+                stream,
+                false,
+                decision.is_prompt,
+                latency_ms,
+                None,
+            );
+        } else {
+            self.log_mgr.info(
+                "Session",
+                &format!(
+                    "session_id={} generation={} event_id=- status=stale_partial_ui_dropped",
+                    context.session_id, context.generation
+                ),
+            );
+        }
         self.log_mgr.info(
             "ASR",
             &format!(
@@ -2705,9 +3324,36 @@ impl SessionManager {
         let (event_type, author) = match stream {
             "mic" => ("user_speech", "User"),
             "discord" => ("discord_speech", "Discord"),
-            _ => return None,
+            _ => {
+                self.log_mgr.warn(
+                    "ASR",
+                    &raw_admission_drop_message(
+                        self,
+                        &event_id,
+                        Some(context),
+                        "unknown_stream_dropped",
+                        MemoryAdmissionDropReason::UnknownStream,
+                    ),
+                );
+                return None;
+            }
         };
-        let content = admit_redacted_memory_text(text)?;
+        let content = match admit_redacted_memory_text_with_reason(text) {
+            Ok(content) => content,
+            Err(reason) => {
+                self.log_mgr.warn(
+                    "ASR",
+                    &raw_admission_drop_message(
+                        self,
+                        &event_id,
+                        Some(context),
+                        "raw_admission_dropped",
+                        reason,
+                    ),
+                );
+                return None;
+            }
+        };
         let event = SessionEvent {
             id: event_id.clone(),
             r#type: event_type.to_string(),
@@ -2816,13 +3462,10 @@ impl SessionManager {
             )
             .await
         {
-            self.log_mgr.warn(
-                "Memory",
-                &format!(
-                    "session_id={} generation={} event_id={} status=raw_persist_failed",
-                    context.session_id, context.generation, event.id
-                ),
-            );
+            // The persistence boundary already emitted a classified,
+            // non-sensitive diagnostic (including the durable-vs-follow-up
+            // distinction when applicable). Avoid a second generic message
+            // that would obscure that reason.
             return None;
         }
         if self.is_current_session(context) {
@@ -2851,18 +3494,34 @@ impl SessionManager {
         result: PersistedAsrEvent,
         original_text: &str,
         app_handle: Option<&AppHandle>,
-    ) {
+    ) -> InputProcessingResult {
         if !self.is_current_session(context) {
             self.log_mgr.info(
-                "Session",
+                "TTS",
                 &format!(
-                    "session_id={} generation={} event_id={} status=stale_followup_dropped",
-                    context.session_id, context.generation, result.event.id
+                    "session_id={} generation={} event_id={} status=nod_not_requested phase=final action={:?} reason=stale_at_entry",
+                    context.session_id, context.generation, result.event.id, result.decision.action
                 ),
             );
-            return;
+            self.record_input_drop(
+                Some(context),
+                &result.event.id,
+                InputDropReason::StaleAtEntry,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAtEntry,
+            });
         }
         if result.stop_word_detected {
+            self.log_nod_not_requested(
+                context,
+                &result.event.id,
+                "final",
+                &result.decision.stream,
+                &result.decision,
+                "stop_word",
+            );
             self.tts_mgr.stop_playback();
             self.asr_engine.reset_wake_word_on_stop();
             self.is_collecting_prompt.store(false, Ordering::SeqCst);
@@ -2873,32 +3532,105 @@ impl SessionManager {
                     context.session_id, context.generation, result.event.id
                 ),
             );
-            return;
+            self.record_input_drop(
+                Some(context),
+                &result.event.id,
+                InputDropReason::StopWord,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StopWord,
+            });
         }
 
         let prompt = match result.decision.action {
             WakeWordAction::PromptDetected | WakeWordAction::PromptReceived
                 if result.decision.is_prompt =>
             {
-                result.decision.clean_prompt.clone()
+                normalize_prompt_text(&result.decision.clean_prompt)
             }
-            _ => String::new(),
+            _ => normalize_prompt_text(original_text),
         };
         if result.decision.should_acknowledge {
-            let _ = self.tts_mgr.play_random_nod(&self.root_dir).await;
-            if !self.is_current_session(context) {
-                return;
-            }
+            self.schedule_nod_ack(context, &result.event.id, "final", result.decision.action);
+        } else {
+            let reason = if result.decision.stream != "mic" {
+                "mic_only"
+            } else if result.decision.duplicate_suppressed {
+                "duplicate_suppressed"
+            } else if result.decision.cooldown_active {
+                "cooldown_active"
+            } else {
+                match result.decision.action {
+                    WakeWordAction::PromptDetected | WakeWordAction::FinalWakeOnly => {
+                        "already_acknowledged"
+                    }
+                    WakeWordAction::PromptReceived => "prompt_acknowledgement_suppressed",
+                    _ => "action_not_acknowledged",
+                }
+            };
+            self.log_nod_not_requested(
+                context,
+                &result.event.id,
+                "final",
+                &result.decision.stream,
+                &result.decision,
+                reason,
+            );
+        }
+        if !self.is_current_session(context) {
+            self.record_input_drop(
+                Some(context),
+                &result.event.id,
+                InputDropReason::StaleBeforeGeneration,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleBeforeGeneration,
+            });
         }
         if result.decision.action == WakeWordAction::FinalWakeOnly {
             self.is_collecting_prompt.store(true, Ordering::SeqCst);
-            return;
+            self.record_input_drop(
+                Some(context),
+                &result.event.id,
+                InputDropReason::WakeOnly,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::WakeOnly,
+            });
         }
-        if prompt.chars().count() < 2 {
-            if result.decision.action == WakeWordAction::PromptReceived {
-                self.is_collecting_prompt.store(false, Ordering::SeqCst);
-            }
-            return;
+
+        let prompt = if matches!(
+            result.decision.action,
+            WakeWordAction::PromptDetected | WakeWordAction::PromptReceived
+        ) && result.decision.is_prompt
+        {
+            prompt
+        } else {
+            let reason = match result.decision.action {
+                WakeWordAction::DuplicateSuppressed => InputDropReason::DuplicateSuppressed,
+                WakeWordAction::FinalSpeech | WakeWordAction::Ignored => {
+                    InputDropReason::WakeWordRequired
+                }
+                _ => InputDropReason::UnsupportedAction,
+            };
+            self.record_input_drop(Some(context), &result.event.id, reason, app_handle);
+            return Ok(InputProcessingOutcome::Dropped { reason });
+        };
+
+        if !asr_prompt_is_sendable(&prompt) {
+            self.is_collecting_prompt.store(false, Ordering::SeqCst);
+            self.record_input_drop(
+                Some(context),
+                &result.event.id,
+                InputDropReason::EmptyPromptAfterWakeRemoval,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::EmptyPromptAfterWakeRemoval,
+            });
         }
 
         let st_file = crate::settings::load_settings_file(&self.root_dir);
@@ -2931,7 +3663,7 @@ impl SessionManager {
                 prompt.chars().count()
             ),
         );
-        if let Err(error) = self
+        let outcome = self
             .process_user_input_for_session(
                 context,
                 &result.event,
@@ -2943,17 +3675,46 @@ impl SessionManager {
                 &tts_cfg,
                 app_handle,
             )
-            .await
-        {
-            self.log_mgr.error(
+            .await;
+        match &outcome {
+            Ok(InputProcessingOutcome::Generated { .. }) => self.log_mgr.info(
                 "AI",
                 &format!(
-                    "session_id={} generation={} event_id={} Gemini process error: {}",
-                    context.session_id, context.generation, result.event.id, error
+                    "session_id={} generation={} event_id={} status=input_processing_completed",
+                    context.session_id, context.generation, result.event.id
                 ),
-            );
+            ),
+            Ok(InputProcessingOutcome::Dropped { reason }) => self.log_mgr.info(
+                "AI",
+                &format!(
+                    "session_id={} generation={} event_id={} status=input_processing_dropped reason={}",
+                    context.session_id,
+                    context.generation,
+                    result.event.id,
+                    reason.code()
+                ),
+            ),
+            Err(error) => {
+                self.log_mgr.error(
+                    "AI",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=input_processing_failed reason={}",
+                        context.session_id,
+                        context.generation,
+                        result.event.id,
+                        ai_error_reason(error)
+                    ),
+                );
+                if self.context_allows_ui(Some(context)) {
+                    emit_toast_notice(
+                        app_handle,
+                        "⚠️ Geminiへの入力処理に失敗しました。設定とネットワークを確認してください。",
+                        "error",
+                    );
+                }
+            }
         }
-        let _ = original_text;
+        outcome
     }
 
     pub fn start_session_with_services(
@@ -3076,11 +3837,10 @@ impl SessionManager {
                             sess.log_mgr.info(
                                 "Session",
                                 &format!(
-                                    "session_id={} generation={} status=stale_twitch_callback_dropped",
+                                    "session_id={} generation={} status=stale_twitch_callback_accepted_for_raw",
                                     context.session_id, context.generation
                                 ),
                             );
-                            return;
                         }
                         let task_guard = sess.begin_event_task();
                         tauri::async_runtime::spawn(async move {
@@ -3174,14 +3934,7 @@ impl SessionManager {
                 let app_cl = app_for_callback.clone();
                 let log_cl = log_mgr_callback.clone();
                 let context = callback_context.clone();
-                if !session_cl.is_current_session(&context) {
-                    log_cl.info(
-                        "Session",
-                        &format!(
-                            "session_id={} generation={} status=stale_asr_callback_dropped",
-                            context.session_id, context.generation
-                        ),
-                    );
+                if !session_cl.admit_asr_callback(&context, is_final) {
                     return;
                 }
                 let task_guard = session_cl.begin_event_task();
@@ -3200,6 +3953,13 @@ impl SessionManager {
                                 context.session_id, context.generation
                             ),
                         );
+                        log_cl.info(
+                            "TTS",
+                            &format!(
+                                "session_id={} generation={} event_id=- status=nod_not_requested phase=partial reason=stale_task",
+                                context.session_id, context.generation
+                            ),
+                        );
                         return;
                     }
 
@@ -3215,11 +3975,39 @@ impl SessionManager {
                             app_cl.as_ref(),
                         );
                         drop(_task_guard);
-                        if decision.should_acknowledge && session_cl.is_current_session(&context) {
-                            let _ = session_cl
-                                .tts_mgr
-                                .play_random_nod(&session_cl.root_dir)
-                                .await;
+                        if decision.should_acknowledge {
+                            session_cl.schedule_nod_ack(
+                                &context,
+                                "-",
+                                "partial",
+                                decision.action,
+                            );
+                        } else {
+                            let reason = if stream != "mic" {
+                                "mic_only"
+                            } else if decision.duplicate_suppressed {
+                                "duplicate_suppressed"
+                            } else if decision.cooldown_active {
+                                "cooldown_active"
+                            } else {
+                                match decision.action {
+                                    WakeWordAction::PartialWakeDetected => {
+                                        "already_acknowledged"
+                                    }
+                                    WakeWordAction::PartialPromptCandidate => {
+                                        "prompt_candidate_not_final"
+                                    }
+                                    _ => "action_not_acknowledged",
+                                }
+                            };
+                            session_cl.log_nod_not_requested(
+                                &context,
+                                "-",
+                                "partial",
+                                &stream,
+                                &decision,
+                                reason,
+                            );
                         }
                         return;
                     }
@@ -3237,7 +4025,7 @@ impl SessionManager {
                     // handling, Gemini and TTS must not extend the drain window.
                     drop(_task_guard);
                     if let Some(result) = persisted {
-                        session_cl
+                        let _ = session_cl
                             .process_asr_followup(&context, result, &text, app_cl.as_ref())
                             .await;
                     }
@@ -3671,7 +4459,8 @@ impl SessionManager {
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(context, "-", InputDropReason::StaleAtEntry, app_handle);
+            return Err("commentary dropped: stale_at_entry".to_string());
         }
 
         self.log_mgr.info(
@@ -3682,6 +4471,40 @@ impl SessionManager {
         let st = crate::settings::load_settings_file(&self.root_dir);
         let sys_prompt = crate::prompts::get_prompt(&self.root_dir, "auto_commentary_prompt");
 
+        if let Err(reason) = crate::ai_client::validate_gemini_api_key(gemini_api_key) {
+            self.log_mgr.warn(
+                "Gemini",
+                &format!(
+                    "session_id={} generation={} event_id=- status=generation_blocked stage=preflight reason={}",
+                    context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                    context.map(|session| session.generation).unwrap_or(0),
+                    reason.code()
+                ),
+            );
+            if self.context_allows_ui(context) {
+                emit_toast_notice(
+                    app_handle,
+                    match reason {
+                        crate::ai_client::GeminiKeyError::Missing => {
+                            "⚠️ Gemini APIキーが未設定のため、実況コメントを生成できません。"
+                        }
+                        crate::ai_client::GeminiKeyError::Invalid => {
+                            "⚠️ Gemini APIキーの設定が不正なため、実況コメントを生成できません。"
+                        }
+                    },
+                    "warning",
+                );
+            }
+            return Err(match reason {
+                crate::ai_client::GeminiKeyError::Missing => {
+                    "Gemini API key is not set".to_string()
+                }
+                crate::ai_client::GeminiKeyError::Invalid => {
+                    "Gemini API key configuration is invalid".to_string()
+                }
+            });
+        }
+
         // LanceDB 関連記憶をセマンティック検索 (直近の会話またはゲーム状況)
         let memory_context = self
             .get_relevant_memory_context("ゲームプレイ状況 実況 解説")
@@ -3690,7 +4513,13 @@ impl SessionManager {
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(
+                context,
+                "-",
+                InputDropReason::StaleAfterMemorySearch,
+                app_handle,
+            );
+            return Err("commentary dropped: stale_after_memory_search".to_string());
         }
 
         // 直近の会話履歴（最大 10 件）
@@ -3712,16 +4541,41 @@ impl SessionManager {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         let screen_b64 = if use_image {
-            let win_name = st.get("window").and_then(|v| v.as_str()).unwrap_or("");
-            if !win_name.is_empty() {
-                self.log_mgr.info(
-                    "Visual",
-                    &format!("Capturing target window for commentary: '{}'", win_name),
-                );
-                window_capture::capture_window_base64(win_name)
-                    .or_else(window_capture::capture_primary_screen_base64)
-            } else {
-                window_capture::capture_primary_screen_base64()
+            let win_name = st
+                .get("window")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let log_mgr = self.log_mgr.clone();
+            let capture = tokio::task::spawn_blocking(move || {
+                if !win_name.is_empty() {
+                    log_mgr.info(
+                        "Visual",
+                        &format!("Capturing target window for commentary: '{}'", win_name),
+                    );
+                    window_capture::capture_window_base64(&win_name)
+                        .or_else(window_capture::capture_primary_screen_base64)
+                } else {
+                    log_mgr.info("Visual", "Capturing primary screen for commentary...");
+                    window_capture::capture_primary_screen_base64()
+                }
+            });
+            match tokio::time::timeout(INPUT_SCREEN_CAPTURE_TIMEOUT, capture).await {
+                Ok(Ok(image)) => image,
+                Ok(Err(_)) => {
+                    self.log_mgr.warn(
+                        "Visual",
+                        "commentary screen capture worker failed; continuing without image",
+                    );
+                    None
+                }
+                Err(_) => {
+                    self.log_mgr.warn(
+                        "Visual",
+                        "commentary screen capture timed out; continuing without image",
+                    );
+                    None
+                }
             }
         } else {
             None
@@ -3730,7 +4584,13 @@ impl SessionManager {
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(
+                context,
+                "-",
+                InputDropReason::StaleAfterScreenCapture,
+                app_handle,
+            );
+            return Err("commentary dropped: stale_after_screen_capture".to_string());
         }
 
         let full_system_instruction =
@@ -3756,11 +4616,18 @@ impl SessionManager {
             thinking_budget,
         };
 
-        if let Some(handle) = app_handle {
-            let _ = handle.emit(
-                "gemini_status",
-                serde_json::json!({ "is_generating": true }),
-            );
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit(
+                    "gemini_status",
+                    serde_json::json!({
+                        "is_generating": true,
+                        "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                        "generation": context.map(|session| session.generation).unwrap_or(0),
+                        "status": "generation_started"
+                    }),
+                );
+            }
         }
 
         let ai_res = match self
@@ -3769,120 +4636,175 @@ impl SessionManager {
             .await
         {
             Ok(res) => {
-                if context
-                    .map(|session| self.is_current_session(session))
-                    .unwrap_or(true)
-                {
+                if self.context_allows_ui(context) {
                     if let Some(handle) = app_handle {
                         let _ = handle.emit(
                             "gemini_status",
-                            serde_json::json!({ "is_generating": false }),
+                            serde_json::json!({
+                                "is_generating": false,
+                                "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                                "generation": context.map(|session| session.generation).unwrap_or(0),
+                                "status": "response_received"
+                            }),
                         );
                     }
                 }
                 res
             }
             Err(e) => {
-                if context
-                    .map(|session| self.is_current_session(session))
-                    .unwrap_or(true)
-                {
+                if self.context_allows_ui(context) {
                     if let Some(handle) = app_handle {
                         let _ = handle.emit(
                             "gemini_status",
-                            serde_json::json!({ "is_generating": false }),
+                            serde_json::json!({
+                                "is_generating": false,
+                                "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                                "generation": context.map(|session| session.generation).unwrap_or(0),
+                                "status": "generation_failed",
+                                "reason": ai_error_reason(&e)
+                            }),
                         );
                     }
                 }
                 self.log_mgr.error(
                     "Commentary",
-                    &format!("Auto Commentary generation error: {}", e),
+                    &format!(
+                        "session_id={} generation=- status=generation_failed reason={}",
+                        context
+                            .map(|session| session.session_id.as_str())
+                            .unwrap_or("-"),
+                        ai_error_reason(&e)
+                    ),
                 );
+                if self.context_allows_ui(context) {
+                    emit_toast_notice(
+                        app_handle,
+                        "⚠️ Gemini実況コメントの生成に失敗しました。設定とネットワークを確認してください。",
+                        "error",
+                    );
+                }
                 return Err(e);
             }
         };
 
+        let clean_ai_res = ai_res.trim().to_string();
+
+        if !prompt_is_sendable(&clean_ai_res) {
+            self.record_input_drop(context, "-", InputDropReason::EmptyResponse, app_handle);
+            return Err("commentary dropped: empty_response".to_string());
+        }
+
+        let ai_event = SessionEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            r#type: "auto_commentary".to_string(),
+            author: "AI_Auto".to_string(),
+            content: clean_ai_res.clone(),
+            timestamp: Local::now().to_rfc3339(),
+        };
+        self.log_mgr.info(
+            "Commentary",
+            &memory_event_log_message(
+                &ai_event.id,
+                &ai_event.r#type,
+                &ai_event.author,
+                &ai_event.content,
+                "generated",
+            ),
+        );
+        self.append_event_to_session(ai_event.clone(), context);
+        let raw_persisted = self
+            .save_event_to_memory_with_app_context(&ai_event, app_handle.cloned(), context.cloned())
+            .await;
+        if !raw_persisted {
+            self.log_mgr.warn(
+                "Commentary",
+                &raw_durability_gap_message(self, &ai_event.id, context, "generated_not_durable"),
+            );
+        }
+
+        if context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true)
+        {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit("session-event", &ai_event);
+            }
+        }
+
+        // 音声合成 & 発話再生
         if context
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
-        }
-
-        let clean_ai_res = ai_res.trim().to_string();
-
-        if !clean_ai_res.is_empty() {
-            let ai_event = SessionEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                r#type: "auto_commentary".to_string(),
-                author: "AI_Auto".to_string(),
-                content: clean_ai_res.clone(),
-                timestamp: Local::now().to_rfc3339(),
-            };
-            self.log_mgr.info(
-                "Commentary",
-                &memory_event_log_message(
-                    &ai_event.id,
-                    &ai_event.r#type,
-                    &ai_event.author,
-                    &ai_event.content,
-                    "generated",
-                ),
+            self.record_input_drop(
+                context,
+                &ai_event.id,
+                InputDropReason::StaleBeforeTts,
+                app_handle,
             );
-            self.append_event_to_session(ai_event.clone(), context);
-            let _ = self
-                .save_event_to_memory_with_app_context(
-                    &ai_event,
-                    app_handle.cloned(),
-                    context.cloned(),
-                )
-                .await;
-
-            if context
-                .map(|session| self.is_current_session(session))
-                .unwrap_or(true)
-            {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit("session-event", &ai_event);
+            return Err("commentary dropped: stale_before_tts".to_string());
+        }
+        if context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true)
+        {
+            *self.last_speak_time.lock() = Instant::now();
+        }
+        if context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true)
+        {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": true }));
+            }
+        }
+        match self.tts_mgr.speak(&clean_ai_res, tts_settings).await {
+            Ok(()) => self.log_mgr.info(
+                "TTS",
+                &format!(
+                    "session_id={} generation={} event_id={} status=tts_succeeded",
+                    context
+                        .map(|session| session.session_id.as_str())
+                        .unwrap_or("-"),
+                    context.map(|session| session.generation).unwrap_or(0),
+                    ai_event.id
+                ),
+            ),
+            Err(error) => {
+                self.log_mgr.warn(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=tts_failed reason={}",
+                        context
+                            .map(|session| session.session_id.as_str())
+                            .unwrap_or("-"),
+                        context.map(|session| session.generation).unwrap_or(0),
+                        ai_event.id,
+                        ai_error_reason(&error)
+                    ),
+                );
+                if self.context_allows_ui(context) {
+                    emit_toast_notice(
+                        app_handle,
+                        "⚠️ 実況コメントは取得しましたが、音声再生に失敗しました。",
+                        "warning",
+                    );
                 }
             }
-
-            // 音声合成 & 発話再生
-            if context
-                .map(|session| !self.is_current_session(session))
-                .unwrap_or(false)
-            {
-                return Ok(clean_ai_res);
+        }
+        if context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true)
+        {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": false }));
             }
-            if context
-                .map(|session| self.is_current_session(session))
-                .unwrap_or(true)
-            {
-                *self.last_speak_time.lock() = Instant::now();
-            }
-            if context
-                .map(|session| self.is_current_session(session))
-                .unwrap_or(true)
-            {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": true }));
-                }
-            }
-            let _ = self.tts_mgr.speak(&clean_ai_res, tts_settings).await;
-            if context
-                .map(|session| self.is_current_session(session))
-                .unwrap_or(true)
-            {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": false }));
-                }
-            }
-            if context
-                .map(|session| self.is_current_session(session))
-                .unwrap_or(true)
-            {
-                *self.last_speak_time.lock() = Instant::now();
-            }
+        }
+        if context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true)
+        {
+            *self.last_speak_time.lock() = Instant::now();
         }
 
         Ok(clean_ai_res)
@@ -3902,8 +4824,18 @@ impl SessionManager {
         app_handle: Option<&AppHandle>,
     ) -> Result<String, String> {
         let clean_text = text.trim();
-        if clean_text.is_empty() {
-            return Ok(String::new());
+        let prompt_text = normalize_prompt_text(clean_text);
+        if !prompt_is_sendable(&prompt_text) {
+            self.log_mgr.warn(
+                "AI",
+                "event_id=- session_id=- generation=- status=input_dropped reason=empty_prompt",
+            );
+            emit_toast_notice(
+                app_handle,
+                "⚠️ 空の入力はGeminiへ送信できませんでした。",
+                "warning",
+            );
+            return Err("input dropped: empty_prompt".to_string());
         }
 
         // イベント記録
@@ -3931,21 +4863,38 @@ impl SessionManager {
         // Persist the raw user/manual event before any retrieval, web search,
         // capture, or AI work. The persistence method detaches embedding and
         // summary work after the durable raw insert.
-        self.save_event_to_memory_with_app(&user_event, app_handle.cloned())
-            .await;
+        if !self
+            .save_event_to_memory_with_app_context(&user_event, app_handle.cloned(), None)
+            .await
+        {
+            self.log_mgr.warn(
+                "Memory",
+                &format!(
+                    "event_id={} status=raw_not_durable_before_generation reason=persistence_failed",
+                    user_event.id
+                ),
+            );
+        }
 
-        self.process_user_input_for_event(
-            None,
-            &user_event,
-            clean_text,
-            gemini_api_key,
-            brave_api_key,
-            gemini_model,
-            system_prompt,
-            tts_settings,
-            app_handle,
-        )
-        .await
+        match self
+            .process_user_input_for_event(
+                None,
+                &user_event,
+                &prompt_text,
+                gemini_api_key,
+                brave_api_key,
+                gemini_model,
+                system_prompt,
+                tts_settings,
+                app_handle,
+            )
+            .await?
+        {
+            InputProcessingOutcome::Generated { response, .. } => Ok(response),
+            InputProcessingOutcome::Dropped { reason } => {
+                Err(format!("input dropped: {}", reason.code()))
+            }
+        }
     }
 
     /// Continue processing an ASR event that was already persisted by the
@@ -3962,16 +4911,17 @@ impl SessionManager {
         system_prompt: &str,
         tts_settings: &TtsSettings,
         app_handle: Option<&AppHandle>,
-    ) -> Result<String, String> {
+    ) -> InputProcessingResult {
         if !self.is_current_session(context) {
-            self.log_mgr.info(
-                "Session",
-                &format!(
-                    "session_id={} generation={} event_id={} status=stale_input_processing_dropped",
-                    context.session_id, context.generation, event.id
-                ),
+            self.record_input_drop(
+                Some(context),
+                &event.id,
+                InputDropReason::StaleAtEntry,
+                app_handle,
             );
-            return Ok(String::new());
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAtEntry,
+            });
         }
 
         self.process_user_input_for_event(
@@ -4003,23 +4953,83 @@ impl SessionManager {
         system_prompt: &str,
         tts_settings: &TtsSettings,
         app_handle: Option<&AppHandle>,
-    ) -> Result<String, String> {
-        let clean_text = clean_text.trim();
-        if clean_text.is_empty()
-            || context
-                .map(|session| !self.is_current_session(session))
-                .unwrap_or(false)
-        {
-            return Ok(String::new());
-        }
-
-        // LanceDB 関連記憶をセマンティック検索 (GLuCoSE-base-ja 埋め込みモデル)
-        let memory_context = self.get_relevant_memory_context(clean_text).await;
+    ) -> InputProcessingResult {
+        let clean_text = normalize_prompt_text(clean_text);
         if context
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::StaleAtEntry,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAtEntry,
+            });
+        }
+        if !prompt_is_sendable(&clean_text) {
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::EmptyPrompt,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::EmptyPrompt,
+            });
+        }
+
+        if let Err(reason) = crate::ai_client::validate_gemini_api_key(gemini_api_key) {
+            let reason_code = reason.code();
+            let (session_id, generation) = session_context_fields(self, context);
+            self.log_mgr.warn(
+                "Gemini",
+                &format!(
+                    "session_id={} generation={} event_id={} status=generation_blocked stage=preflight reason={}",
+                    session_id, generation, user_event.id, reason_code
+                ),
+            );
+            if self.context_allows_ui(context) {
+                emit_toast_notice(
+                    app_handle,
+                    match reason {
+                        crate::ai_client::GeminiKeyError::Missing => {
+                            "⚠️ Gemini APIキーが未設定です。設定画面でAPIキーを保存してください。"
+                        }
+                        crate::ai_client::GeminiKeyError::Invalid => {
+                            "⚠️ Gemini APIキーの設定が不正です。空白や引用符を確認してください。"
+                        }
+                    },
+                    "warning",
+                );
+            }
+            return Err(match reason {
+                crate::ai_client::GeminiKeyError::Missing => {
+                    "Gemini API key is not set".to_string()
+                }
+                crate::ai_client::GeminiKeyError::Invalid => {
+                    "Gemini API key configuration is invalid".to_string()
+                }
+            });
+        }
+
+        // LanceDB 関連記憶をセマンティック検索 (GLuCoSE-base-ja 埋め込みモデル)
+        let memory_context = self.get_relevant_memory_context(&clean_text).await;
+        if context
+            .map(|session| !self.is_current_session(session))
+            .unwrap_or(false)
+        {
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::StaleAfterMemorySearch,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAfterMemorySearch,
+            });
         }
 
         // Web 検索が必要か判定
@@ -4033,15 +5043,29 @@ impl SessionManager {
                     &user_event.id,
                     &user_event.r#type,
                     &user_event.author,
-                    clean_text,
+                    &clean_text,
                     "web_search_started",
                 ),
             );
-            let res = self
-                .search_client
-                .search_and_format(clean_text, brave_api_key)
-                .await;
-            format!("\n\n{}", res.summary_text)
+            match tokio::time::timeout(
+                INPUT_WEB_SEARCH_TIMEOUT,
+                self.search_client
+                    .search_and_format(&clean_text, brave_api_key),
+            )
+            .await
+            {
+                Ok(res) => format!("\n\n{}", res.summary_text),
+                Err(_) => {
+                    self.log_mgr.warn(
+                        "WebSearch",
+                        &format!(
+                            "event_id={} status=web_search_failed reason=timeout",
+                            user_event.id
+                        ),
+                    );
+                    String::new()
+                }
+            }
         } else {
             String::new()
         };
@@ -4049,7 +5073,15 @@ impl SessionManager {
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::StaleAfterWebSearch,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAfterWebSearch,
+            });
         }
 
         let st = crate::settings::load_settings_file(&self.root_dir);
@@ -4060,20 +5092,49 @@ impl SessionManager {
 
         // ゲーム画面のキャプチャ（選択中ウィンドウを優先、なければプライマリスクリーン）
         let screen_b64 = if use_image {
-            let win_name = st.get("window").and_then(|v| v.as_str()).unwrap_or("");
-            if !win_name.is_empty() {
-                self.log_mgr.info(
-                    "Visual",
-                    &format!("Capturing target window: '{}'", win_name),
-                );
-                window_capture::capture_window_base64(win_name).or_else(|| {
-                    self.log_mgr
-                        .warn("Visual", "Window capture fallback to primary screen");
+            let win_name = st
+                .get("window")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let log_mgr = self.log_mgr.clone();
+            let capture = tokio::task::spawn_blocking(move || {
+                if !win_name.is_empty() {
+                    log_mgr.info(
+                        "Visual",
+                        &format!("Capturing target window: '{}'", win_name),
+                    );
+                    window_capture::capture_window_base64(&win_name).or_else(|| {
+                        log_mgr.warn("Visual", "Window capture fallback to primary screen");
+                        window_capture::capture_primary_screen_base64()
+                    })
+                } else {
+                    log_mgr.info("Visual", "Capturing primary screen...");
                     window_capture::capture_primary_screen_base64()
-                })
-            } else {
-                self.log_mgr.info("Visual", "Capturing primary screen...");
-                window_capture::capture_primary_screen_base64()
+                }
+            });
+            match tokio::time::timeout(INPUT_SCREEN_CAPTURE_TIMEOUT, capture).await {
+                Ok(Ok(image)) => image,
+                Ok(Err(_)) => {
+                    self.log_mgr.warn(
+                        "Visual",
+                        &format!(
+                            "event_id={} status=screen_capture_failed reason=worker_failed",
+                            user_event.id
+                        ),
+                    );
+                    None
+                }
+                Err(_) => {
+                    self.log_mgr.warn(
+                        "Visual",
+                        &format!(
+                            "event_id={} status=screen_capture_failed reason=timeout",
+                            user_event.id
+                        ),
+                    );
+                    None
+                }
             }
         } else {
             None
@@ -4082,26 +5143,25 @@ impl SessionManager {
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::StaleAfterScreenCapture,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAfterScreenCapture,
+            });
         }
 
         // プロンプト構築
         let full_system_instruction =
             format!("{}{}{}", system_prompt, memory_context, search_context);
 
-        // 会話履歴
-        let mut chat_messages = Vec::new();
-        for ev in self.get_events() {
-            let role = if ev.r#type == "ai_response" || ev.r#type == "auto_commentary" {
-                "assistant"
-            } else {
-                "user"
-            };
-            chat_messages.push(ChatMessage {
-                role: role.to_string(),
-                content: format!("{}: {}", ev.author, ev.content),
-            });
-        }
+        // 会話履歴。長時間セッションでも送信前の処理量を有界にし、
+        // 直近の発話（通常は user_event）を必ず残す。
+        let events = self.get_events();
+        let chat_messages = build_chat_messages(&events);
 
         let st = crate::settings::load_settings_file(&self.root_dir);
         let disable_thinking = st
@@ -4118,26 +5178,54 @@ impl SessionManager {
             thinking_budget,
         };
 
+        if context
+            .map(|session| !self.is_current_session(session))
+            .unwrap_or(false)
+        {
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::StaleBeforeGeneration,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleBeforeGeneration,
+            });
+        }
+
         self.log_mgr.info(
             "Gemini",
             &format!(
-                "{} model={}",
+                "session_id={} generation={} {} model={}",
+                context
+                    .map(|session| session.session_id.as_str())
+                    .unwrap_or("-"),
+                context
+                    .map(|session| session.generation)
+                    .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
                 memory_event_log_message(
                     &user_event.id,
                     &user_event.r#type,
                     &user_event.author,
-                    clean_text,
+                    &clean_text,
                     "generation_started"
                 ),
                 gemini_model
             ),
         );
 
-        if let Some(handle) = app_handle {
-            let _ = handle.emit(
-                "gemini_status",
-                serde_json::json!({ "is_generating": true }),
-            );
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit(
+                    "gemini_status",
+                    serde_json::json!({
+                        "is_generating": true,
+                        "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                        "generation": context.map(|session| session.generation).unwrap_or(0),
+                        "status": "generation_started"
+                    }),
+                );
+            }
         }
 
         // Gemini AI 推論
@@ -4147,88 +5235,255 @@ impl SessionManager {
             .await
         {
             Ok(res) => {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit(
-                        "gemini_status",
-                        serde_json::json!({ "is_generating": false }),
-                    );
+                if self.context_allows_ui(context) {
+                    if let Some(handle) = app_handle {
+                        let _ = handle.emit(
+                            "gemini_status",
+                            serde_json::json!({
+                                "is_generating": false,
+                                "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                                "generation": context.map(|session| session.generation).unwrap_or(0),
+                                "status": "response_received"
+                            }),
+                        );
+                    }
                 }
                 res
             }
             Err(e) => {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit(
-                        "gemini_status",
-                        serde_json::json!({ "is_generating": false }),
+                if self.context_allows_ui(context) {
+                    if let Some(handle) = app_handle {
+                        let _ = handle.emit(
+                            "gemini_status",
+                            serde_json::json!({
+                                "is_generating": false,
+                                "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                                "generation": context.map(|session| session.generation).unwrap_or(0),
+                                "status": "generation_failed",
+                                "reason": ai_error_reason(&e)
+                            }),
+                        );
+                    }
+                }
+                let (session_id, generation) = session_context_fields(self, context);
+                self.log_mgr.error(
+                    "Gemini",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=generation_failed stage=post_send reason={} detail={}",
+                        session_id,
+                        generation,
+                        user_event.id,
+                        ai_error_reason(&e),
+                        ai_error_reason(&e)
+                    ),
+                );
+                if self.context_allows_ui(context) {
+                    emit_toast_notice(
+                        app_handle,
+                        "⚠️ Geminiへの送信に失敗しました。設定とネットワークを確認してください。",
+                        "error",
                     );
                 }
-                self.log_mgr
-                    .error("Gemini", &format!("Gemini API failed: {}", e));
                 return Err(e);
             }
         };
+
+        let clean_ai_res = ai_res.trim().to_string();
+
+        if !prompt_is_sendable(&clean_ai_res) {
+            if self.context_allows_ui(context) {
+                if let Some(handle) = app_handle {
+                    let _ = handle.emit(
+                        "gemini_status",
+                        serde_json::json!({
+                            "is_generating": false,
+                            "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                            "generation": context.map(|session| session.generation).unwrap_or(0),
+                            "status": "empty_response"
+                        }),
+                    );
+                }
+            }
+            self.record_input_drop(
+                context,
+                &user_event.id,
+                InputDropReason::EmptyResponse,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::EmptyResponse,
+            });
+        }
+
+        let ai_event = SessionEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            r#type: "ai_response".to_string(),
+            author: "Assistant".to_string(),
+            content: clean_ai_res.clone(),
+            timestamp: Local::now().to_rfc3339(),
+        };
+        self.log_mgr.info(
+            "AI",
+            &format!(
+                "session_id={} generation={} {} status=generation_succeeded",
+                context
+                    .map(|session| session.session_id.as_str())
+                    .unwrap_or("-"),
+                context
+                    .map(|session| session.generation)
+                    .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
+                memory_event_log_message(
+                    &ai_event.id,
+                    &ai_event.r#type,
+                    &ai_event.author,
+                    &ai_event.content,
+                    "generated"
+                )
+            ),
+        );
+        self.append_event_to_session(ai_event.clone(), context);
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit("session-event", &ai_event);
+            }
+        }
+
+        let raw_persisted = self
+            .save_event_to_memory_with_app_context(&ai_event, app_handle.cloned(), context.cloned())
+            .await;
+        if !raw_persisted {
+            self.log_mgr.warn(
+                "AI",
+                &raw_durability_gap_message(
+                    self,
+                    &ai_event.id,
+                    context,
+                    "displayed_without_durable_raw",
+                ),
+            );
+        }
+
+        // A response generated by an older session is still retained in the
+        // authoritative raw journal, but it must not reach TTS or the live UI.
+        if !self.context_allows_ui(context) {
+            self.record_input_drop(
+                context,
+                &ai_event.id,
+                InputDropReason::StaleBeforeTts,
+                app_handle,
+            );
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleBeforeTts,
+            });
+        }
+
+        // 音声合成 & 発話再生
+        self.log_mgr.info(
+            "TTS",
+            &format!(
+                "session_id={} generation={} event_id={} status=tts_started",
+                context
+                    .map(|session| session.session_id.as_str())
+                    .unwrap_or("-"),
+                context
+                    .map(|session| session.generation)
+                    .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
+                ai_event.id
+            ),
+        );
+        *self.last_speak_time.lock() = Instant::now();
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit(
+                    "tts_status",
+                    serde_json::json!({
+                        "is_playing": true,
+                        "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                        "generation": context.map(|session| session.generation).unwrap_or(0),
+                        "status": "tts_started"
+                    }),
+                );
+            }
+        }
+        let tts_result = self.tts_mgr.speak(&clean_ai_res, tts_settings).await;
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit(
+                    "tts_status",
+                    serde_json::json!({
+                        "is_playing": false,
+                        "session_id": context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                        "generation": context.map(|session| session.generation).unwrap_or(0),
+                        "status": if tts_result.is_ok() { "tts_succeeded" } else { "tts_failed" }
+                    }),
+                );
+            }
+        }
+        let tts_outcome = match tts_result {
+            Ok(()) => {
+                self.log_mgr.info(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=tts_succeeded",
+                        context
+                            .map(|session| session.session_id.as_str())
+                            .unwrap_or("-"),
+                        context
+                            .map(|session| session.generation)
+                            .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
+                        ai_event.id
+                    ),
+                );
+                TtsOutcome::Succeeded
+            }
+            Err(error) => {
+                self.log_mgr.warn(
+                    "TTS",
+                    &format!(
+                        "session_id={} generation={} event_id={} status=tts_failed reason={}",
+                        context
+                            .map(|session| session.session_id.as_str())
+                            .unwrap_or("-"),
+                        context
+                            .map(|session| session.generation)
+                            .unwrap_or_else(|| self.session_generation.load(Ordering::SeqCst)),
+                        ai_event.id,
+                        ai_error_reason(&error)
+                    ),
+                );
+                if self.context_allows_ui(context) {
+                    emit_toast_notice(
+                        app_handle,
+                        "⚠️ Geminiの応答は取得しましたが、音声再生に失敗しました。",
+                        "warning",
+                    );
+                }
+                TtsOutcome::Failed
+            }
+        };
+        if self.context_allows_ui(context) {
+            *self.last_speak_time.lock() = Instant::now();
+        }
 
         if context
             .map(|session| !self.is_current_session(session))
             .unwrap_or(false)
         {
-            return Ok(String::new());
-        }
-
-        let clean_ai_res = ai_res.trim().to_string();
-
-        if !clean_ai_res.is_empty() {
-            let ai_event = SessionEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                r#type: "ai_response".to_string(),
-                author: "Assistant".to_string(),
-                content: clean_ai_res.clone(),
-                timestamp: Local::now().to_rfc3339(),
-            };
-            self.log_mgr.info(
-                "AI",
-                &memory_event_log_message(
-                    &ai_event.id,
-                    &ai_event.r#type,
-                    &ai_event.author,
-                    &ai_event.content,
-                    "generated",
-                ),
+            self.record_input_drop(
+                context,
+                &ai_event.id,
+                InputDropReason::StaleAfterTts,
+                app_handle,
             );
-            self.append_event_to_session(ai_event.clone(), context);
-            if let Some(handle) = app_handle {
-                let _ = handle.emit("session-event", &ai_event);
-            }
-
-            let _ = self
-                .save_event_to_memory_with_app_context(
-                    &ai_event,
-                    app_handle.cloned(),
-                    context.cloned(),
-                )
-                .await;
-
-            // 音声合成 & 発話再生
-            self.log_mgr
-                .info("TTS", "Synthesizing and playing speech...");
-            if context
-                .map(|session| !self.is_current_session(session))
-                .unwrap_or(false)
-            {
-                return Ok(clean_ai_res);
-            }
-            *self.last_speak_time.lock() = Instant::now();
-            if let Some(handle) = app_handle {
-                let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": true }));
-            }
-            let _ = self.tts_mgr.speak(&clean_ai_res, tts_settings).await;
-            if let Some(handle) = app_handle {
-                let _ = handle.emit("tts_status", serde_json::json!({ "is_playing": false }));
-            }
-            *self.last_speak_time.lock() = Instant::now();
+            return Ok(InputProcessingOutcome::Dropped {
+                reason: InputDropReason::StaleAfterTts,
+            });
         }
 
-        Ok(clean_ai_res)
+        Ok(InputProcessingOutcome::Generated {
+            response: clean_ai_res,
+            tts: tts_outcome,
+        })
     }
 
     /// note ブログ記事の自動執筆 (5,000文字規模 & スキル注入)
@@ -4287,16 +5542,18 @@ impl SessionManager {
             .as_ref()
             .and_then(|id| self.session_archives.lock().get(id).cloned())
             .unwrap_or_else(|| self.get_events());
-        if events.is_empty() {
+        if session_id.is_some() || events.is_empty() {
             // A portable app can be restarted between session stop and blog
-            // generation.  Recover the persisted raw history when the
-            // in-memory ring has no entries; this also makes a delayed stop
-            // callback resilient to a UI remount.
+            // generation. Recover authoritative raw history whenever a
+            // stopped-session boundary is known, even when the archive is
+            // non-empty: a delayed final callback may have reached the
+            // journal after the in-memory snapshot was taken, and the legacy
+            // compatibility projection may still be lagging behind it.
             if let Ok(memories) = lance_memory::list_stored_memories(&self.root_dir).await {
-                events.extend(persisted_blog_fallback_events(
-                    memories,
-                    session_started_at.as_ref(),
-                ));
+                merge_persisted_blog_events(
+                    &mut events,
+                    persisted_blog_fallback_events(memories, session_started_at.as_ref()),
+                );
             }
         }
         if let Some(id) = session_id {
@@ -4471,13 +5728,15 @@ pub fn normalize_kana(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_redacted_memory_text, automatic_blog_post_enabled, backfill_log_message,
-        backfill_log_message_with_counters, backfill_log_severity, contains_stop_word,
-        finalize_backfill_progress, increment_reason, inference_failure_reason,
-        live_asr_summary_event, partition_backfill_rows, persisted_blog_fallback_events,
+        admit_redacted_memory_text, asr_prompt_is_sendable, automatic_blog_post_enabled,
+        backfill_log_message, backfill_log_message_with_counters, backfill_log_severity,
+        build_chat_messages, contains_stop_word, finalize_backfill_progress, increment_reason,
+        inference_failure_reason, live_asr_summary_event, normalize_prompt_text,
+        partition_backfill_rows, persisted_blog_fallback_events, prompt_is_sendable,
         record_backfill_commit, runtime_failure_reason, set_backfill_fatal, should_backfill_row,
-        unique_blog_path, BackfillLogSeverity, MemoryBackfillProgress, SessionManager,
-        StoredMemory, SummaryBackfillApplyResult,
+        should_emit_input_drop_toast, unique_blog_path, BackfillLogSeverity,
+        MemoryBackfillProgress, SessionManager, StoredMemory, SummaryBackfillApplyResult,
+        MAX_CHAT_HISTORY_CHARS, MAX_CHAT_HISTORY_MESSAGES,
     };
     use crate::lance_memory::{self, SummaryExclusionDetail};
     use crate::logger::LogManager;
@@ -4560,6 +5819,126 @@ mod tests {
             duplicate_final.action,
             crate::asr::WakeWordAction::DuplicateSuppressed
         );
+    }
+
+    #[test]
+    fn stale_asr_callback_gate_accepts_final_but_rejects_partial() {
+        let session = test_session_manager("stale-asr-callback-gate");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        session.stop_session();
+
+        assert!(session.admit_asr_callback(&context, true));
+        assert!(!session.admit_asr_callback(&context, false));
+
+        let logs = session.log_mgr.get_logs();
+        assert!(logs
+            .iter()
+            .any(|entry| entry.message.contains("stale_asr_final_accepted_for_raw")));
+        assert!(logs
+            .iter()
+            .any(|entry| entry.message.contains("stale_asr_callback_dropped")));
+        assert!(logs.iter().any(|entry| {
+            entry
+                .message
+                .contains("status=nod_not_requested phase=partial reason=stale_callback")
+        }));
+    }
+
+    #[tokio::test]
+    async fn stale_final_is_persisted_raw_but_not_queued_for_live_summary() {
+        let session = test_session_manager("stale-final-summary-boundary");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        session.stop_session();
+
+        let persisted = session
+            .persist_final_asr_result(&context, "mic", "ねえぐり 停止後の遅延確定発話", None, None)
+            .await
+            .expect("stale final must still reach the raw persistence boundary");
+
+        let repository = MemoryRepository::open(&session.root_dir).await.unwrap();
+        assert!(repository
+            .read_raw_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.event_id().to_string()
+                == MemoryRepository::canonical_event_id(&persisted.event.id)));
+        let logs = session.log_mgr.get_logs();
+        assert!(logs
+            .iter()
+            .any(|entry| entry.message.contains("stale_summary_dropped")));
+        assert!(!logs
+            .iter()
+            .any(|entry| entry.message.contains("summary_queued")));
+    }
+
+    #[tokio::test]
+    async fn empty_final_asr_is_classified_without_logging_transcript() {
+        let session = test_session_manager("empty-final-admission-diagnostic");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+
+        assert!(session
+            .persist_final_asr_result(&context, "mic", "   ", None, None)
+            .await
+            .is_none());
+
+        let logs = session.log_mgr.get_logs();
+        let diagnostic = logs
+            .iter()
+            .find(|entry| entry.message.contains("raw_admission_dropped"))
+            .expect("an empty final must produce a classified diagnostic");
+        assert!(diagnostic
+            .message
+            .contains(&format!("session_id={}", context.session_id)));
+        assert!(diagnostic
+            .message
+            .contains(&format!("generation={}", context.generation)));
+        assert!(diagnostic.message.contains("reason=empty_transcript"));
+        assert!(!diagnostic.message.contains("   "));
+    }
+
+    #[tokio::test]
+    async fn unknown_asr_stream_is_classified_without_exposing_stream_payload() {
+        let session = test_session_manager("unknown-stream-admission-diagnostic");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+
+        assert!(session
+            .persist_final_asr_result(
+                &context,
+                "future-private-stream",
+                "recognized text",
+                None,
+                None
+            )
+            .await
+            .is_none());
+
+        let logs = session.log_mgr.get_logs();
+        let diagnostic = logs
+            .iter()
+            .find(|entry| entry.message.contains("unknown_stream_dropped"))
+            .expect("an unknown final stream must produce a classified diagnostic");
+        assert!(diagnostic
+            .message
+            .contains(&format!("session_id={}", context.session_id)));
+        assert!(diagnostic
+            .message
+            .contains(&format!("generation={}", context.generation)));
+        assert!(diagnostic.message.contains("reason=unknown_stream"));
+        assert!(!diagnostic.message.contains("future-private-stream"));
+        assert!(!diagnostic.message.contains("recognized text"));
     }
 
     #[tokio::test]
@@ -4682,6 +6061,281 @@ mod tests {
         assert!(contains_stop_word("静かにして"));
         assert!(!contains_stop_word("今日はゲームをしよう"));
         assert!(!contains_stop_word(""));
+    }
+
+    #[test]
+    fn stop_word_detection_does_not_match_unrelated_word_fragments() {
+        assert!(!contains_stop_word("ストップウォッチの使い方を教えて"));
+    }
+
+    #[test]
+    fn prompt_boundary_normalizes_full_width_whitespace_and_preserves_asr_minimum() {
+        assert_eq!(normalize_prompt_text("　A　"), "A");
+        assert_eq!(normalize_prompt_text("　　"), "");
+        assert!(prompt_is_sendable("A"));
+        assert!(!asr_prompt_is_sendable("A"));
+        assert!(asr_prompt_is_sendable("AB"));
+        assert!(!prompt_is_sendable(""));
+    }
+
+    #[test]
+    fn wake_word_required_drop_is_logged_without_a_user_toast() {
+        assert!(!should_emit_input_drop_toast(
+            super::InputDropReason::WakeWordRequired
+        ));
+        assert!(should_emit_input_drop_toast(
+            super::InputDropReason::WakeOnly
+        ));
+        assert!(should_emit_input_drop_toast(
+            super::InputDropReason::EmptyResponse
+        ));
+    }
+
+    #[test]
+    fn chat_history_is_bounded_and_retains_latest_event() {
+        let events = (0..100)
+            .map(|index| super::SessionEvent {
+                id: format!("event-{index}"),
+                r#type: "user_speech".to_string(),
+                author: "User".to_string(),
+                content: "x".repeat(1000),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            })
+            .collect::<Vec<_>>();
+
+        let messages = build_chat_messages(&events);
+        assert!(messages.len() <= MAX_CHAT_HISTORY_MESSAGES);
+        assert!(
+            messages
+                .iter()
+                .map(|message| message.content.chars().count())
+                .sum::<usize>()
+                <= MAX_CHAT_HISTORY_CHARS
+        );
+        assert!(messages
+            .last()
+            .is_some_and(|message| message.content.contains(&"x".repeat(1000))));
+    }
+
+    #[tokio::test]
+    async fn empty_manual_input_is_not_reported_as_success() {
+        let session = test_session_manager("empty-manual-input-outcome-red");
+
+        let result = session
+            .process_user_input(
+                "User",
+                "　\n\t",
+                "manual_input",
+                "",
+                "",
+                "gemini-2.0-flash",
+                "",
+                &crate::tts::TtsSettings::default(),
+                None,
+            )
+            .await;
+
+        assert!(result.is_err(), "empty input must be observable as a drop");
+    }
+
+    #[tokio::test]
+    async fn stale_session_input_is_not_reported_as_success() {
+        let session = test_session_manager("stale-input-outcome-red");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        session.stop_session();
+        let event = super::SessionEvent {
+            id: "stale-input-outcome-event".to_string(),
+            r#type: "user_speech".to_string(),
+            author: "User".to_string(),
+            content: "質問".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let result = session
+            .process_user_input_for_session(
+                &context,
+                &event,
+                "質問",
+                "",
+                "",
+                "gemini-2.0-flash",
+                "",
+                &crate::tts::TtsSettings::default(),
+                None,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Ok(super::InputProcessingOutcome::Dropped {
+                reason: super::InputDropReason::StaleAtEntry
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_gemini_key_is_classified_before_generation_started() {
+        let session = test_session_manager("missing-gemini-key-preflight");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        let event = super::SessionEvent {
+            id: "missing-key-preflight-event".to_string(),
+            r#type: "user_speech".to_string(),
+            author: "User".to_string(),
+            content: "質問".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let result = session
+            .process_user_input_for_session(
+                &context,
+                &event,
+                "質問",
+                " \t\n",
+                "",
+                "gemini-2.0-flash",
+                "",
+                &crate::tts::TtsSettings::default(),
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "Gemini API key is not set",
+            "missing credentials must fail before any transport attempt"
+        );
+        let logs = session.log_mgr.get_logs();
+        assert!(logs.iter().any(|entry| {
+            entry
+                .message
+                .contains("status=generation_blocked stage=preflight reason=api_key_missing")
+        }));
+        assert!(!logs
+            .iter()
+            .any(|entry| entry.message.contains("status=generation_started")));
+    }
+
+    #[tokio::test]
+    async fn prompt_received_schedules_nod_without_waiting_for_audio_completion() {
+        let session = test_session_manager("prompt-received-nod-background");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+
+        let started = std::time::Instant::now();
+        session.schedule_nod_ack(
+            &context,
+            "prompt-received-nod-background-event",
+            "final",
+            crate::asr::WakeWordAction::PromptReceived,
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "nod scheduling must not wait for audio completion"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let logs = session.log_mgr.get_logs();
+        assert!(logs.iter().any(|entry| {
+            entry.message.contains("status=nod_scheduled")
+                && entry.message.contains("phase=final")
+                && entry.message.contains("action=PromptReceived")
+        }));
+        assert!(logs.iter().any(|entry| {
+            entry.message.contains("status=nod_failed")
+                && entry.message.contains("reason=nod_asset_missing")
+        }));
+    }
+
+    #[tokio::test]
+    async fn stale_nod_schedule_is_rejected_after_generation_boundary() {
+        let session = test_session_manager("stale-nod-generation-boundary");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        session.stop_session();
+
+        session.schedule_nod_ack(
+            &context,
+            "stale-nod-event",
+            "final",
+            crate::asr::WakeWordAction::PromptReceived,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let logs = session.log_mgr.get_logs();
+        assert!(logs.iter().any(|entry| {
+            entry
+                .message
+                .contains("status=nod_not_requested phase=final")
+                && entry.message.contains("reason=stale_before_schedule")
+        }));
+        assert!(!logs.iter().any(|entry| {
+            entry.message.contains("event_id=stale-nod-event")
+                && entry.message.contains("status=nod_started")
+        }));
+    }
+
+    #[tokio::test]
+    async fn non_prompt_final_is_classified_without_calling_gemini() {
+        let session = test_session_manager("non-prompt-final-outcome");
+        session.start_session();
+        let context = session
+            .current_session_context()
+            .expect("test session must be active");
+        let event = super::SessionEvent {
+            id: "non-prompt-final-event".to_string(),
+            r#type: "user_speech".to_string(),
+            author: "User".to_string(),
+            content: "通常の発話".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+        let result = session
+            .process_asr_followup(
+                &context,
+                super::PersistedAsrEvent {
+                    event,
+                    decision: crate::asr::WakeWordDecision {
+                        stream: "mic".to_string(),
+                        engine: crate::asr::WAKE_WORD_ENGINE,
+                        session_generation: context.generation,
+                        is_final: true,
+                        phase: crate::asr::WakeWordPhase::Idle,
+                        wake_word_checked: true,
+                        wake_word_detected: false,
+                        clean_prompt: "通常の発話".to_string(),
+                        action: crate::asr::WakeWordAction::FinalSpeech,
+                        should_acknowledge: false,
+                        is_prompt: false,
+                        cooldown_active: false,
+                        duplicate_suppressed: false,
+                    },
+                    stop_word_detected: false,
+                },
+                "通常の発話",
+                None,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Ok(super::InputProcessingOutcome::Dropped {
+                reason: super::InputDropReason::WakeWordRequired
+            })
+        ));
+        assert!(!session
+            .log_mgr
+            .get_logs()
+            .iter()
+            .any(|entry| entry.message.contains("status=generation_started")));
     }
 
     #[test]

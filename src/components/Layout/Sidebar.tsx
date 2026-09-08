@@ -9,6 +9,8 @@ import { ResourceInfo } from '../../types';
 interface SidebarProps {
   sessionRunning: boolean;
   sessionStarting?: boolean;
+  enginesReady?: boolean;
+  enginesInitializing?: boolean;
   onStartSession: () => void;
   onStopSession: () => void;
   onRestartWhisper: () => void;
@@ -41,6 +43,8 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({
   sessionRunning,
   sessionStarting = false,
+  enginesReady = true,
+  enginesInitializing = false,
   onStartSession,
   onStopSession,
   onRestartWhisper,
@@ -88,6 +92,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <ActionButtons
           sessionRunning={sessionRunning}
           sessionStarting={sessionStarting}
+          enginesReady={enginesReady}
+          enginesInitializing={enginesInitializing}
           onStart={onStartSession}
           onStop={onStopSession}
           onRestartWhisper={onRestartWhisper}

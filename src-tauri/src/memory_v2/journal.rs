@@ -405,6 +405,11 @@ impl Journal {
         &self.path
     }
 
+    #[cfg(test)]
+    pub(crate) fn read_report_count_for_test(&self) -> usize {
+        self.read_report_count.load(Ordering::Relaxed)
+    }
+
     pub fn begin_batch(&self, batch_id: &str) -> Result<AppendOutcome, JournalError> {
         self.append_new(
             JournalState::Begin,

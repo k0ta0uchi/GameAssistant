@@ -758,7 +758,12 @@ impl WakeWordStateMachine {
                 false,
                 text.to_string(),
                 WakeWordAction::PromptReceived,
-                false,
+                // A prompt spoken after a standalone wake word is a distinct
+                // acknowledgement boundary.  The wake transition may have
+                // already been acknowledged by a partial/final wake result,
+                // but the received prompt still gets exactly one nod.  The
+                // duplicate-final guard above suppresses retries.
+                true,
                 true,
                 self.in_cooldown(now_ms),
                 false,
@@ -901,6 +906,19 @@ impl WhisperWsClient {
 
     /// テキスト一覧をローカル GLuCoSE-base-ja モデルで 768 次元ベクトル化
     pub async fn embed_texts(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.embed_texts_with_timeout(texts, std::time::Duration::from_secs(5))
+            .await
+    }
+
+    /// Same embedding request with a caller-selected timeout.  Startup uses a
+    /// longer bound because the first SentenceTransformer load is a cold
+    /// process/model operation; regular detached curation keeps the shorter
+    /// latency budget above.
+    pub async fn embed_texts_with_timeout(
+        &self,
+        texts: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<Vec<Vec<f32>>, String> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -922,7 +940,7 @@ impl WhisperWsClient {
             return Err("WebSocket connection not active".to_string());
         }
 
-        tokio::time::timeout(tokio::time::Duration::from_secs(5), rx)
+        tokio::time::timeout(timeout, rx)
             .await
             .map_err(|_| "Embedding timeout".to_string())?
             .map_err(|_| "Embedding channel dropped".to_string())
@@ -2339,7 +2357,26 @@ mod tests {
         assert_eq!(prompt.action, WakeWordAction::PromptReceived);
         assert!(prompt.is_prompt);
         assert_eq!(prompt.clean_prompt, "続きの指示");
+        assert!(prompt.should_acknowledge);
         assert!(!detector.is_collecting_prompt());
+    }
+
+    #[test]
+    fn prompt_received_acknowledgement_is_one_shot_after_two_stage_wake() {
+        let mut detector = WakeWordStateMachine::new();
+        detector.begin_session(12);
+
+        let _ = detector.handle_asr("mic", "ねえぐり", false, 0);
+        let wake_only = detector.handle_asr("mic", "ねえぐり", true, 700);
+        assert_eq!(wake_only.action, WakeWordAction::FinalWakeOnly);
+
+        let first_prompt = detector.handle_asr("mic", "最初の指示", true, 1_000);
+        assert_eq!(first_prompt.action, WakeWordAction::PromptReceived);
+        assert!(first_prompt.should_acknowledge);
+
+        let duplicate_prompt = detector.handle_asr("mic", "最初の指示", true, 1_100);
+        assert_eq!(duplicate_prompt.action, WakeWordAction::DuplicateSuppressed);
+        assert!(!duplicate_prompt.should_acknowledge);
     }
 
     #[test]

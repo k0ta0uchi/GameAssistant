@@ -12,6 +12,9 @@ import {
   type SetupStatus,
   type SetupStepStatus,
   type DownloadProgressEvent,
+  type RuntimeInitializationStatus,
+  type RuntimeInitializationStage,
+  type RuntimeInitializationState,
   GEMMA_MODEL_ID,
   GEMMA_TERMS_VERSION,
   GEMMA_TERMS_MODEL_SHA256,
@@ -74,8 +77,45 @@ export const shouldBlockAppUntilSetupReady = (
 export const shouldShowMainUiForSession = (
   tauri: boolean,
   setup: Parameters<typeof shouldBlockAppUntilSetupReady>[1],
+): boolean => !tauri || isPortableRuntimeReadyForMainUi(setup);
+
+/**
+ * First-run setup and live engine initialization are separate gates.  Once
+ * Python/dependencies/models/Gemma have been verified, the main screen must
+ * mount so it can show the real ASR/GLuCoSE/memory-v2 initialization progress.
+ * The session action still uses the stricter `isSetupReadyForSession` gate,
+ * which includes the live ASR WebSocket bit.
+ */
+export const isPortableRuntimeReadyForMainUi = (
+  setup:
+    | (Pick<SetupStatus, "ready" | "required_models_ready"> &
+        Partial<
+          Pick<
+            SetupStatus,
+            | "gemma_terms_accepted"
+            | "gemma_terms_version"
+            | "gemma_terms_model_sha256"
+            | "gemma_terms_source"
+            | "dependency_ready"
+            | "python_import_ready"
+            | "tokenizer_ready"
+            | "embedding_ready"
+          >
+        > & { status?: unknown; error?: string | null })
+    | null,
 ): boolean =>
-  !tauri || (setup !== null && !shouldBlockAppUntilSetupReady(tauri, setup));
+  Boolean(
+    setup &&
+      isRuntimeStatus(setup.status) &&
+      setup.ready === true &&
+      setup.required_models_ready === true &&
+      (setup.error === undefined || setup.error === null || setup.error === "") &&
+      setup.dependency_ready === true &&
+      setup.python_import_ready === true &&
+      setup.tokenizer_ready === true &&
+      setup.embedding_ready === true &&
+      hasValidGemmaTerms(setup),
+  );
 
 /** Every session transport must use the same fail-closed bootstrap contract. */
 export const isSetupReadyForSession = (
@@ -507,6 +547,104 @@ const normalizeSetupProgress = (value: unknown): SetupProgress | null => {
   };
 };
 
+const RUNTIME_INITIALIZATION_STATES: RuntimeInitializationState[] = [
+  "idle",
+  "running",
+  "completed",
+  "error",
+];
+
+const normalizeRuntimeInitializationStage = (
+  value: unknown,
+): RuntimeInitializationStage | null => {
+  const record = asRecord(value);
+  if (!record) return null;
+  const id = firstString(record.id);
+  const status = firstString(record.status);
+  if (!id || !status) return null;
+  return {
+    id,
+    label: firstString(record.label) || undefined,
+    status,
+    progress: normalizeProgress(record.progress),
+    elapsed_ms:
+      typeof record.elapsed_ms === "number" && Number.isFinite(record.elapsed_ms)
+        ? Math.max(0, Math.round(record.elapsed_ms))
+        : undefined,
+    error: firstString(record.error),
+  };
+};
+
+/** Normalize native startup progress without allowing malformed payloads to authorize a session. */
+export const normalizeRuntimeInitializationStatus = (
+  value: unknown,
+): RuntimeInitializationStatus | null => {
+  const record = asRecord(value);
+  if (!record) return null;
+  const status = record.status;
+  if (
+    typeof status !== "string" ||
+    !RUNTIME_INITIALIZATION_STATES.includes(status as RuntimeInitializationState) ||
+    typeof record.progress !== "number" ||
+    !Array.isArray(record.stages) ||
+    typeof record.asr_ready !== "boolean" ||
+    typeof record.embedding_ready !== "boolean" ||
+    typeof record.memory_v2_ready !== "boolean"
+  )
+    return null;
+  const stages = record.stages
+    .map(normalizeRuntimeInitializationStage)
+    .filter((stage): stage is RuntimeInitializationStage => stage !== null);
+  if (stages.length === 0) return null;
+  const optionalString = (key: string): string | null | undefined => {
+    const candidate = record[key];
+    return candidate === null || candidate === undefined
+      ? candidate
+      : typeof candidate === "string"
+        ? candidate
+        : undefined;
+  };
+  return {
+    status: status as RuntimeInitializationState,
+    progress: normalizeProgress(record.progress),
+    current_stage:
+      typeof record.current_stage === "string" || record.current_stage === null
+        ? record.current_stage
+        : undefined,
+    message: optionalString("message"),
+    elapsed_ms:
+      typeof record.elapsed_ms === "number" && Number.isFinite(record.elapsed_ms)
+        ? Math.max(0, Math.round(record.elapsed_ms))
+        : undefined,
+    started_at: optionalString("started_at"),
+    completed_at: optionalString("completed_at"),
+    stages,
+    asr_ready: record.asr_ready,
+    embedding_ready: record.embedding_ready,
+    memory_v2_ready: record.memory_v2_ready,
+    error: optionalString("error"),
+  };
+};
+
+const idleRuntimeInitializationStatus = (): RuntimeInitializationStatus => ({
+  status: "idle",
+  progress: 0,
+  current_stage: null,
+  message: "初期化を開始する準備をしています。",
+  elapsed_ms: 0,
+  started_at: null,
+  completed_at: null,
+  stages: [
+    { id: "asr", label: "ASR / Faster-Whisper", status: "pending", progress: 0 },
+    { id: "embedding", label: "GLuCoSE-base-ja", status: "pending", progress: 0 },
+    { id: "memory_v2", label: "memory-v2", status: "pending", progress: 0 },
+  ],
+  asr_ready: false,
+  embedding_ready: false,
+  memory_v2_ready: false,
+  error: null,
+});
+
 const setupStagesMatch = (
   left?: string | null,
   right?: string | null,
@@ -535,6 +673,10 @@ export function useAppState() {
   const [setupProgress, setSetupProgress] = useState<SetupProgress | null>(
     null,
   );
+  const [runtimeInitialization, setRuntimeInitialization] =
+    useState<RuntimeInitializationStatus>(idleRuntimeInitializationStatus);
+  const runtimeInitializationRequestedRef = useRef(false);
+  const runtimeInitializationPollRef = useRef<number | null>(null);
   const [isSetupRunning, setIsSetupRunning] = useState<boolean>(false);
   const [setupError, setSetupError] = useState<string | null>(null);
   const [isElevationRequesting, setIsElevationRequesting] =
@@ -961,6 +1103,15 @@ export function useAppState() {
               return updated;
             });
             setSetupError(message);
+          });
+
+          // Main-screen engine initialization emits a complete snapshot for
+          // every stage transition.  Keep the UI truthful even when a stage
+          // takes minutes (for example a large memory-v2 journal recovery).
+          await register<unknown>("runtime_initialization", (event) => {
+            const snapshot = normalizeRuntimeInitializationStatus(event.payload);
+            if (!snapshot) return;
+            setRuntimeInitialization(snapshot);
           });
 
           await register<LogEntry>("app_log", (event) => {
@@ -1715,6 +1866,98 @@ export function useAppState() {
     return () => window.clearInterval(timer);
   }, [fetchSetupStatus, isSetupRunning, setupStatus]);
 
+  /** Read the measured live engine-initialization snapshot from native code. */
+  const fetchRuntimeInitializationStatus = useCallback(async () => {
+    if (!isTauriEnv()) return null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const raw = await invoke<unknown>("get_runtime_initialization_status");
+      const normalized = normalizeRuntimeInitializationStatus(raw);
+      if (normalized) setRuntimeInitialization(normalized);
+      return normalized;
+    } catch (error) {
+      console.warn("Runtime initialization status unavailable:", error);
+      return null;
+    }
+  }, []);
+
+  /** Start the one-shot ASR → GLuCoSE → memory-v2 initialization pipeline. */
+  const initializeRuntime = useCallback(async () => {
+    if (!isTauriEnv()) return null;
+    setRuntimeInitialization((previous) => {
+      if (previous.status === "completed") return previous;
+      const next = idleRuntimeInitializationStatus();
+      next.status = "running";
+      next.message = "ASR、GLuCoSE、memory-v2を初期化しています。";
+      return next;
+    });
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const raw = await invoke<unknown>("initialize_runtime");
+      const normalized = normalizeRuntimeInitializationStatus(raw);
+      if (!normalized) {
+        throw new Error("初期化結果を読み取れませんでした。");
+      }
+      setRuntimeInitialization(normalized);
+      return normalized;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRuntimeInitialization((previous) => ({
+        ...previous,
+        status: "error",
+        message: "エンジン初期化に失敗しました。",
+        error: message,
+      }));
+      showToast(`エンジン初期化エラー: ${message}`, "warning");
+      return null;
+    }
+  }, [showToast]);
+
+  // Mounting the main screen is the explicit initialization boundary.  The
+  // ref prevents React StrictMode/effect replays from starting a second run;
+  // native code also serializes concurrent invocations defensively.
+  useEffect(() => {
+    if (!isTauriEnv() || !isPortableRuntimeReadyForMainUi(setupStatus)) return;
+    if (
+      runtimeInitializationRequestedRef.current ||
+      runtimeInitialization.status !== "idle"
+    )
+      return;
+    runtimeInitializationRequestedRef.current = true;
+    void initializeRuntime().then((result) => {
+      if (!result || result.status === "error") {
+        runtimeInitializationRequestedRef.current = false;
+      }
+    });
+  }, [initializeRuntime, runtimeInitialization.status, setupStatus]);
+
+  // Events are preferred, but polling closes the race where the main screen
+  // mounts while native listeners are still being registered and gives a
+  // visible update during long synchronous journal recovery.
+  useEffect(() => {
+    if (
+      !isTauriEnv() ||
+      !isPortableRuntimeReadyForMainUi(setupStatus) ||
+      runtimeInitialization.status === "completed"
+    )
+      return;
+    void fetchRuntimeInitializationStatus();
+    const timer = window.setInterval(() => {
+      void fetchRuntimeInitializationStatus();
+    }, 500);
+    runtimeInitializationPollRef.current = timer;
+    return () => {
+      window.clearInterval(timer);
+      if (runtimeInitializationPollRef.current === timer) {
+        runtimeInitializationPollRef.current = null;
+      }
+    };
+  }, [
+    fetchRuntimeInitializationStatus,
+    runtimeInitialization.status,
+    setupStatus,
+  ]);
+
   const runSetup = useCallback(async (): Promise<SetupStatus | null> => {
     if (!isTauriEnv()) return null;
     if (setupRunInFlightRef.current) return setupRunInFlightRef.current;
@@ -2262,6 +2505,9 @@ export function useAppState() {
     fetchModelsStatus,
     setupStatus,
     setupProgress,
+    runtimeInitialization,
+    initializeRuntime,
+    fetchRuntimeInitializationStatus,
     isSetupRunning,
     setupError,
     isElevationRequesting,

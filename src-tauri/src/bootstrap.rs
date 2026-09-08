@@ -73,6 +73,17 @@ static REQUIREMENTS_CPU: &[u8] = include_bytes!("../../requirements-cpu.txt");
 static REQUIREMENTS_GPU: &[u8] = include_bytes!("../../requirements-gpu.txt");
 static UV_EXE: &[u8] = include_bytes!("../resources/uv.exe");
 static NOTICE_GEMMA: &[u8] = include_bytes!("../../NOTICE-GEMMA.txt");
+// Keep the acknowledgement sounds inside the portable executable and extract
+// them beside the executable during runtime bootstrap.  A portable release
+// must not depend on a checkout-relative `wav/` directory being copied by the
+// bundler or present on the target machine.
+static NOD_WAV_FILES: &[(&str, &[u8])] = &[
+    ("wav/nod/0.wav", include_bytes!("../../wav/nod/0.wav")),
+    ("wav/nod/1.wav", include_bytes!("../../wav/nod/1.wav")),
+    ("wav/nod/2.wav", include_bytes!("../../wav/nod/2.wav")),
+    ("wav/nod/4.wav", include_bytes!("../../wav/nod/4.wav")),
+    ("wav/nod/5.wav", include_bytes!("../../wav/nod/5.wav")),
+];
 include!(concat!(env!("OUT_DIR"), "/llama_server_embed.rs"));
 
 static CANCEL_SETUP: AtomicBool = AtomicBool::new(false);
@@ -1845,6 +1856,11 @@ fn extract_embedded_resources(layout: &RuntimeLayout) -> Result<(), String> {
             .iter()
             .map(|(name, bytes)| (runtime_dir.join(name), *bytes)),
     );
+    resources.extend(
+        NOD_WAV_FILES
+            .iter()
+            .map(|(relative_path, bytes)| (layout.root.join(relative_path), *bytes)),
+    );
     for (target, bytes) in resources {
         if bytes.is_empty() {
             continue;
@@ -2157,6 +2173,16 @@ mod tests {
                     .any(|line| line.trim() == "sentencepiece==0.2.0"),
                 "portable runtime requirements must install SentencePiece for tokenizers"
             );
+        }
+    }
+
+    #[test]
+    fn nod_wav_assets_are_embedded_with_portable_relative_paths() {
+        assert_eq!(NOD_WAV_FILES.len(), 5);
+        for (relative_path, bytes) in NOD_WAV_FILES {
+            assert!(relative_path.starts_with("wav/nod/"));
+            assert!(relative_path.ends_with(".wav"));
+            assert!(!bytes.is_empty());
         }
     }
 

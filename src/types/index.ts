@@ -674,3 +674,46 @@ export interface SetupProgress {
   current?: number;
   total?: number;
 }
+
+/**
+ * Startup engine initialization is deliberately separate from first-run
+ * setup.  Setup verifies the portable runtime and model files; this status
+ * reports the live ASR/GLuCoSE/memory-v2 work performed from the main screen.
+ */
+export type RuntimeInitializationState =
+  | "idle"
+  | "running"
+  | "completed"
+  | "error";
+
+export type RuntimeInitializationStageId =
+  | "asr"
+  | "embedding"
+  | "memory_v2"
+  | "complete"
+  | string;
+
+export interface RuntimeInitializationStage {
+  id: RuntimeInitializationStageId;
+  label?: string;
+  status: "pending" | "running" | "completed" | "error" | string;
+  progress: number;
+  elapsed_ms?: number;
+  error?: string | null;
+}
+
+/** Live startup initialization snapshot emitted by the native runtime. */
+export interface RuntimeInitializationStatus {
+  status: RuntimeInitializationState;
+  progress: number;
+  current_stage?: RuntimeInitializationStageId | null;
+  message?: string | null;
+  elapsed_ms?: number;
+  started_at?: string | null;
+  completed_at?: string | null;
+  stages: RuntimeInitializationStage[];
+  asr_ready: boolean;
+  embedding_ready: boolean;
+  memory_v2_ready: boolean;
+  error?: string | null;
+}

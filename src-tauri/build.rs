@@ -75,6 +75,17 @@ fn main() {
         }
         println!("cargo:rerun-if-changed={}", path.display());
     }
+    for file_name in ["0.wav", "1.wav", "2.wav", "4.wav", "5.wav"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .join("..")
+                .join("wav")
+                .join("nod")
+                .join(file_name)
+                .display()
+        );
+    }
     let source = format!(
         "pub static LLAMA_RUNTIME_FILES: &[(&str, &[u8])] = &[{}];\n",
         entries.join(",")

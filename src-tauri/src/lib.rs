@@ -21,9 +21,10 @@ pub mod window_capture;
 pub mod memory_v2;
 pub mod model_manager;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -31,6 +32,7 @@ use ai_client::{AiClient, AiGenerateOptions, ChatMessage};
 use audio::AudioDevicesResponse;
 use lance_memory::{MemoryItem, MemoryListResponse};
 use logger::{LogEntry, LogManager};
+use memory_v2::repository::MemoryRepository;
 use model_manager::{ModelManager, ModelStatus};
 use resource::{ResourceManager, SystemResources};
 use session::{SessionEvent, SessionManager};
@@ -50,6 +52,114 @@ pub struct AppState {
     log_mgr: Arc<LogManager>,
     model_mgr: Arc<ModelManager>,
     migration_progress: lance_memory::MigrationProgressHandle,
+    runtime_initialization: RuntimeInitializationState,
+}
+
+/// A live, in-process snapshot of the expensive engine work performed after
+/// the portable runtime has passed first-run setup.  Keeping this state in the
+/// native layer means the main screen can render truthful progress even while
+/// model loading or a large memory-v2 journal recovery is still running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInitializationStage {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub progress: f64,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeInitializationStatus {
+    pub status: String,
+    pub progress: f64,
+    pub current_stage: Option<String>,
+    pub message: Option<String>,
+    pub elapsed_ms: u64,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub stages: Vec<RuntimeInitializationStage>,
+    pub asr_ready: bool,
+    pub embedding_ready: bool,
+    pub memory_v2_ready: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone)]
+struct RuntimeInitializationState {
+    status: Arc<StdMutex<RuntimeInitializationStatus>>,
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl RuntimeInitializationState {
+    fn new() -> Self {
+        Self {
+            status: Arc::new(StdMutex::new(RuntimeInitializationStatus::idle())),
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    fn snapshot(&self) -> RuntimeInitializationStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn replace(&self, status: RuntimeInitializationStatus) {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
+    }
+}
+
+impl RuntimeInitializationStatus {
+    fn default_stages() -> Vec<RuntimeInitializationStage> {
+        vec![
+            RuntimeInitializationStage {
+                id: "asr".to_string(),
+                label: "ASR / Faster-Whisper".to_string(),
+                status: "pending".to_string(),
+                progress: 0.0,
+                elapsed_ms: 0,
+                error: None,
+            },
+            RuntimeInitializationStage {
+                id: "embedding".to_string(),
+                label: "GLuCoSE-base-ja".to_string(),
+                status: "pending".to_string(),
+                progress: 0.0,
+                elapsed_ms: 0,
+                error: None,
+            },
+            RuntimeInitializationStage {
+                id: "memory_v2".to_string(),
+                label: "memory-v2".to_string(),
+                status: "pending".to_string(),
+                progress: 0.0,
+                elapsed_ms: 0,
+                error: None,
+            },
+        ]
+    }
+
+    fn idle() -> Self {
+        Self {
+            status: "idle".to_string(),
+            progress: 0.0,
+            current_stage: None,
+            message: Some("初期化を開始する準備をしています。".to_string()),
+            elapsed_ms: 0,
+            started_at: None,
+            completed_at: None,
+            stages: Self::default_stages(),
+            asr_ready: false,
+            embedding_ready: false,
+            memory_v2_ready: false,
+            error: None,
+        }
+    }
 }
 
 pub fn resolve_project_root() -> PathBuf {
@@ -292,7 +402,11 @@ fn tts_stop(state: State<AppState>) {
 
 #[tauri::command]
 async fn tts_play_nod(state: State<'_, AppState>) -> Result<(), String> {
-    state.tts_mgr.play_random_nod(&state.root_dir).await
+    state
+        .tts_mgr
+        .play_random_nod(&state.root_dir)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 // --- Twitch IRC 連携 ---
@@ -586,6 +700,399 @@ fn get_setup_status(state: State<AppState>) -> Result<bootstrap::RuntimeStatus, 
     Ok(status)
 }
 
+fn publish_runtime_initialization(
+    app: &AppHandle,
+    state: &RuntimeInitializationState,
+    status: &RuntimeInitializationStatus,
+) {
+    state.replace(status.clone());
+    let _ = app.emit("runtime_initialization", status);
+}
+
+fn set_runtime_initialization_stage(
+    status: &mut RuntimeInitializationStatus,
+    id: &str,
+    stage_status: &str,
+    progress: f64,
+    elapsed_ms: u64,
+    error: Option<String>,
+) {
+    if let Some(stage) = status.stages.iter_mut().find(|stage| stage.id == id) {
+        stage.status = stage_status.to_string();
+        stage.progress = progress.clamp(0.0, 100.0);
+        stage.elapsed_ms = elapsed_ms;
+        stage.error = error;
+    }
+}
+
+/// Keep the aggregate gauge meaningful when independent stages finish in a
+/// different order.  The weights match the three equal-cost startup lanes
+/// closely enough while still reserving a small extra point for ASR's model
+/// handshake.
+fn update_runtime_initialization_progress(status: &mut RuntimeInitializationStatus) {
+    let mut progress = 0.0;
+    if status
+        .stages
+        .iter()
+        .any(|stage| stage.id == "asr" && stage.status == "completed")
+    {
+        progress += 34.0;
+    }
+    if status
+        .stages
+        .iter()
+        .any(|stage| stage.id == "embedding" && stage.status == "completed")
+    {
+        progress += 33.0;
+    }
+    if status
+        .stages
+        .iter()
+        .any(|stage| stage.id == "memory_v2" && stage.status == "completed")
+    {
+        progress += 33.0;
+    }
+    status.progress = progress;
+}
+
+fn join_runtime_initialization_task(
+    result: Result<Result<(), String>, tauri::Error>,
+    stage: &str,
+) -> Result<(), String> {
+    match result {
+        Ok(result) => result,
+        Err(error) => Err(format!("{} initialization task failed: {}", stage, error)),
+    }
+}
+
+#[tauri::command]
+fn get_runtime_initialization_status(state: State<AppState>) -> RuntimeInitializationStatus {
+    state.runtime_initialization.snapshot()
+}
+
+/// Initialize the live engines from the main screen in one measured,
+/// concurrent startup lanes.  The portable setup command only verifies/downloads
+/// files; this command performs the work that used to be paid on the first
+/// utterance (Whisper, GLuCoSE and memory-v2 journal recovery).
+#[tauri::command]
+async fn initialize_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RuntimeInitializationStatus, String> {
+    let init_state = state.runtime_initialization.clone();
+    let _gate = init_state.gate.lock().await;
+    let existing = init_state.snapshot();
+    if existing.status == "completed"
+        && existing.asr_ready
+        && existing.embedding_ready
+        && existing.memory_v2_ready
+    {
+        return Ok(existing);
+    }
+
+    if let Err(error) = bootstrap::runtime_is_ready(&state.root_dir) {
+        let mut failed = existing;
+        failed.status = "error".to_string();
+        failed.message = Some("ランタイムセットアップが完了していません。".to_string());
+        failed.error = Some(error.clone());
+        failed.current_stage = None;
+        failed.elapsed_ms = 0;
+        publish_runtime_initialization(&app, &init_state, &failed);
+        return Err(error);
+    }
+
+    let started = Instant::now();
+    let started_at = chrono::Utc::now().to_rfc3339();
+    let mut status = RuntimeInitializationStatus::idle();
+    status.status = "running".to_string();
+    status.message = Some("ASR、GLuCoSE、memory-v2を初期化しています。".to_string());
+    status.started_at = Some(started_at);
+    status.completed_at = None;
+    status.error = None;
+    publish_runtime_initialization(&app, &init_state, &status);
+    state.log_mgr.info(
+        "Bootstrap",
+        "Runtime initialization started from the main screen",
+    );
+
+    // ASR and memory-v2 have independent resources, so start both lanes at
+    // once.  GLuCoSE remains deliberately downstream of ASR because the
+    // current embedding command is carried by that worker's WebSocket.
+    status.current_stage = Some("asr".to_string());
+    status.message = Some("ASR と memory-v2を並列で初期化しています。".to_string());
+    set_runtime_initialization_stage(&mut status, "asr", "running", 0.0, 0, None);
+    set_runtime_initialization_stage(&mut status, "memory_v2", "running", 0.0, 0, None);
+    publish_runtime_initialization(&app, &init_state, &status);
+
+    let asr_started = Instant::now();
+    let memory_started = Instant::now();
+    let asr_session_mgr = state.session_mgr.clone();
+    let asr_task =
+        tauri::async_runtime::spawn(async move { asr_session_mgr.ensure_asr_ready().await });
+    let memory_root = state.root_dir.clone();
+    let memory_task = tauri::async_runtime::spawn(async move {
+        MemoryRepository::open(memory_root).await.map(|_| ())
+    });
+    let mut asr_task = Box::pin(asr_task);
+    let mut memory_task = Box::pin(memory_task);
+    let mut memory_finished = false;
+    let mut memory_error: Option<String> = None;
+
+    // Wait for ASR while still consuming memory-v2 completion immediately so
+    // the panel reflects whichever independent lane finishes first.
+    let asr_result = loop {
+        tokio::select! {
+            result = &mut asr_task => {
+                break join_runtime_initialization_task(result, "ASR");
+            }
+            result = &mut memory_task, if !memory_finished => {
+                memory_finished = true;
+                match join_runtime_initialization_task(result, "memory-v2") {
+                    Ok(()) => {
+                        status.memory_v2_ready = true;
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "memory_v2",
+                            "completed",
+                            100.0,
+                            memory_started.elapsed().as_millis() as u64,
+                            None,
+                        );
+                    }
+                    Err(error) => {
+                        memory_error = Some(error.clone());
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "memory_v2",
+                            "error",
+                            0.0,
+                            memory_started.elapsed().as_millis() as u64,
+                            Some(error.clone()),
+                        );
+                        status.message = Some("memory-v2の初期化に失敗しました。".to_string());
+                        status.error = Some(error);
+                    }
+                }
+                update_runtime_initialization_progress(&mut status);
+                publish_runtime_initialization(&app, &init_state, &status);
+            }
+        }
+    };
+
+    if let Err(error) = asr_result {
+        set_runtime_initialization_stage(
+            &mut status,
+            "asr",
+            "error",
+            0.0,
+            asr_started.elapsed().as_millis() as u64,
+            Some(error.clone()),
+        );
+        status.message = Some("ASRの初期化に失敗しました。".to_string());
+        status.error = Some(error.clone());
+        status.status = "error".to_string();
+        status.current_stage = Some("asr".to_string());
+        status.elapsed_ms = started.elapsed().as_millis() as u64;
+        publish_runtime_initialization(&app, &init_state, &status);
+
+        // Do not cancel a database recovery half-way through a LanceDB
+        // operation.  Let the independent lane reach its safe boundary before
+        // returning the ASR error.
+        if !memory_finished {
+            match join_runtime_initialization_task((&mut memory_task).await, "memory-v2") {
+                Ok(()) => {
+                    status.memory_v2_ready = true;
+                    set_runtime_initialization_stage(
+                        &mut status,
+                        "memory_v2",
+                        "completed",
+                        100.0,
+                        memory_started.elapsed().as_millis() as u64,
+                        None,
+                    );
+                }
+                Err(memory_failure) => {
+                    set_runtime_initialization_stage(
+                        &mut status,
+                        "memory_v2",
+                        "error",
+                        0.0,
+                        memory_started.elapsed().as_millis() as u64,
+                        Some(memory_failure),
+                    );
+                }
+            }
+            update_runtime_initialization_progress(&mut status);
+            publish_runtime_initialization(&app, &init_state, &status);
+        }
+        return Err(error);
+    }
+
+    status.asr_ready = true;
+    set_runtime_initialization_stage(
+        &mut status,
+        "asr",
+        "completed",
+        100.0,
+        asr_started.elapsed().as_millis() as u64,
+        None,
+    );
+    update_runtime_initialization_progress(&mut status);
+    status.current_stage = Some("embedding".to_string());
+    status.message = Some("ASR接続完了。GLuCoSE-base-jaを読み込んでいます。".to_string());
+    publish_runtime_initialization(&app, &init_state, &status);
+    state.log_mgr.info(
+        "Bootstrap",
+        &format!(
+            "Runtime initialization stage completed: stage=asr elapsed_ms={}",
+            status
+                .stages
+                .iter()
+                .find(|stage| stage.id == "asr")
+                .map(|stage| stage.elapsed_ms)
+                .unwrap_or(0)
+        ),
+    );
+    emit_asr_ready(&app, &state.session_mgr);
+
+    // GLuCoSE uses the already-connected ASR worker.  It runs concurrently
+    // with any memory-v2 recovery that is still in flight.
+    set_runtime_initialization_stage(&mut status, "embedding", "running", 0.0, 0, None);
+    publish_runtime_initialization(&app, &init_state, &status);
+    let embedding_started = Instant::now();
+    let probe = vec!["GameAssistant 起動時の埋め込み初期化確認".to_string()];
+    let ws_client = state.session_mgr.asr_engine.ws_client.clone();
+    let mut embedding_task = Box::pin(async move {
+        let vectors = ws_client
+            .embed_texts_with_timeout(&probe, Duration::from_secs(60))
+            .await?;
+        if vectors.len() == 1 && vectors[0].len() == memory_v2::validation::EMBEDDING_DIMENSIONS {
+            Ok(())
+        } else {
+            Err(format!(
+                "GLuCoSEの埋め込み結果が不正です（{}件、{}次元）。",
+                vectors.len(),
+                vectors.first().map(|vector| vector.len()).unwrap_or(0)
+            ))
+        }
+    });
+    let mut embedding_finished = false;
+    let mut embedding_error: Option<String> = None;
+
+    while !embedding_finished || !memory_finished {
+        tokio::select! {
+            result = &mut embedding_task, if !embedding_finished => {
+                embedding_finished = true;
+                match result {
+                    Ok(()) => {
+                        status.embedding_ready = true;
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "embedding",
+                            "completed",
+                            100.0,
+                            embedding_started.elapsed().as_millis() as u64,
+                            None,
+                        );
+                    }
+                    Err(error) => {
+                        embedding_error = Some(error.clone());
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "embedding",
+                            "error",
+                            0.0,
+                            embedding_started.elapsed().as_millis() as u64,
+                            Some(error.clone()),
+                        );
+                        status.message = Some("GLuCoSEの初期化に失敗しました。".to_string());
+                        status.error = Some(error);
+                    }
+                }
+                update_runtime_initialization_progress(&mut status);
+                publish_runtime_initialization(&app, &init_state, &status);
+            }
+            result = &mut memory_task, if !memory_finished => {
+                memory_finished = true;
+                match join_runtime_initialization_task(result, "memory-v2") {
+                    Ok(()) => {
+                        status.memory_v2_ready = true;
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "memory_v2",
+                            "completed",
+                            100.0,
+                            memory_started.elapsed().as_millis() as u64,
+                            None,
+                        );
+                    }
+                    Err(error) => {
+                        memory_error = Some(error.clone());
+                        set_runtime_initialization_stage(
+                            &mut status,
+                            "memory_v2",
+                            "error",
+                            0.0,
+                            memory_started.elapsed().as_millis() as u64,
+                            Some(error.clone()),
+                        );
+                        status.message = Some("memory-v2の初期化に失敗しました。".to_string());
+                        status.error = Some(error);
+                    }
+                }
+                update_runtime_initialization_progress(&mut status);
+                publish_runtime_initialization(&app, &init_state, &status);
+            }
+        }
+    }
+
+    if let Some(error) = embedding_error.or(memory_error) {
+        status.status = "error".to_string();
+        status.current_stage = if status.embedding_ready {
+            Some("memory_v2".to_string())
+        } else {
+            Some("embedding".to_string())
+        };
+        status.message = Some("ローカルエンジンの初期化に失敗しました。".to_string());
+        status.error = Some(error.clone());
+        status.elapsed_ms = started.elapsed().as_millis() as u64;
+        publish_runtime_initialization(&app, &init_state, &status);
+        return Err(error);
+    }
+
+    status.progress = 100.0;
+    status.status = "completed".to_string();
+    status.current_stage = Some("complete".to_string());
+    status.message = Some("ASR、GLuCoSE、memory-v2の初期化が完了しました。".to_string());
+    status.error = None;
+    status.elapsed_ms = started.elapsed().as_millis() as u64;
+    status.completed_at = Some(chrono::Utc::now().to_rfc3339());
+    publish_runtime_initialization(&app, &init_state, &status);
+    state.log_mgr.info(
+        "Bootstrap",
+        &format!(
+            "Runtime initialization stage completed: stage=memory_v2 elapsed_ms={}",
+            status
+                .stages
+                .iter()
+                .find(|stage| stage.id == "memory_v2")
+                .map(|stage| stage.elapsed_ms)
+                .unwrap_or(0)
+        ),
+    );
+    state.log_mgr.info(
+        "Bootstrap",
+        &format!(
+            "Runtime initialization complete: elapsed_ms={} asr_ms={} embedding_ms={} memory_v2_ms={}",
+            status.elapsed_ms,
+            status.stages.iter().find(|stage| stage.id == "asr").map(|stage| stage.elapsed_ms).unwrap_or(0),
+            status.stages.iter().find(|stage| stage.id == "embedding").map(|stage| stage.elapsed_ms).unwrap_or(0),
+            status.stages.iter().find(|stage| stage.id == "memory_v2").map(|stage| stage.elapsed_ms).unwrap_or(0),
+        ),
+    );
+    Ok(status)
+}
+
 #[tauri::command]
 async fn setup_runtime(
     app: AppHandle,
@@ -593,17 +1100,7 @@ async fn setup_runtime(
 ) -> Result<bootstrap::RuntimeStatus, String> {
     let root_dir = state.root_dir.clone();
     let model_mgr = state.model_mgr.clone();
-    let warmup_app = app.clone();
-    let status = bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await?;
-    if status.ready {
-        spawn_startup_asr_warmup(
-            warmup_app,
-            root_dir,
-            state.session_mgr.clone(),
-            state.log_mgr.clone(),
-        );
-    }
-    Ok(status)
+    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
 }
 
 #[tauri::command]
@@ -613,17 +1110,7 @@ async fn run_setup(
 ) -> Result<bootstrap::RuntimeStatus, String> {
     let root_dir = state.root_dir.clone();
     let model_mgr = state.model_mgr.clone();
-    let warmup_app = app.clone();
-    let status = bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await?;
-    if status.ready {
-        spawn_startup_asr_warmup(
-            warmup_app,
-            root_dir,
-            state.session_mgr.clone(),
-            state.log_mgr.clone(),
-        );
-    }
-    Ok(status)
+    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
 }
 
 #[tauri::command]
@@ -818,72 +1305,6 @@ fn emit_asr_warmup_failed(app: &AppHandle, error: &str) {
     );
 }
 
-/// Keep the ASR process/model hot while the main window is idle.  This is
-/// called only after the portable runtime is ready; the session command still
-/// performs an idempotent readiness wait for clicks that race this worker.
-/// The frontend listens for `toast_notice`, so the warmup lifecycle is also
-/// surfaced to the user (begin/complete/failure) instead of only the log.
-fn spawn_startup_asr_warmup(
-    app: AppHandle,
-    root_dir: PathBuf,
-    session_mgr: Arc<SessionManager>,
-    log_mgr: Arc<LogManager>,
-) {
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = bootstrap::runtime_is_ready(&root_dir) {
-            let message = format!("Startup ASR warmup blocked: {}", error);
-            log_mgr.warn("ASR", &message);
-            let _ = app.emit(
-                "toast_notice",
-                serde_json::json!({
-                    "message": "⚠️ ランタイム検証に失敗したため、音声認識の準備を開始できません。",
-                    "type": "warning"
-                }),
-            );
-            emit_asr_warmup_failed(&app, &message);
-            return;
-        }
-        log_mgr.info(
-            "ASR",
-            "Startup warmup requested: preparing Faster-Whisper before the first session...",
-        );
-        let _ = app.emit(
-            "toast_notice",
-            serde_json::json!({
-                "message": "🎙️ 音声認識エンジン（Faster-Whisper）を起動準備中です...",
-                "type": "info"
-            }),
-        );
-        match session_mgr.ensure_asr_ready().await {
-            Ok(()) => {
-                log_mgr.info(
-                    "ASR",
-                    "Startup warmup complete: Faster-Whisper is ready for immediate transcription.",
-                );
-                let _ = app.emit(
-                    "toast_notice",
-                    serde_json::json!({
-                        "message": "✅ 音声認識の準備が完了しました。すぐにセッションを開始できます。",
-                        "type": "success"
-                    }),
-                );
-                emit_asr_ready(&app, &session_mgr);
-            }
-            Err(error) => {
-                log_mgr.warn("ASR", &format!("Startup ASR warmup deferred: {}", error));
-                let _ = app.emit(
-                    "toast_notice",
-                    serde_json::json!({
-                        "message": "⚠️ 音声認識エンジンの準備に失敗しました。セッション開始時に再試行されます。",
-                        "type": "warning"
-                    }),
-                );
-                emit_asr_warmup_failed(&app, &error);
-            }
-        }
-    });
-}
-
 pub fn run() {
     let root_dir = resolve_project_root();
     // Several legacy helpers (for example the app log and nod WAV lookup) use
@@ -911,7 +1332,6 @@ pub fn run() {
         log_mgr.clone(),
     ));
     let model_mgr = Arc::new(ModelManager::new());
-    let model_mgr_for_setup = model_mgr.clone();
     let migration_progress = Arc::new(lance_memory::MemoryMigrationProgress::default());
 
     let app_state = AppState {
@@ -923,8 +1343,9 @@ pub fn run() {
         ai_client,
         session_mgr: session_mgr.clone(),
         log_mgr: log_mgr.clone(),
-        model_mgr,
+        model_mgr: model_mgr.clone(),
         migration_progress,
+        runtime_initialization: RuntimeInitializationState::new(),
     };
 
     tauri::Builder::default()
@@ -991,6 +1412,8 @@ pub fn run() {
             download_model,
             cancel_download_model,
             get_runtime_status,
+            get_runtime_initialization_status,
+            initialize_runtime,
             setup_runtime,
             cancel_runtime_setup,
             get_setup_status,
@@ -1050,21 +1473,15 @@ pub fn run() {
                     // is already healthy.  Re-running it on every launch creates
                     // a transient stage transition while the main UI initializes.
                     if status.ready {
-                        log_mgr.info("Bootstrap", "runtime already ready; setup worker skipped");
-                        spawn_startup_asr_warmup(
-                            app.handle().clone(),
-                            root_dir.clone(),
-                            session_mgr.clone(),
-                            log_mgr.clone(),
+                        log_mgr.info(
+                            "Bootstrap",
+                            "runtime already ready; waiting for main-screen engine initialization",
                         );
                     } else if model_manager::gemma_terms_accepted(&root_dir) {
                         let setup_root = root_dir.clone();
-                        let setup_manager = model_mgr_for_setup.clone();
+                        let setup_manager = model_mgr.clone();
                         let setup_app = app.handle().clone();
                         let setup_log = log_mgr.clone();
-                        let setup_session = session_mgr.clone();
-                        let setup_warmup_log = log_mgr.clone();
-                        let setup_warmup_root = setup_root.clone();
                         let elevated_setup = std::env::args().any(|arg| arg == "--elevated-setup");
                         if elevated_setup {
                             // The elevated process is a setup worker only.  Keep the
@@ -1089,12 +1506,6 @@ pub fn run() {
                                 }
                             } else {
                                 setup_log.info("Bootstrap", "setup worker completed");
-                                spawn_startup_asr_warmup(
-                                    setup_app.clone(),
-                                    setup_warmup_root,
-                                    setup_session,
-                                    setup_warmup_log,
-                                );
                                 if elevated_setup {
                                     // The elevated helper is only a setup worker; return to
                                     // the original standard-user process once it completes.

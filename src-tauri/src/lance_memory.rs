@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -34,6 +35,12 @@ const IMPORT_BATCH_SIZE: usize = 2048;
 // update bounded so a large all-memory pass cannot overflow the Windows
 // worker stack while parsing one enormous `OR` tree.
 const SUMMARY_QUEUE_PROJECTION_CHUNK_SIZE: usize = 256;
+/// A raw journal append is already idempotent by event/operation identity.
+/// Retry only the small class of errors that can be caused by lock/manifest
+/// contention or a temporary store outage; policy and validation failures are
+/// returned immediately so a malformed event is never retried indefinitely.
+const RAW_PERSIST_MAX_ATTEMPTS: usize = 2;
+const RAW_PERSIST_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 /// Progress for the one-time legacy LanceDB -> memory-v2 import.
 ///
@@ -1179,7 +1186,20 @@ pub async fn get_memory_by_event_id(
             .into_iter()
             .find(|row| MemoryRepository::canonical_event_id(&row.id) == canonical)
         {
-            return Ok(Some(row));
+            // A canonical lookup should retain the legacy projection ID for
+            // callers that use it for subsequent updates. Conversely, when a
+            // legacy lookup is served by the journal-only fallback, preserve
+            // the caller's arbitrary ID rather than exposing the generated
+            // canonical UUID.
+            let resolved_id = if uuid::Uuid::parse_str(event_id).is_ok() {
+                row.id.clone()
+            } else {
+                event_id.to_string()
+            };
+            return Ok(Some(StoredMemory {
+                id: resolved_id,
+                ..row
+            }));
         }
     }
 
@@ -1204,7 +1224,9 @@ pub async fn get_memory_by_event_id(
         SourceKind::Manual => ("manual", "manual"),
         SourceKind::System => ("system", "system"),
     };
-    let statuses = repository.read_summary_statuses()?;
+    // A malformed status/fact projection must not hide the raw event itself;
+    // callers can still reconcile those secondary views later.
+    let statuses = repository.read_summary_statuses().unwrap_or_default();
     let status = statuses.get(&canonical);
     let summary = repository
         .read_facts()
@@ -1227,6 +1249,251 @@ pub async fn get_memory_by_event_id(
     }))
 }
 
+fn compatibility_memory_type(event: &crate::memory_v2::domain::RawEvent) -> &'static str {
+    match event.event_type() {
+        crate::memory_v2::domain::EventType::AiResponse => "ai_response",
+        crate::memory_v2::domain::EventType::AutoCommentary => "auto_commentary",
+        crate::memory_v2::domain::EventType::Manual => "manual",
+        crate::memory_v2::domain::EventType::Human => match event.source_kind() {
+            SourceKind::Microphone => "user_speech",
+            SourceKind::Discord => "discord_speech",
+            SourceKind::Twitch => "twitch_chat",
+            SourceKind::Manual => "manual",
+            SourceKind::System => "system",
+        },
+        crate::memory_v2::domain::EventType::System => "system",
+    }
+}
+
+fn stored_memory_from_authoritative_raw(
+    event: &crate::memory_v2::domain::RawEvent,
+    statuses: &HashMap<String, crate::memory_v2::repository::SummaryStatusRecord>,
+    facts: &[crate::memory_v2::domain::Fact],
+) -> StoredMemory {
+    let canonical = event.event_id().to_string();
+    let status = statuses.get(&canonical);
+    let summary = facts
+        .iter()
+        .filter(|fact| fact.source_event_id() == event.event_id() && fact.is_summary_fact())
+        .max_by_key(|fact| fact.revision());
+    StoredMemory {
+        id: canonical,
+        document: event.content().as_str().to_string(),
+        memory_type: compatibility_memory_type(event).to_string(),
+        source: event.source().to_string(),
+        timestamp: event.occurred_at().to_string(),
+        user_id: None,
+        summary: summary.map(|fact| fact.value().to_string()),
+        summary_status: status.map(|value| value.status.clone()),
+        summary_model: status.and_then(|value| value.model_id.clone()),
+        summary_prompt_version: status.and_then(|value| value.prompt_version.clone()),
+        vector_source: None,
+    }
+}
+
+/// Read raw rows from the memory-v2 materialized authority for compatibility
+/// consumers.  Status and Fact reads are best effort here: a malformed or
+/// temporarily unavailable projection must not hide an otherwise valid Raw
+/// event from a list/export/blog caller.
+async fn authoritative_stored_memories(root_dir: &Path) -> Result<Vec<StoredMemory>, String> {
+    let repository = MemoryRepository::open(root_dir).await?;
+    let raw_events = repository.read_raw_events().await?;
+    let statuses = repository.read_summary_statuses().unwrap_or_default();
+    let facts = repository.read_facts().await.unwrap_or_default();
+    Ok(raw_events
+        .iter()
+        .map(|event| stored_memory_from_authoritative_raw(event, &statuses, &facts))
+        .collect())
+}
+
+fn merge_authoritative_stored_memories(
+    projected: &mut Vec<StoredMemory>,
+    authoritative: Vec<StoredMemory>,
+) {
+    let mut positions = projected
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (MemoryRepository::canonical_event_id(&row.id), index))
+        .collect::<HashMap<_, _>>();
+    for authoritative_row in authoritative {
+        let canonical = MemoryRepository::canonical_event_id(&authoritative_row.id);
+        if let Some(index) = positions.get(&canonical).copied() {
+            // Raw content/type/source/timestamp and durable summary metadata
+            // are authoritative. Preserve the compatibility ID/user/vector
+            // fields so old clients keep their existing identity semantics.
+            let projected_row = &mut projected[index];
+            projected_row.document = authoritative_row.document;
+            projected_row.memory_type = authoritative_row.memory_type;
+            projected_row.source = authoritative_row.source;
+            projected_row.timestamp = authoritative_row.timestamp;
+            if authoritative_row.summary_status.is_some() {
+                projected_row.summary = authoritative_row.summary;
+                projected_row.summary_status = authoritative_row.summary_status;
+                projected_row.summary_model = authoritative_row.summary_model;
+                projected_row.summary_prompt_version = authoritative_row.summary_prompt_version;
+            }
+        } else {
+            positions.insert(canonical, projected.len());
+            projected.push(authoritative_row);
+        }
+    }
+}
+
+/// Classify persistence failures using a stable, non-sensitive reason. The
+/// original backend error may contain a filesystem path or implementation
+/// detail, so callers that report a raw-save failure should use this helper
+/// rather than echoing it to the UI/log stream.
+pub(crate) fn raw_persistence_failure_reason(error: &str) -> &'static str {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("manifest generation")
+        || lower.contains("generation") && lower.contains("not newer")
+    {
+        "manifest_conflict"
+    } else if lower.contains("manifest") {
+        "manifest_io"
+    } else if lower.contains("journal lock")
+        || lower.contains("journal lock timeout")
+        || lower.contains("lock timeout")
+        || lower.contains("resource busy")
+        || lower.contains("database is locked")
+        || lower.contains("sharing violation")
+        || lower.contains("os error 32")
+    {
+        "lock_contention"
+    } else if lower.contains("journal") {
+        "journal_io"
+    } else if lower.contains("repository") || lower.contains("connect") {
+        "repository_open"
+    } else if lower.contains("table") || lower.contains("lancedb") {
+        "materialization"
+    } else {
+        "persistence_failed"
+    }
+}
+
+fn is_transient_raw_persistence_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("fact revision conflict")
+        || lower.contains("conflicting raw event")
+        || lower.contains("invalid")
+        || lower.contains("prohibited")
+        || lower.contains("unsupported")
+        || lower.contains("must not")
+    {
+        return false;
+    }
+    [
+        "journal lock timeout",
+        "lock timeout",
+        "manifest generation",
+        "manifest i/o",
+        "timed out waiting for manifest lock",
+        "resource busy",
+        "database is locked",
+        "sharing violation",
+        "os error 32",
+        "temporarily unavailable",
+        "try again",
+        "journal changed while materializing",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+async fn open_memory_repository_with_retry(root_dir: &Path) -> Result<MemoryRepository, String> {
+    let mut last_error = None;
+    for attempt in 0..RAW_PERSIST_MAX_ATTEMPTS {
+        match MemoryRepository::open(root_dir).await {
+            Ok(repository) => return Ok(repository),
+            Err(error)
+                if attempt + 1 < RAW_PERSIST_MAX_ATTEMPTS
+                    && is_transient_raw_persistence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(RAW_PERSIST_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "repository open failed".to_string()))
+}
+
+async fn append_compat_event_with_retry(
+    repository: &MemoryRepository,
+    input: &CompatMemory,
+) -> Result<bool, String> {
+    let mut last_error = None;
+    for attempt in 0..RAW_PERSIST_MAX_ATTEMPTS {
+        match repository.append_compat_event(input.clone()).await {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if attempt + 1 < RAW_PERSIST_MAX_ATTEMPTS
+                    && is_transient_raw_persistence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(RAW_PERSIST_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "raw journal append failed".to_string()))
+}
+
+async fn append_summary_status_with_retry(
+    repository: &MemoryRepository,
+    entity_id: &str,
+    model_id: Option<&str>,
+    prompt_version: Option<&str>,
+) -> Result<bool, String> {
+    let mut last_error = None;
+    for attempt in 0..RAW_PERSIST_MAX_ATTEMPTS {
+        match repository
+            .append_summary_status(entity_id, SUMMARY_STATUS_PENDING, model_id, prompt_version)
+            .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if attempt + 1 < RAW_PERSIST_MAX_ATTEMPTS
+                    && is_transient_raw_persistence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(RAW_PERSIST_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "summary status append failed".to_string()))
+}
+
+async fn put_embedding_with_retry(
+    repository: &MemoryRepository,
+    entity_id: &str,
+    vector: Vec<f32>,
+    source: &str,
+) -> Result<bool, String> {
+    let mut last_error = None;
+    for attempt in 0..RAW_PERSIST_MAX_ATTEMPTS {
+        match repository
+            .put_embedding(entity_id, vector.clone(), source)
+            .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if attempt + 1 < RAW_PERSIST_MAX_ATTEMPTS
+                    && is_transient_raw_persistence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(RAW_PERSIST_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "embedding append failed".to_string()))
+}
+
 pub async fn list_memories(
     root_dir: &Path,
     limit: Option<usize>,
@@ -1241,72 +1508,122 @@ pub async fn list_memories_with_progress(
     offset: Option<usize>,
     progress: Option<MigrationProgressHandle>,
 ) -> Result<MemoryListResponse, String> {
-    let db = get_or_create_db(root_dir).await?;
-    let table = get_or_create_memories_table_with_progress(&db, root_dir, progress).await?;
+    // The legacy table is a repairable projection. Keep its migration/query
+    // work isolated so a projection-open or stream failure can fall back to
+    // the authoritative raw journal instead of making the list API report an
+    // apparent data loss.
+    let projected_result = async {
+        let db = get_or_create_db(root_dir).await?;
+        let table = get_or_create_memories_table_with_progress(&db, root_dir, progress).await?;
 
-    let query = table.query();
-    let mut stream = query
-        .execute()
-        .await
-        .map_err(|e| format!("Query execute error: {}", e))?;
-    let mut memories = Vec::new();
+        let query = table.query();
+        let mut stream = query
+            .execute()
+            .await
+            .map_err(|e| format!("Query execute error: {}", e))?;
+        let mut memories = Vec::new();
 
-    while let Some(batch) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("Stream batch error: {}", e))?
-    {
-        let id_col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Invalid id column")?;
-        let doc_col = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Invalid doc column")?;
-        let type_col = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Invalid type column")?;
-        let src_col = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Invalid src column")?;
-        let ts_col = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or("Invalid ts column")?;
-        let uid_col = batch.column(5).as_any().downcast_ref::<StringArray>();
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .map_err(|e| format!("Stream batch error: {}", e))?
+        {
+            let id_col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("Invalid id column")?;
+            let doc_col = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("Invalid doc column")?;
+            let type_col = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("Invalid type column")?;
+            let src_col = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("Invalid src column")?;
+            let ts_col = batch
+                .column(4)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or("Invalid ts column")?;
+            let uid_col = batch.column(5).as_any().downcast_ref::<StringArray>();
 
-        for row in 0..batch.num_rows() {
-            let id = id_col.value(row).to_string();
-            let document = doc_col.value(row).to_string();
-            let memory_type = type_col.value(row).to_string();
-            let source = src_col.value(row).to_string();
-            let timestamp = ts_col.value(row).to_string();
-            let user_id = uid_col.and_then(|c| {
-                if c.is_null(row) {
-                    None
-                } else {
-                    Some(c.value(row).to_string())
-                }
-            });
+            for row in 0..batch.num_rows() {
+                let id = id_col.value(row).to_string();
+                let document = doc_col.value(row).to_string();
+                let memory_type = type_col.value(row).to_string();
+                let source = src_col.value(row).to_string();
+                let timestamp = ts_col.value(row).to_string();
+                let user_id = uid_col.and_then(|c| {
+                    if c.is_null(row) {
+                        None
+                    } else {
+                        Some(c.value(row).to_string())
+                    }
+                });
 
-            memories.push(MemoryItem {
-                id,
-                document,
-                memory_type,
-                source,
-                timestamp,
-                user_id,
-            });
+                memories.push(MemoryItem {
+                    id,
+                    document,
+                    memory_type,
+                    source,
+                    timestamp,
+                    user_id,
+                });
+            }
         }
+        Ok::<Vec<MemoryItem>, String>(memories)
     }
+    .await;
+
+    // `memories_v2` is a compatibility projection, not the source of truth.
+    // Add any raw events that have already reached memory-v2 but whose legacy
+    // row is still being projected. Existing IDs/user metadata are preserved
+    // by the merge for API compatibility.
+    let projection_error = projected_result.as_ref().err().cloned();
+    let mut stored = projected_result
+        .map(|memories| {
+            memories
+                .into_iter()
+                .map(|item| StoredMemory {
+                    id: item.id,
+                    document: item.document,
+                    memory_type: item.memory_type,
+                    source: item.source,
+                    timestamp: item.timestamp,
+                    user_id: item.user_id,
+                    summary: None,
+                    summary_status: None,
+                    summary_model: None,
+                    summary_prompt_version: None,
+                    vector_source: None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Ok(authoritative) = authoritative_stored_memories(root_dir).await {
+        merge_authoritative_stored_memories(&mut stored, authoritative);
+    } else if let Some(error) = projection_error {
+        return Err(error);
+    }
+    let mut memories = stored
+        .into_iter()
+        .map(|row| MemoryItem {
+            id: row.id,
+            document: row.document,
+            memory_type: row.memory_type,
+            source: row.source,
+            timestamp: row.timestamp,
+            user_id: row.user_id,
+        })
+        .collect::<Vec<_>>();
 
     let total = memories.len();
 
@@ -1337,21 +1654,39 @@ pub async fn list_memories_with_progress(
 /// event fields; calling `get_memory_by_id` for every row would reopen the
 /// table and rescan the journal tens of thousands of times.
 pub async fn list_stored_memories(root_dir: &Path) -> Result<Vec<StoredMemory>, String> {
-    let db = get_or_create_db(root_dir).await?;
-    let table = get_or_create_memories_table(&db, root_dir).await?;
-    let mut stream = table
-        .query()
-        .execute()
-        .await
-        .map_err(|e| format!("Stored memory query execute error: {}", e))?;
-    let mut memories = Vec::new();
-    while let Some(batch) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("Stored memory stream error: {}", e))?
-    {
-        for row in 0..batch.num_rows() {
-            memories.push(batch_row_to_stored(&batch, row)?);
+    let projected_result = async {
+        let db = get_or_create_db(root_dir).await?;
+        let table = get_or_create_memories_table(&db, root_dir).await?;
+        let mut stream = table
+            .query()
+            .execute()
+            .await
+            .map_err(|e| format!("Stored memory query execute error: {}", e))?;
+        let mut memories = Vec::new();
+        while let Some(batch) = stream
+            .try_next()
+            .await
+            .map_err(|e| format!("Stored memory stream error: {}", e))?
+        {
+            for row in 0..batch.num_rows() {
+                memories.push(batch_row_to_stored(&batch, row)?);
+            }
+        }
+        Ok::<Vec<StoredMemory>, String>(memories)
+    }
+    .await;
+
+    let mut memories = projected_result.unwrap_or_default();
+    // The compatibility table is deliberately asynchronous and repairable.
+    // Merge the authoritative raw rows even when the projection query
+    // succeeds with an empty/partial snapshot, so list/backfill consumers do
+    // not mistake projection lag for data loss.
+    match authoritative_stored_memories(root_dir).await {
+        Ok(authoritative) => merge_authoritative_stored_memories(&mut memories, authoritative),
+        Err(error) if memories.is_empty() => return Err(error),
+        Err(_) => {
+            // Existing compatibility rows remain useful when the authority is
+            // temporarily unavailable; preserve the historical API result.
         }
     }
     memories.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -1478,21 +1813,18 @@ pub async fn insert_memory_batch_nullable(
     // The memory-v2 repository is the authoritative journal/manifest boundary.
     // Keep the existing table as a compatibility projection until the UI and
     // migration cut over completely; it must never receive a write first.
-    let repository = MemoryRepository::open(root_dir).await?;
+    let repository = open_memory_repository_with_retry(root_dir).await?;
     for (item, vector) in items.iter().zip(vectors.iter().cloned()) {
-        repository
-            .append_compat_event(CompatMemory {
-                id: item.id.clone(),
-                memory_type: item.memory_type.clone(),
-                source: item.source.clone(),
-                timestamp: item.timestamp.clone(),
-                document: item.document.clone(),
-            })
-            .await?;
+        let compat = CompatMemory {
+            id: item.id.clone(),
+            memory_type: item.memory_type.clone(),
+            source: item.source.clone(),
+            timestamp: item.timestamp.clone(),
+            document: item.document.clone(),
+        };
+        append_compat_event_with_retry(&repository, &compat).await?;
         if let Some(vector) = vector {
-            repository
-                .put_embedding(&item.id, vector, VECTOR_SOURCE_DOCUMENT)
-                .await?;
+            put_embedding_with_retry(&repository, &item.id, vector, VECTOR_SOURCE_DOCUMENT).await?;
         }
     }
     let db = get_or_create_db(root_dir).await?;
@@ -1533,34 +1865,31 @@ pub async fn insert_memory_batch_nullable_authoritative(
 
     // The repository owns the durable raw event and manifest transaction.
     // Do not move this write behind the compatibility projection.
-    let repository = MemoryRepository::open(root_dir).await?;
+    let repository = open_memory_repository_with_retry(root_dir).await?;
     for (item, vector) in items.iter().zip(vectors.iter().cloned()) {
-        repository
-            .append_compat_event(CompatMemory {
-                id: item.id.clone(),
-                memory_type: item.memory_type.clone(),
-                source: item.source.clone(),
-                timestamp: item.timestamp.clone(),
-                document: item.document.clone(),
-            })
-            .await?;
+        let compat = CompatMemory {
+            id: item.id.clone(),
+            memory_type: item.memory_type.clone(),
+            source: item.source.clone(),
+            timestamp: item.timestamp.clone(),
+            document: item.document.clone(),
+        };
+        append_compat_event_with_retry(&repository, &compat).await?;
         if matches!(
             summary_admission(&item.memory_type, &item.document),
             SummaryAdmission::Eligible
         ) {
-            repository
-                .append_summary_status(
-                    &item.id,
-                    SUMMARY_STATUS_PENDING,
-                    Some(SUMMARY_MODEL_ID),
-                    Some(SUMMARY_PROMPT_VERSION),
-                )
-                .await?;
+            append_summary_status_with_retry(
+                &repository,
+                &item.id,
+                Some(SUMMARY_MODEL_ID),
+                Some(SUMMARY_PROMPT_VERSION),
+            )
+            .await
+            .map_err(|error| format!("raw durable; summary status persistence failed: {error}"))?;
         }
         if let Some(vector) = vector {
-            repository
-                .put_embedding(&item.id, vector, VECTOR_SOURCE_DOCUMENT)
-                .await?;
+            put_embedding_with_retry(&repository, &item.id, vector, VECTOR_SOURCE_DOCUMENT).await?;
         }
     }
     Ok(item_count)
@@ -1598,11 +1927,28 @@ pub async fn project_compatibility_rows(
     for vector in vectors.iter().flatten() {
         validate_vector(vector)?;
     }
-    let _projection_guard = compatibility_projection_lock().lock().await;
-    let db = get_or_create_db(root_dir).await?;
-    let table = get_or_create_memories_table(&db, root_dir).await?;
-    insert_on_table(&table, items, vectors, false, true).await?;
-    Ok(())
+    let mut last_error = None;
+    for attempt in 0..RAW_PERSIST_MAX_ATTEMPTS {
+        let result = async {
+            let _projection_guard = compatibility_projection_lock().lock().await;
+            let db = get_or_create_db(root_dir).await?;
+            let table = get_or_create_memories_table(&db, root_dir).await?;
+            insert_on_table(&table, items.clone(), vectors.clone(), false, true).await
+        }
+        .await;
+        match result {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if attempt + 1 < RAW_PERSIST_MAX_ATTEMPTS
+                    && is_transient_raw_persistence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(RAW_PERSIST_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "compatibility projection failed".to_string()))
 }
 
 async fn existing_ids(table: &Table, ids: &[String]) -> Result<HashSet<String>, String> {
@@ -3172,6 +3518,40 @@ mod tests {
         assert_eq!(failed.error.as_deref(), Some("test failure"));
     }
 
+    #[test]
+    fn raw_persistence_failure_reasons_are_stable_and_non_sensitive() {
+        assert_eq!(
+            raw_persistence_failure_reason(
+                "journal I/O error: sharing violation at C:\\Users\\alice\\secret\\journal.jsonl"
+            ),
+            "lock_contention"
+        );
+        assert_eq!(
+            raw_persistence_failure_reason("journal I/O error: disk is full"),
+            "journal_io"
+        );
+        assert_eq!(
+            raw_persistence_failure_reason("manifest generation is not newer than current"),
+            "manifest_conflict"
+        );
+        assert_eq!(
+            raw_persistence_failure_reason("Failed to open LanceDB table"),
+            "materialization"
+        );
+        assert_eq!(
+            raw_persistence_failure_reason("unexpected backend failure"),
+            "persistence_failed"
+        );
+        let diagnostic = format!(
+            "event_id=evt status=raw_persist_failed reason={}",
+            raw_persistence_failure_reason(
+                "journal I/O error: C:\\Users\\alice\\secret\\journal.jsonl"
+            )
+        );
+        assert!(!diagnostic.contains("alice"));
+        assert!(!diagnostic.contains("secret"));
+    }
+
     fn unique_test_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "ga-lance-memory-{}-{}-{}",
@@ -3297,6 +3677,65 @@ mod tests {
         assert_eq!(row.document, "ユーザーは猫が好きです。");
         assert_eq!(row.summary_status.as_deref(), Some(SUMMARY_STATUS_PENDING));
         assert!(row.summary.is_none());
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn list_stored_memories_includes_authoritative_raw_rows_without_projection() {
+        let root = unique_test_root("authoritative-list-fallback");
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "raw-list-only".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-09-07T12:00:00Z".into(),
+                document: "一覧にも残る発話".into(),
+            })
+            .await
+            .unwrap();
+
+        let rows = list_stored_memories(&root)
+            .await
+            .expect("authoritative raw fallback must keep list readable");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].document, "一覧にも残る発話");
+        assert_eq!(rows[0].memory_type, "user_speech");
+        assert_eq!(rows[0].source, "microphone");
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn list_memories_includes_authoritative_raw_rows_without_projection() {
+        let root = unique_test_root("authoritative-memory-list-fallback");
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "raw-memory-list-only".into(),
+                memory_type: "ai_response".into(),
+                source: "Assistant".into(),
+                timestamp: "2026-09-07T12:00:00Z".into(),
+                document: "応答も一覧の権威側から復元する".into(),
+            })
+            .await
+            .unwrap();
+
+        let response = list_memories(&root, None, None)
+            .await
+            .expect("authoritative raw fallback must keep the list API readable");
+        assert_eq!(response.total, 1);
+        assert_eq!(
+            response.memories[0].id,
+            MemoryRepository::canonical_event_id("raw-memory-list-only")
+        );
+        assert_eq!(response.memories[0].memory_type, "ai_response");
+        assert_eq!(response.memories[0].source, "system");
+        assert_eq!(
+            response.memories[0].document,
+            "応答も一覧の権威側から復元する"
+        );
+
         cleanup(&root);
     }
 
