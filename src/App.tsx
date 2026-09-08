@@ -17,10 +17,12 @@ export function App() {
     levelMeter,
     currentAsr,
     asrHistory,
+    factHistory,
     geminiResponse,
     vram,
     ram,
     commentaryTimer,
+    sessionStarting,
     logs,
     inputDevices,
     discordDevices,
@@ -106,6 +108,7 @@ export function App() {
           {/* 左サイドバー */}
           <Sidebar
             sessionRunning={status.session}
+            sessionStarting={sessionStarting}
             onStartSession={startSession}
             onStopSession={stopSession}
             onRestartWhisper={restartWhisper}
@@ -165,6 +168,7 @@ export function App() {
               geminiResponse={geminiResponse}
               currentAsr={currentAsr}
               asrHistory={asrHistory}
+              factHistory={factHistory}
               commentaryProgress={commentaryTimer.progress}
               commentaryRemaining={commentaryTimer.remaining}
             />

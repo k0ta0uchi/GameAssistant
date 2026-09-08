@@ -6,6 +6,7 @@ import {
   type LogEntry,
   type PromptItem,
   type AsrEntry,
+  type FactEntry,
   type ModelStatus,
   type SetupProgress,
   type SetupStatus,
@@ -52,6 +53,11 @@ export const shouldBlockAppUntilSetupReady = (
             | "gemma_terms_version"
             | "gemma_terms_model_sha256"
             | "gemma_terms_source"
+            | "dependency_ready"
+            | "python_import_ready"
+            | "tokenizer_ready"
+            | "embedding_ready"
+            | "asr_websocket_ready"
           >
         > & { error?: string | null })
     | null,
@@ -68,7 +74,8 @@ export const shouldBlockAppUntilSetupReady = (
 export const shouldShowMainUiForSession = (
   tauri: boolean,
   setup: Parameters<typeof shouldBlockAppUntilSetupReady>[1],
-): boolean => !tauri || (setup !== null && !shouldBlockAppUntilSetupReady(tauri, setup));
+): boolean =>
+  !tauri || (setup !== null && !shouldBlockAppUntilSetupReady(tauri, setup));
 
 /** Every session transport must use the same fail-closed bootstrap contract. */
 export const isSetupReadyForSession = (
@@ -81,6 +88,11 @@ export const isSetupReadyForSession = (
             | "gemma_terms_version"
             | "gemma_terms_model_sha256"
             | "gemma_terms_source"
+            | "dependency_ready"
+            | "python_import_ready"
+            | "tokenizer_ready"
+            | "embedding_ready"
+            | "asr_websocket_ready"
           >
         > & { status?: unknown; error?: string | null })
     | null,
@@ -93,6 +105,11 @@ export const isSetupReadyForSession = (
       (setup.error === undefined ||
         setup.error === null ||
         setup.error === "") &&
+      setup.dependency_ready === true &&
+      setup.python_import_ready === true &&
+      setup.tokenizer_ready === true &&
+      setup.embedding_ready === true &&
+      setup.asr_websocket_ready === true &&
       hasValidGemmaTerms(setup),
   );
 
@@ -104,6 +121,11 @@ const pendingSetupStatus = (): SetupStatus => ({
   gemma_terms_version: "",
   gemma_terms_model_sha256: "",
   gemma_terms_source: "",
+  dependency_ready: false,
+  python_import_ready: false,
+  tokenizer_ready: false,
+  embedding_ready: false,
+  asr_websocket_ready: false,
 });
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
@@ -117,6 +139,38 @@ const firstString = (...values: unknown[]): string | null => {
     (candidate) => typeof candidate === "string" && candidate.trim().length > 0,
   );
   return typeof value === "string" ? value : null;
+};
+
+/**
+ * Normalize the live Fact event before it enters the dashboard state. The
+ * backend has used both domain-oriented (`summary`, `fact_id`) and generic
+ * event-oriented (`content`, `id`) names in different transports, so the UI
+ * accepts either shape while still rejecting an incomplete payload.
+ */
+export const normalizeFactEntry = (value: unknown): FactEntry | null => {
+  const record = asRecord(value);
+  if (!record) return null;
+  const id = firstString(
+    record.fact_id,
+    record.id,
+    record.source_event_id,
+    record.event_id,
+  );
+  const text = firstString(
+    record.summary,
+    record.value,
+    record.text,
+    record.content,
+  );
+  if (!id || !text) return null;
+  return {
+    id,
+    text,
+    timestamp: firstString(record.timestamp, record.occurred_at) || "",
+    source: firstString(record.source, record.author) || undefined,
+    sourceEventId:
+      firstString(record.source_event_id, record.event_id) || undefined,
+  };
 };
 
 const isRuntimeStatus = (value: unknown): value is RuntimeStatus =>
@@ -210,6 +264,11 @@ export const normalizeSetupStatus = (value: unknown): SetupStatus | null => {
     "venv_present",
     "lock_present",
     "gemma_terms_accepted",
+    "dependency_ready",
+    "python_import_ready",
+    "tokenizer_ready",
+    "embedding_ready",
+    "asr_websocket_ready",
   ];
   const requiredArrayFields = [
     "stages",
@@ -312,6 +371,11 @@ export const normalizeSetupStatus = (value: unknown): SetupStatus | null => {
     python_present: record.python_present as boolean,
     venv_present: record.venv_present as boolean,
     lock_present: record.lock_present as boolean,
+    dependency_ready: record.dependency_ready as boolean,
+    python_import_ready: record.python_import_ready as boolean,
+    tokenizer_ready: record.tokenizer_ready as boolean,
+    embedding_ready: record.embedding_ready as boolean,
+    asr_websocket_ready: record.asr_websocket_ready as boolean,
     gemma_terms_accepted: record.gemma_terms_accepted as boolean,
     gemma_terms_version: record.gemma_terms_version as string,
     gemma_terms_model_sha256: record.gemma_terms_model_sha256 as string,
@@ -334,6 +398,11 @@ const isCanonicalSetupShape = (setup: SetupStatus): boolean => {
     "venv_present",
     "lock_present",
     "gemma_terms_accepted",
+    "dependency_ready",
+    "python_import_ready",
+    "tokenizer_ready",
+    "embedding_ready",
+    "asr_websocket_ready",
   ] as const;
   const requiredArrayFields = [
     "stages",
@@ -450,9 +519,6 @@ const setupStagesMatch = (
   return a === b || a.includes(b) || b.includes(a);
 };
 
-// アプリ起動中の一意実行フラグ (React StrictMode の二重マウント防止)
-let globalWarmupTriggered = false;
-
 export function useAppState() {
   const { isConnected, addListener } = useWebSocket();
 
@@ -485,6 +551,11 @@ export function useAppState() {
   const setupRunInFlightRef = useRef<Promise<SetupStatus | null> | null>(null);
   const setupStatusRef = useRef<SetupStatus | null>(null);
   const setupAttemptErrorRef = useRef<string | null>(null);
+  // The native warmup failure is transient and is not persisted in the
+  // bootstrap state file. Keep it across status polls so a healthy portable
+  // runtime cannot erase the actionable WebSocket error before the user can
+  // retry it.
+  const asrWarmupErrorRef = useRef<string | null>(null);
   const termsAcceptanceInFlightRef = useRef<Promise<SetupStatus | null> | null>(
     null,
   );
@@ -497,6 +568,8 @@ export function useAppState() {
     twitch: false,
     session: false,
   });
+  const [sessionStarting, setSessionStarting] = useState(false);
+  const sessionStartInFlightRef = useRef(false);
 
   // 音声レベル
   const [levelMeter, setLevelMeter] = useState<number>(0);
@@ -506,12 +579,18 @@ export function useAppState() {
     text: string;
     isFinal: boolean;
     isPrompt?: boolean;
+    latencyMs?: number | null;
   }>({
     text: "",
     isFinal: true,
     isPrompt: false,
   });
   const [asrHistory, setAsrHistory] = useState<AsrEntry[]>([]);
+
+  // Durable facts derived from live speech are kept separately from the raw
+  // transcript so the dashboard can distinguish what was said from what the
+  // memory curator decided to retain.
+  const [factHistory, setFactHistory] = useState<FactEntry[]>([]);
 
   // Gemini 回答
   const [geminiResponse, setGeminiResponse] = useState<string>("");
@@ -656,6 +735,8 @@ export function useAppState() {
             is_final: boolean;
             is_prompt?: boolean;
             stream?: string;
+            latency_ms?: number | null;
+            event_id?: string | null;
           }>("asr_result", (event) => {
             if (event.payload && event.payload.text) {
               const rawText = event.payload.text.trim();
@@ -691,6 +772,8 @@ export function useAppState() {
                         text: rawText,
                         isPrompt: isPrompt || last.isPrompt,
                         isDiscord: isDiscord || last.isDiscord,
+                        latencyMs:
+                          event.payload.latency_ms ?? last.latencyMs ?? null,
                       };
                       return updated;
                     }
@@ -702,15 +785,36 @@ export function useAppState() {
                         timestamp: new Date().toLocaleTimeString(),
                         isDiscord,
                         isPrompt,
+                        latencyMs: event.payload.latency_ms ?? null,
                       },
                     ];
                   });
                   setCurrentAsr({ text: "", isFinal: true, isPrompt: false });
                 } else {
-                  setCurrentAsr({ text: rawText, isFinal: false, isPrompt });
+                  setCurrentAsr({
+                    text: rawText,
+                    isFinal: false,
+                    isPrompt,
+                    latencyMs: event.payload.latency_ms ?? null,
+                  });
                 }
               }
             }
+          });
+
+          await register<unknown>("memory-fact-created", (event) => {
+            const fact = normalizeFactEntry(event.payload);
+            if (!fact) return;
+            setFactHistory((prev) => {
+              const duplicate = prev.some(
+                (item) =>
+                  item.id === fact.id ||
+                  (fact.sourceEventId !== undefined &&
+                    item.sourceEventId === fact.sourceEventId),
+              );
+              if (duplicate) return prev;
+              return [...prev.slice(-29), fact];
+            });
           });
 
           await register<{
@@ -785,6 +889,80 @@ export function useAppState() {
             }
           });
 
+          // `asr_ready` is emitted only by the native layer after the same
+          // WebSocket used for audio/commands has completed its handshake.
+          // Never infer this state from process startup or a toast message.
+          await register<{ ready?: boolean; timestamp?: string }>(
+            "asr_ready",
+            (event) => {
+              if (event.payload?.ready !== true) return;
+              const previousWarmupError = asrWarmupErrorRef.current;
+              asrWarmupErrorRef.current = null;
+              const previous = setupStatusRef.current;
+              if (!previous) return;
+              // This event authorizes only the ASR transport. Keep any
+              // dependency/tokenizer/embedding failure fail-closed even if
+              // a late socket event arrives while that setup error is shown.
+              const runtimeReadyWithoutAsr =
+                previous.required_models_ready === true &&
+                previous.dependency_ready === true &&
+                previous.python_import_ready === true &&
+                previous.tokenizer_ready === true &&
+                previous.embedding_ready === true &&
+                hasValidGemmaTerms(previous) &&
+                (!previous.error || previous.error === previousWarmupError);
+              const updated = {
+                ...previous,
+                ready: runtimeReadyWithoutAsr,
+                setup_required: runtimeReadyWithoutAsr
+                  ? false
+                  : previous.setup_required,
+                running: false,
+                cancelled: false,
+                status: runtimeReadyWithoutAsr
+                  ? ("ready" as const)
+                  : previous.status,
+                error: runtimeReadyWithoutAsr ? null : previous.error,
+                asr_websocket_ready: true,
+                current_stage: runtimeReadyWithoutAsr
+                  ? "complete"
+                  : previous.current_stage,
+                progress: runtimeReadyWithoutAsr
+                  ? Math.max(previous.progress ?? 0, 100)
+                  : previous.progress,
+                message: runtimeReadyWithoutAsr
+                  ? "ASR WebSocketの準備が完了しました。"
+                  : previous.message,
+              };
+              setupStatusRef.current = updated;
+              setSetupStatus(updated);
+              setSetupError(updated.error || null);
+            },
+          );
+
+          await register<{ message?: string }>("asr_warmup_failed", (event) => {
+            const message =
+              event.payload?.message ||
+              "ASR WebSocketの準備に失敗しました。再試行してください。";
+            asrWarmupErrorRef.current = message;
+            setSetupStatus((previous) => {
+              if (!previous) return previous;
+              const updated = {
+                ...previous,
+                ready: false,
+                setup_required: true,
+                status: "error" as const,
+                asr_websocket_ready: false,
+                error: message,
+                running: false,
+                cancelled: false,
+              };
+              setupStatusRef.current = updated;
+              return updated;
+            });
+            setSetupError(message);
+          });
+
           await register<LogEntry>("app_log", (event) => {
             if (event.payload) {
               setLogs((prev) => [...prev.slice(-999), event.payload]);
@@ -845,8 +1023,24 @@ export function useAppState() {
           const isFinal = Boolean(msg.is_final);
           const rawText = (msg.text || "").trim();
           if (!rawText) break;
+          const stream =
+            typeof msg.stream === "string" && msg.stream.trim()
+              ? msg.stream.trim()
+              : rawText.startsWith("[Discord]")
+                ? "discord"
+                : "mic";
+          const isPrompt = Boolean(msg.is_prompt);
+          const latencyMs =
+            typeof msg.latency_ms === "number" && Number.isFinite(msg.latency_ms)
+              ? msg.latency_ms
+              : null;
 
-          setCurrentAsr({ text: rawText, isFinal });
+          setCurrentAsr({
+            text: rawText,
+            isFinal,
+            isPrompt,
+            latencyMs,
+          });
 
           if (isFinal) {
             setAsrHistory((prev) => {
@@ -875,7 +1069,9 @@ export function useAppState() {
                   minute: "2-digit",
                   second: "2-digit",
                 }),
-                isDiscord: rawText.startsWith("[Discord]"),
+                isDiscord: stream === "discord",
+                isPrompt,
+                latencyMs,
               };
               return [...prev.slice(-49), newEntry];
             });
@@ -1230,6 +1426,14 @@ export function useAppState() {
           return unavailable;
         }
 
+        // RuntimeStatus intentionally does not persist an ASR process failure:
+        // the next launch may recover it. Preserve the live failure locally so
+        // polling a still-healthy dependency/model snapshot cannot make the
+        // Setup screen look ready again before the retry succeeds.
+        if (normalized.asr_websocket_ready === true) {
+          asrWarmupErrorRef.current = null;
+        }
+
         const liveEvent = setupEventRef.current;
         const sameStage = setupStagesMatch(
           liveEvent?.stage,
@@ -1249,7 +1453,23 @@ export function useAppState() {
         );
         const staleAttemptError = setupAttemptErrorRef.current;
         let effectiveStatus: SetupStatus = normalized;
-        if (cancellationRequested || liveCancelled) {
+        const asrWarmupError = asrWarmupErrorRef.current;
+        if (
+          asrWarmupError &&
+          normalized.asr_websocket_ready !== true &&
+          !cancellationRequested &&
+          !liveCancelled
+        ) {
+          effectiveStatus = {
+            ...normalized,
+            ready: false,
+            setup_required: true,
+            running: false,
+            cancelled: false,
+            status: "error",
+            error: asrWarmupError,
+          };
+        } else if (cancellationRequested || liveCancelled) {
           effectiveStatus = {
             ...normalized,
             ready: false,
@@ -1484,7 +1704,9 @@ export function useAppState() {
     if (
       !isTauriEnv() ||
       !setupStatus ||
-      (!setupStatus.setup_required && !isSetupRunning)
+      (!setupStatus.setup_required &&
+        !isSetupRunning &&
+        setupStatus.asr_websocket_ready === true)
     )
       return;
     const timer = window.setInterval(() => {
@@ -1509,6 +1731,7 @@ export function useAppState() {
 
     // A retry starts a fresh event sequence; otherwise a queued completion from
     // the previous cancelled run would be mistaken for the new run's result.
+    asrWarmupErrorRef.current = null;
     cancelRequestedRef.current = false;
     setupEventRef.current = null;
     setupAttemptErrorRef.current = null;
@@ -1702,36 +1925,6 @@ export function useAppState() {
     fetchAllData();
   }, []);
 
-  // ASR must never be started while the first-run runtime is still being
-  // provisioned.  The previous unconditional timer fired from SetupScreen,
-  // where the portable venv did not exist yet; that failed start permanently
-  // consumed the one-shot warmup guard and could destabilize the transition to
-  // the main UI.  Trigger only after a canonical ready snapshot is observed.
-  useEffect(() => {
-    if (
-      !isTauriEnv() ||
-      globalWarmupTriggered ||
-      !isSetupReadyForSession(setupStatus)
-    ) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      if (globalWarmupTriggered) return;
-      globalWarmupTriggered = true;
-      void import("@tauri-apps/api/core").then(({ invoke }) => {
-        invoke<string>("warmup_asr")
-          .then(() => {
-            showToast(
-              "⚡ Kotoba-Whisper GPU (CUDA INT8) のウォームアップが完了しました！",
-              "success",
-            );
-          })
-          .catch((err) => console.warn("Warmup trigger error:", err));
-      });
-    }, 500);
-    return () => window.clearTimeout(timer);
-  }, [setupStatus, showToast]);
-
   // 選択中ウィンドウのプレビュー初回取得
   const lastFetchedWinRef = useRef<string>("");
   useEffect(() => {
@@ -1743,6 +1936,9 @@ export function useAppState() {
 
   // アクション
   const startSession = async () => {
+    if (sessionStartInFlightRef.current) return;
+    sessionStartInFlightRef.current = true;
+    setSessionStarting(true);
     try {
       const currentSetup = await fetchSetupStatus();
       if (!isSetupReadyForSession(currentSetup)) {
@@ -1750,26 +1946,38 @@ export function useAppState() {
           "セットアップが完了していないため、セッションを開始できません。",
         );
       }
-      setStatus((prev) => ({ ...prev, session: true }));
       if (isTauriEnv()) {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("session_start");
+        // The native command waits for the startup-warmed ASR WebSocket. Do
+        // not show an active session until that readiness gate has passed.
+        setStatus((prev) => ({ ...prev, session: true }));
         return;
       }
       const res = await fetch(`${API_BASE}/api/session/start`, {
         method: "POST",
       });
       const data = await res.json();
-      if (!data.success) {
+      if (data.success) {
+        setStatus((prev) => ({ ...prev, session: true }));
+      } else {
         setStatus((prev) => ({ ...prev, session: false }));
       }
     } catch (e) {
       console.error("Failed to start session:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      showToast(`セッションを開始できませんでした: ${message}`, "warning");
       setStatus((prev) => ({ ...prev, session: false }));
+    } finally {
+      sessionStartInFlightRef.current = false;
+      setSessionStarting(false);
     }
   };
 
   const stopSession = async () => {
+    // A native start may be waiting for the startup ASR warmup. Do not race
+    // it with a stop command; the controls remain disabled until it resolves.
+    if (sessionStartInFlightRef.current) return;
     setStatus((prev) => ({
       ...prev,
       session: false,
@@ -1785,6 +1993,8 @@ export function useAppState() {
       await fetch(`${API_BASE}/api/session/stop`, { method: "POST" });
     } catch (e) {
       console.error("Failed to stop session:", e);
+      const message = e instanceof Error ? e.message : String(e);
+      showToast(`セッション停止に失敗しました: ${message}`, "warning");
     }
   };
 
@@ -1793,6 +2003,26 @@ export function useAppState() {
       showToast("🔄 Whisper エンジンを再起動しています...", "info");
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("restart_whisper");
+      asrWarmupErrorRef.current = null;
+      setSetupStatus((previous) => {
+        if (!previous) return previous;
+        const updated = {
+          ...previous,
+          ready: true,
+          setup_required: false,
+          running: false,
+          cancelled: false,
+          status: "ready" as const,
+          error: null,
+          asr_websocket_ready: true,
+          current_stage: "complete",
+          progress: Math.max(previous.progress ?? 0, 100),
+          message: "ASR WebSocketの準備が完了しました。",
+        };
+        setupStatusRef.current = updated;
+        return updated;
+      });
+      setSetupError(null);
       showToast(
         "✅ Whisper エンジンの再起動とウォームアップが完了しました！",
         "success",
@@ -1997,10 +2227,12 @@ export function useAppState() {
     levelMeter,
     currentAsr,
     asrHistory,
+    factHistory,
     geminiResponse,
     vram,
     ram,
     commentaryTimer,
+    sessionStarting,
     logs,
     inputDevices,
     discordDevices,

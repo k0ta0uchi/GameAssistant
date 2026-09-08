@@ -15,6 +15,7 @@ pub struct LogEntry {
 
 pub struct LogManager {
     logs: Arc<Mutex<Vec<LogEntry>>>,
+    file_lock: Arc<Mutex<()>>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     runtime_root: std::path::PathBuf,
 }
@@ -23,6 +24,7 @@ impl LogManager {
     pub fn new(runtime_root: std::path::PathBuf) -> Self {
         Self {
             logs: Arc::new(Mutex::new(Vec::with_capacity(1000))),
+            file_lock: Arc::new(Mutex::new(())),
             app_handle: Arc::new(Mutex::new(None)),
             runtime_root,
         }
@@ -63,17 +65,20 @@ impl LogManager {
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
         {
-            use std::io::Write;
-            let _ = writeln!(
-                file,
-                "[{}] [{}] [{}] {}",
-                entry.timestamp, entry.level, entry.logger, entry.message
-            );
+            let _file_guard = self.file_lock.lock();
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_path)
+            {
+                use std::io::Write;
+                let _ = writeln!(
+                    file,
+                    "[{}] [{}] [{}] {}",
+                    entry.timestamp, entry.level, entry.logger, entry.message
+                );
+            }
         }
 
         // フロントエンドにリアルタイム送信 (単一の app_log イベントに一本化)

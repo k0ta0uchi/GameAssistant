@@ -48,6 +48,42 @@ SETTINGS_PATH = os.path.abspath(os.environ["SETTINGS_PATH"])
 MODELS_DIR = os.path.abspath(os.environ["MODELS_DIR"])
 HF_CACHE_DIR = os.path.abspath(os.environ["CACHE_DIR"])
 PORT = 18088
+# VAD contract: inspect short utterances early enough for a wake word, emit
+# revised transcripts as partials, and promote one stable transcript to final
+# after silence. Keep these values explicit so the portable server contract
+# can be checked without loading the optional ML stack.
+MIN_AUDIO_SECONDS = 0.25
+PARTIAL_POLL_INTERVAL_SECONDS = 0.08
+SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS = 0.75
+MAX_AUDIO_BUFFER_SECONDS = 3.0
+
+
+def remember_transcript(previous: str, candidate: str) -> str:
+    """Keep the most complete transcript seen for the current VAD window.
+
+    Whisper is run against a moving audio window. Once the window drops the
+    beginning of a long utterance, a later inference can contain only a tail
+    (or an unrelated correction) even though an earlier partial contained the
+    complete sentence. Finalization must not replace that complete sentence
+    with the shorter tail. Containment handles normal incremental revisions;
+    for unrelated revisions, length is a conservative proxy for completeness.
+    """
+
+    previous = previous.strip()
+    candidate = candidate.strip()
+    if not candidate:
+        return previous
+    if not previous:
+        return candidate
+    if candidate == previous:
+        return previous
+    if candidate in previous:
+        return previous
+    if previous in candidate:
+        return candidate
+    return candidate if len(candidate) > len(previous) else previous
+
+
 # Keep any library-managed cache beside the portable EXE as well.  Required
 # models are downloaded by GameAssistant's Models Manager before this server
 # starts; there is deliberately no user-profile/HF-cache fallback.
@@ -78,9 +114,11 @@ except Exception as e:
 
 # 2. GLuCoSE-base-ja ローカル Embedding モデル
 _embedding_model = None
+_embedding_model_error_logged = False
 
 def get_embedding_model():
     global _embedding_model
+    global _embedding_model_error_logged
     if _embedding_model is None:
         local_path = os.path.join(MODELS_DIR, "GLuCoSE-base-ja")
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -88,16 +126,20 @@ def get_embedding_model():
             model_name = local_path
             logger.info(f"Loading local embedding model from: {model_name} ({device})...")
         else:
-            logger.error(
-                f"Required GLuCoSE-base-ja model is missing at {local_path}; "
-                "complete first-launch setup before using embeddings."
-            )
+            if not _embedding_model_error_logged:
+                logger.error(
+                    f"Required GLuCoSE-base-ja model is missing at {local_path}; "
+                    "complete first-launch setup before using embeddings."
+                )
+                _embedding_model_error_logged = True
             return None
         try:
             _embedding_model = SentenceTransformer(model_name, device=device)
             logger.info(f"GLuCoSE-base-ja embedding model successfully loaded on {device}!")
         except Exception as err:
-            logger.error(f"Failed to load embedding model: {err}")
+            if not _embedding_model_error_logged:
+                logger.error(f"Failed to load embedding model: {err}")
+                _embedding_model_error_logged = True
     return _embedding_model
 
 # 3. VRAM 事前確保 (Preallocation) バッファ管理
@@ -136,11 +178,23 @@ except Exception:
 
 
 async def asr_handler(websocket):
-    audio_buffer = np.array([], dtype=np.float32)
-    last_partial_text = ""
-    silence_start_time = None
     sample_rate = 16000
     loop = asyncio.get_running_loop()
+    active_stream = "mic"
+
+    def new_stream_state():
+        return {
+            "audio_buffer": np.array([], dtype=np.float32),
+            "last_partial_text": "",
+            "silence_start_time": None,
+            "audio_started_at": None,
+            "last_audio_at": None,
+        }
+
+    # Each input stream gets an independent VAD transcript and silence clock.
+    # Legacy clients that send raw binary frames without an audio_stream
+    # control message continue to use the mic stream by default.
+    stream_states = {"mic": new_stream_state(), "discord": new_stream_state()}
 
     send_queue = asyncio.Queue()
 
@@ -154,64 +208,183 @@ async def asr_handler(websocket):
 
     sender_task = asyncio.create_task(sender())
 
+    async def transcribe_buffer(audio_buffer, allow_short=False):
+        """Transcribe one VAD window and return text plus inference latency.
+
+        Polling intentionally waits for ``MIN_AUDIO_SECONDS`` so the normal
+        partial path does not invoke Whisper for every tiny audio packet.  An
+        explicit flush is allowed to transcribe a shorter window: callers use
+        that path when VAD produced no partial before the utterance ended.
+        """
+        if len(audio_buffer) == 0:
+            return "", 0.0
+        if not allow_short and len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS:
+            return "", 0.0
+
+        buf_copy = audio_buffer.copy()
+
+        def _run_transcribe():
+            segments, _ = whisper_model.transcribe(
+                buf_copy,
+                language="ja",
+                beam_size=1,
+                vad_filter=True,
+                without_timestamps=True,
+            )
+            return "".join([s.text for s in segments]).strip()
+
+        t0 = loop.time()
+        current_text = await loop.run_in_executor(None, _run_transcribe)
+        return current_text, (loop.time() - t0) * 1000.0
+
+    def reset_stream_state(state):
+        state["audio_buffer"] = np.array([], dtype=np.float32)
+        state["last_partial_text"] = ""
+        state["silence_start_time"] = None
+        state["audio_started_at"] = None
+        state["last_audio_at"] = None
+
     async def inference_loop():
-        nonlocal audio_buffer, last_partial_text, silence_start_time
         while True:
             try:
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(PARTIAL_POLL_INTERVAL_SECONDS)
 
-                if len(audio_buffer) < sample_rate * 0.4:
-                    continue
+                # Iterate over a snapshot because an explicit stream tag may
+                # add a new, non-mic stream while inference is suspended.
+                for stream_name, state in list(stream_states.items()):
+                    audio_buffer = state["audio_buffer"]
+                    now = loop.time()
+                    if len(audio_buffer) == 0:
+                        continue
 
-                buf_copy = audio_buffer.copy()
-                
-                def _run_transcribe():
-                    segments, _ = whisper_model.transcribe(
-                        buf_copy,
-                        language="ja",
-                        beam_size=1,
-                        vad_filter=True,
-                        without_timestamps=True,
-                    )
-                    return "".join([s.text for s in segments]).strip()
+                    # A short utterance can end before the normal polling
+                    # threshold. Once the input has been quiet for the same
+                    # short-utterance timeout, run one final-only inference
+                    # instead of leaving the buffer stranded forever.
+                    if (
+                        len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS
+                        and state["last_audio_at"] is not None
+                        and now - state["last_audio_at"]
+                        >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
+                    ):
+                        final_text, final_latency_ms = await transcribe_buffer(
+                            audio_buffer, allow_short=True
+                        )
+                        if final_text:
+                            await send_queue.put({
+                                "text": final_text,
+                                "is_final": True,
+                                "stream": stream_name,
+                                "latency_ms": round(final_latency_ms, 1),
+                            })
+                        else:
+                            logger.info(
+                                "VAD reset[%s]: partial=false final=false "
+                                "reason=no_transcript samples=%d",
+                                stream_name,
+                                len(audio_buffer),
+                            )
+                        reset_stream_state(state)
+                        continue
 
-                t0 = loop.time()
-                current_text = await loop.run_in_executor(None, _run_transcribe)
-                latency_ms = (loop.time() - t0) * 1000.0
+                    if len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS:
+                        continue
 
-                if current_text:
-                    if current_text != last_partial_text:
-                        await send_queue.put({
-                            "text": current_text,
-                            "is_final": False,
-                            "latency_ms": round(latency_ms, 1),
-                        })
-                        last_partial_text = current_text
-                        silence_start_time = loop.time()
-                    else:
-                        if silence_start_time is None:
-                            silence_start_time = loop.time()
-                else:
-                    if silence_start_time is None:
-                        silence_start_time = loop.time()
+                    current_text, latency_ms = await transcribe_buffer(audio_buffer)
 
-                    if len(audio_buffer) > sample_rate * 3:
-                        audio_buffer = audio_buffer[-int(sample_rate * 0.5):]
+                    last_partial_text = state["last_partial_text"]
+                    silence_start_time = state["silence_start_time"]
+                    now = loop.time()
 
-                if last_partial_text and silence_start_time:
-                    char_count = len(last_partial_text)
-                    timeout = 0.75 if char_count <= 4 else (1.0 if char_count <= 15 else 1.3)
+                    if current_text:
+                        # Whisper's moving VAD window can regress from a full
+                        # sentence to a tail once the utterance exceeds the
+                        # bounded audio window. Keep the most complete partial
+                        # as the candidate that will be promoted to final.
+                        stable_text = remember_transcript(
+                            last_partial_text, current_text
+                        )
+                        if stable_text != last_partial_text:
+                            await send_queue.put({
+                                "text": stable_text,
+                                "is_final": False,
+                                "stream": stream_name,
+                                "latency_ms": round(latency_ms, 1),
+                            })
+                            state["last_partial_text"] = stable_text
+                            state["silence_start_time"] = now
+                        elif silence_start_time is None:
+                            state["silence_start_time"] = now
+                    elif silence_start_time is None:
+                        state["silence_start_time"] = now
 
-                    if (loop.time() - silence_start_time) >= timeout:
-                        logger.info(f"Finalize: '{last_partial_text}' (latency: {latency_ms:.1f}ms)")
-                        await send_queue.put({
-                            "text": last_partial_text,
-                            "is_final": True,
-                            "latency_ms": round(latency_ms, 1),
-                        })
-                        last_partial_text = ""
-                        audio_buffer = np.array([], dtype=np.float32)
-                        silence_start_time = None
+                    # Bound each VAD stream independently. Keeping the newest
+                    # window lets a short wake word be recognized even when an
+                    # unrelated stream has a long-running buffer.
+                    max_samples = int(sample_rate * MAX_AUDIO_BUFFER_SECONDS)
+                    if len(state["audio_buffer"]) > max_samples:
+                        state["audio_buffer"] = state["audio_buffer"][-max_samples:]
+
+                    silence_start_time = state["silence_start_time"]
+                    if state["last_partial_text"] and silence_start_time:
+                        char_count = len(state["last_partial_text"])
+                        timeout = (
+                            SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
+                            if char_count <= 4
+                            else (1.0 if char_count <= 15 else 1.3)
+                        )
+
+                        if (now - silence_start_time) >= timeout:
+                            final_text = state["last_partial_text"]
+                            logger.info(
+                                f"Finalize[{stream_name}]: '{final_text}' "
+                                f"(latency: {latency_ms:.1f}ms)"
+                            )
+                            await send_queue.put({
+                                "text": final_text,
+                                "is_final": True,
+                                "stream": stream_name,
+                                "latency_ms": round(latency_ms, 1),
+                            })
+                            state["last_partial_text"] = ""
+                            reset_stream_state(state)
+                    elif (
+                        len(state["audio_buffer"]) > 0
+                        and not state["last_partial_text"]
+                        and state["last_audio_at"] is not None
+                        and now - state["last_audio_at"]
+                            >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
+                    ):
+                        final_text, final_latency_ms = await transcribe_buffer(
+                            state["audio_buffer"], allow_short=True
+                        )
+                        if final_text:
+                            await send_queue.put({
+                                "text": final_text,
+                                "is_final": True,
+                                "stream": stream_name,
+                                "latency_ms": round(final_latency_ms, 1),
+                            })
+                        else:
+                            logger.info(
+                                "VAD reset[%s]: partial=false final=false "
+                                "reason=no_transcript samples=%d",
+                                stream_name,
+                                len(state["audio_buffer"]),
+                            )
+                        reset_stream_state(state)
+                    elif (
+                        len(state["audio_buffer"]) > 0
+                        and state["audio_started_at"] is not None
+                        and now - state["audio_started_at"] >= MAX_AUDIO_BUFFER_SECONDS
+                    ):
+                        logger.info(
+                            "VAD reset[%s]: partial=false final=false "
+                            "reason=no_transcript samples=%d",
+                            stream_name,
+                            len(state["audio_buffer"]),
+                        )
+                        reset_stream_state(state)
 
             except asyncio.CancelledError:
                 break
@@ -225,15 +398,62 @@ async def asr_handler(websocket):
         async for message in websocket:
             if isinstance(message, bytes):
                 samples = np.frombuffer(message, dtype=np.float32)
-                audio_buffer = np.concatenate([audio_buffer, samples])
+                state = stream_states.setdefault(active_stream, new_stream_state())
+                if len(samples) > 0 and state["audio_started_at"] is None:
+                    state["audio_started_at"] = loop.time()
+                if len(samples) > 0:
+                    state["last_audio_at"] = loop.time()
+                state["audio_buffer"] = np.concatenate([state["audio_buffer"], samples])
             elif isinstance(message, str):
                 try:
                     data = json.loads(message)
                     cmd = data.get("cmd")
                     if cmd == "reset":
-                        audio_buffer = np.array([], dtype=np.float32)
-                        last_partial_text = ""
-                        silence_start_time = None
+                        for state in stream_states.values():
+                            reset_stream_state(state)
+                        active_stream = "mic"
+                    elif cmd == "audio_stream":
+                        stream_name = data.get("stream")
+                        if isinstance(stream_name, str) and stream_name.strip():
+                            active_stream = stream_name.strip()
+                            stream_states.setdefault(active_stream, new_stream_state())
+                    elif cmd == "flush":
+                        # A caller may have VAD audio but no partial delivery
+                        # (for example, a short buffer crossing a reconnect).
+                        # Expose an explicit finalization path so native code
+                        # can preserve the final-only contract instead of
+                        # dropping the buffered transcript.
+                        stream_name = data.get("stream", active_stream)
+                        if not isinstance(stream_name, str) or not stream_name.strip():
+                            stream_name = active_stream
+                        else:
+                            stream_name = stream_name.strip()
+                        state = stream_states.get(stream_name)
+                        if state and (
+                            state["last_partial_text"]
+                            or len(state["audio_buffer"]) > 0
+                        ):
+                            final_text = state["last_partial_text"]
+                            final_latency_ms = 0.0
+                            if not final_text and len(state["audio_buffer"]) > 0:
+                                final_text, final_latency_ms = await transcribe_buffer(
+                                    state["audio_buffer"], allow_short=True
+                                )
+                            if final_text:
+                                await send_queue.put({
+                                    "text": final_text,
+                                    "is_final": True,
+                                    "stream": stream_name,
+                                    "latency_ms": round(final_latency_ms, 1),
+                                })
+                            else:
+                                logger.info(
+                                    "VAD flush[%s]: partial=false final=false "
+                                    "reason=no_transcript samples=%d",
+                                    stream_name,
+                                    len(state["audio_buffer"]),
+                                )
+                            reset_stream_state(state)
                     elif cmd == "ping":
                         await send_queue.put({"status": "pong"})
                     elif cmd == "embed":
@@ -246,7 +466,12 @@ async def asr_handler(websocket):
                             emb_model = get_embedding_model()
                             if emb_model is not None:
                                 return emb_model.encode(texts, show_progress_bar=False).tolist()
-                            return [[0.0] * 768 for _ in texts]
+                            # Do not manufacture zero vectors when the
+                            # tokenizer/model is unavailable. An empty
+                            # response lets the native client preserve the
+                            # raw/summary text while treating the vector as
+                            # optional and retryable.
+                            return []
 
                         vectors = await loop.run_in_executor(None, _do_embed)
                         await send_queue.put({

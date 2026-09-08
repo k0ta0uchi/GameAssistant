@@ -4,7 +4,7 @@
 //! executable in release builds.  Debug builds use the project root so development
 //! continues to use the checked-out scripts and models.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -22,6 +22,47 @@ use crate::model_manager::ModelManager;
 const PYTHON_VERSION: &str = "3.12";
 const SETUP_STATE_VERSION: u32 = 1;
 const GPU_TORCH_BACKEND: &str = "cu128";
+const RUNTIME_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+// These probes deliberately run through the portable venv rather than through
+// the developer machine's Python.  They are kept dependency-light at the Rust
+// boundary: the ASR script and model manager remain the owners of inference,
+// while bootstrap only asks Python to prove that each prerequisite initializes.
+const PYTHON_IMPORT_PROBE: &str = r#"
+import sys
+if tuple(sys.version_info[:2]) != (3, 12):
+    raise RuntimeError(f"portable Python 3.12 required, found {sys.version_info[0]}.{sys.version_info[1]}")
+import faster_whisper
+import numpy
+import sentencepiece
+import sentence_transformers
+import torch
+import transformers
+import websockets
+"#;
+const TOKENIZER_PROBE: &str = r#"
+import os
+from pathlib import Path
+from tokenizers import Tokenizer
+from transformers import AutoTokenizer
+
+models = Path(os.environ["MODELS_DIR"])
+Tokenizer.from_file(str(models / "kotoba-whisper-v2.0-faster" / "tokenizer.json"))
+AutoTokenizer.from_pretrained(
+    str(models / "GLuCoSE-base-ja"),
+    local_files_only=True,
+)
+"#;
+const EMBEDDING_PROBE: &str = r#"
+import os
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer(
+    os.path.join(os.environ["MODELS_DIR"], "GLuCoSE-base-ja"),
+    device="cpu",
+)
+model.encode(["GameAssistant runtime probe"], show_progress_bar=False)
+"#;
 
 // These resources are compiled into the Rust binary.  In particular this means a
 // portable EXE does not rely on scripts being copied alongside it by the bundler.
@@ -104,15 +145,40 @@ pub struct SetupState {
     pub app_version: String,
     pub python_version: String,
     pub requirements_sha256: String,
+    /// Hash of every embedded dependency manifest.  The selected CPU/GPU hash
+    /// above remains the lockfile identity; this bundle hash also invalidates a
+    /// completed setup when the portable plain manifest changes.
+    #[serde(default)]
+    pub requirements_bundle_sha256: String,
     pub uv_sha256: String,
     pub scripts_sha256: String,
     #[serde(default)]
     pub lock_sha256: String,
+    #[serde(default)]
+    pub runtime_validation: RuntimeValidationState,
     pub gpu: bool,
     pub current_stage: SetupStage,
     pub completed_stages: BTreeSet<String>,
     pub last_error: Option<String>,
     pub updated_at: String,
+}
+
+/// Results of the expensive, real Python initialization probes.  A file or
+/// directory existing is not enough to authorize a session; the fingerprint
+/// binds these results to the exact requirements/scripts/model artifact set
+/// that was checked.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RuntimeValidationState {
+    #[serde(default)]
+    pub fingerprint: String,
+    #[serde(default)]
+    pub python_import_ready: bool,
+    #[serde(default)]
+    pub tokenizer_ready: bool,
+    #[serde(default)]
+    pub embedding_ready: bool,
+    #[serde(default)]
+    pub diagnostics: BTreeMap<String, String>,
 }
 
 impl Default for SetupState {
@@ -122,9 +188,11 @@ impl Default for SetupState {
             app_version: String::new(),
             python_version: PYTHON_VERSION.to_string(),
             requirements_sha256: String::new(),
+            requirements_bundle_sha256: String::new(),
             uv_sha256: String::new(),
             scripts_sha256: String::new(),
             lock_sha256: String::new(),
+            runtime_validation: RuntimeValidationState::default(),
             gpu: false,
             current_stage: SetupStage::Pending,
             completed_stages: BTreeSet::new(),
@@ -246,6 +314,21 @@ pub struct RuntimeStatus {
     pub python_present: bool,
     pub venv_present: bool,
     pub lock_present: bool,
+    /// Readiness checks are additive so older clients can continue to consume
+    /// the original portable setup shape while newer clients can identify the
+    /// failing runtime layer without parsing free-form errors.
+    #[serde(default)]
+    pub dependency_ready: bool,
+    #[serde(default)]
+    pub python_import_ready: bool,
+    #[serde(default)]
+    pub tokenizer_ready: bool,
+    #[serde(default)]
+    pub embedding_ready: bool,
+    #[serde(default)]
+    pub asr_websocket_ready: bool,
+    #[serde(default)]
+    pub diagnostics: BTreeMap<String, String>,
     #[serde(default)]
     pub llama_server_present: bool,
     pub gemma_terms_accepted: bool,
@@ -305,6 +388,13 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
         Err(error) => (false, Some(error)),
     };
 
+    let gpu = detect_nvidia_gpu();
+    let requirements_hash = runtime_requirements_hash(gpu);
+    let requirements_bundle_hash = requirements_bundle_hash();
+    let metadata_current =
+        state_metadata_current(&state, &requirements_hash, &requirements_bundle_hash)
+            && requirements_manifest_current(&layout, gpu, &requirements_hash)
+            && embedded_requirements_manifest_current(&layout);
     let required_models_missing = required_models_missing(root);
     let gemma_terms_accepted = crate::model_manager::gemma_terms_accepted(root);
     let cancelled = state
@@ -319,31 +409,61 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
             .and_then(|mut entries| entries.next())
             .is_some();
     let venv_present = layout.venv_dir.is_dir() && layout.python_executable().is_file();
-    let lock_present = layout.lock_path.is_file()
+    let lock_present = metadata_current
+        && state.gpu == gpu
+        && layout.lock_path.is_file()
         && !state.lock_sha256.is_empty()
-        && file_sha256(&layout.lock_path).ok().as_deref() == Some(state.lock_sha256.as_str());
-    let dependencies_present = lock_present
-        && venv_present
-        && fs::read_to_string(&layout.dependencies_marker_path)
-            .ok()
-            .map(|value| value.trim() == state.lock_sha256)
-            .unwrap_or(false);
-    let required_stages_complete = required_setup_stages_complete(&state);
+        && file_sha256(&layout.lock_path).ok().as_deref() == Some(state.lock_sha256.as_str())
+        && lockfile_requirements_match(&layout.lock_path, &requirements_hash);
+    let dependency_marker_present = fs::read_to_string(&layout.dependencies_marker_path)
+        .ok()
+        .map(|value| value.trim() == state.lock_sha256)
+        .unwrap_or(false);
+    let dependency_files_ready = lock_present && venv_present && dependency_marker_present;
+    let validation_fingerprint = runtime_validation_fingerprint(root, &state, gpu);
+    let validation = (state.runtime_validation.fingerprint == validation_fingerprint
+        && metadata_current)
+        .then_some(&state.runtime_validation);
+    let (python_import_ready, tokenizer_ready, embedding_ready, diagnostics) = runtime_diagnostics(
+        root,
+        metadata_current,
+        state.gpu == gpu,
+        venv_present,
+        lock_present,
+        dependency_marker_present,
+        dependency_files_ready,
+        validation,
+    );
+    let dependency_ready = dependency_files_ready && python_import_ready;
+    let status_state = status_state_for_readiness(
+        &state,
+        metadata_current,
+        gpu,
+        dependency_ready,
+        &required_models_missing,
+        python_import_ready,
+        tokenizer_ready,
+        embedding_ready,
+    );
+    let required_stages_complete = required_setup_stages_complete(&status_state);
     let ready = required_stages_complete
         && scripts_present
         && python_present
-        && dependencies_present
+        && dependency_ready
+        && python_import_ready
+        && tokenizer_ready
+        && embedding_ready
         && required_models_missing.is_empty()
         && gemma_terms_accepted;
-    let completed_stages = exposed_completed_stages(&state);
+    let completed_stages = exposed_completed_stages(&status_state);
     let current_stage = if ready {
         Some("complete".to_string())
-    } else if state.stage_completed(SetupStage::Complete) {
+    } else if status_state.stage_completed(SetupStage::Complete) {
         Some("models".to_string())
     } else {
-        Some(exposed_stage(state.current_stage).to_string())
+        Some(exposed_stage(status_state.current_stage).to_string())
     };
-    let progress = setup_progress(&state);
+    let progress = setup_progress(&status_state);
     let status = if ready {
         "ready"
     } else if cancelled {
@@ -355,7 +475,7 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
     } else {
         "pending"
     };
-    let mut exposed_state = state.clone();
+    let mut exposed_state = status_state.clone();
     if cancelled {
         exposed_state.last_error = None;
     }
@@ -380,7 +500,7 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
         },
         status: status.to_string(),
         cancelled,
-        stages: setup_steps(&state),
+        stages: setup_steps(&status_state),
         completed_stages,
         required_models_ready: required_models_missing.is_empty(),
         required_models_missing,
@@ -395,6 +515,15 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
         python_present,
         venv_present,
         lock_present,
+        dependency_ready,
+        python_import_ready,
+        tokenizer_ready,
+        embedding_ready,
+        // Bootstrap cannot claim a live socket before the ASR manager has been
+        // attached.  The Tauri command enriches this field with the client's
+        // actual connection state for the Setup screen and session gate.
+        asr_websocket_ready: false,
+        diagnostics,
         llama_server_present: layout.llama_server_path.is_file(),
         gemma_terms_accepted,
         gemma_terms_version: crate::model_manager::GEMMA_TERMS_VERSION.to_string(),
@@ -406,6 +535,264 @@ pub fn runtime_status(root: &Path) -> Result<RuntimeStatus, String> {
 
 fn is_cancelled_error(message: &str) -> bool {
     message.starts_with("setup cancelled")
+}
+
+fn runtime_requirements_hash(gpu: bool) -> String {
+    sha256_hex(if gpu {
+        REQUIREMENTS_GPU
+    } else {
+        REQUIREMENTS_CPU
+    })
+}
+
+fn requirements_bundle_hash() -> String {
+    let mut hasher = Sha256::new();
+    for requirements in [REQUIREMENTS_PLAIN, REQUIREMENTS_CPU, REQUIREMENTS_GPU] {
+        hasher.update((requirements.len() as u64).to_le_bytes());
+        hasher.update(requirements);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Build a cheap fingerprint for the runtime probes.  Hashing the multi-GB
+/// model weights on every status poll would make the Setup screen itself
+/// expensive, so model identity is represented by the required file names,
+/// sizes, and modification times.  Requirements, scripts, lockfile, and the
+/// Python version are cryptographically bound by the same fingerprint.
+fn runtime_validation_fingerprint(root: &Path, state: &SetupState, gpu: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(runtime_requirements_hash(gpu).as_bytes());
+    hasher.update(requirements_bundle_hash().as_bytes());
+    hasher.update(scripts_hash().as_bytes());
+    hasher.update(PYTHON_VERSION.as_bytes());
+    hasher.update(state.lock_sha256.as_bytes());
+
+    for definition in crate::model_manager::get_defined_models()
+        .into_iter()
+        .filter(|definition| definition.required)
+    {
+        hasher.update(definition.id.as_bytes());
+        let model_root = RuntimeLayout::for_root(root.to_path_buf())
+            .models_dir
+            .join(&definition.id);
+        for relative_path in definition.check_files {
+            hasher.update(relative_path.as_bytes());
+            let path = model_root.join(relative_path);
+            match fs::metadata(path) {
+                Ok(metadata) => {
+                    hasher.update(metadata.len().to_le_bytes());
+                    if let Ok(modified) = metadata.modified() {
+                        if let Ok(duration) = modified.duration_since(UNIX_EPOCH) {
+                            hasher.update(duration.as_secs().to_le_bytes());
+                            hasher.update(duration.subsec_nanos().to_le_bytes());
+                        }
+                    }
+                }
+                Err(_) => hasher.update([0u8; 16]),
+            }
+        }
+    }
+
+    format!("{:x}", hasher.finalize())
+}
+
+fn state_metadata_current(
+    state: &SetupState,
+    requirements_hash: &str,
+    requirements_bundle_hash: &str,
+) -> bool {
+    state.state_version == SETUP_STATE_VERSION
+        && state.app_version == env!("CARGO_PKG_VERSION")
+        && state.python_version == PYTHON_VERSION
+        && state.requirements_sha256 == requirements_hash
+        && state.requirements_bundle_sha256 == requirements_bundle_hash
+        && state.uv_sha256 == sha256_hex(UV_EXE)
+        && state.scripts_sha256 == scripts_hash()
+}
+
+fn requirements_manifest_current(
+    layout: &RuntimeLayout,
+    gpu: bool,
+    requirements_hash: &str,
+) -> bool {
+    file_sha256(&layout.requirements_path(gpu)).ok().as_deref() == Some(requirements_hash)
+}
+
+fn embedded_requirements_manifest_current(layout: &RuntimeLayout) -> bool {
+    [
+        (layout.root.join("requirements.txt"), REQUIREMENTS_PLAIN),
+        (layout.root.join("requirements-cpu.txt"), REQUIREMENTS_CPU),
+        (layout.root.join("requirements-gpu.txt"), REQUIREMENTS_GPU),
+    ]
+    .into_iter()
+    .all(|(path, expected)| {
+        // Older/debug test layouts may only materialize the selected
+        // CPU/GPU manifest; the selected file is validated separately above.
+        // When an optional sibling is present, however, bind it to the
+        // embedded bytes so edits cannot leave a completed state authorized.
+        !path.is_file() || file_sha256(&path).ok().as_deref() == Some(sha256_hex(expected).as_str())
+    })
+}
+
+fn lockfile_requirements_match(path: &Path, requirements_hash: &str) -> bool {
+    let header = format!(
+        "# GameAssistant uv lock manifest\n# requirements-sha256: {}\n",
+        requirements_hash
+    );
+    fs::read_to_string(path)
+        .map(|contents| contents.starts_with(&header))
+        .unwrap_or(false)
+}
+
+fn non_empty_model_file(root: &Path, model_id: &str, relative_path: &str) -> bool {
+    let path = RuntimeLayout::for_root(root.to_path_buf())
+        .models_dir
+        .join(model_id)
+        .join(relative_path);
+    fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
+}
+
+fn runtime_diagnostics(
+    root: &Path,
+    metadata_current: bool,
+    backend_current: bool,
+    venv_present: bool,
+    lock_present: bool,
+    marker_present: bool,
+    dependency_files_ready: bool,
+    validation: Option<&RuntimeValidationState>,
+) -> (bool, bool, bool, BTreeMap<String, String>) {
+    let tokenizer_artifacts_present =
+        non_empty_model_file(root, "kotoba-whisper-v2.0-faster", "tokenizer.json")
+            && non_empty_model_file(root, "GLuCoSE-base-ja", "tokenizer_config.json");
+    // Hugging Face may publish either the legacy PyTorch checkpoint or the
+    // safetensors equivalent. Match ModelManager's validation so a complete
+    // safetensors installation is not reported as an unusable embedding
+    // runtime.
+    let embedding_weights = non_empty_model_file(root, "GLuCoSE-base-ja", "pytorch_model.bin")
+        || non_empty_model_file(root, "GLuCoSE-base-ja", "model.safetensors");
+    let embedding_artifacts_present = embedding_weights
+        && non_empty_model_file(root, "GLuCoSE-base-ja", "sentencepiece.bpe.model");
+    let python_import_ready = dependency_files_ready
+        && validation
+            .map(|result| result.python_import_ready)
+            .unwrap_or(false);
+    let tokenizer_ready = tokenizer_artifacts_present
+        && dependency_files_ready
+        && validation
+            .map(|result| result.tokenizer_ready)
+            .unwrap_or(false);
+    let embedding_ready = embedding_artifacts_present
+        && dependency_files_ready
+        && validation
+            .map(|result| result.embedding_ready)
+            .unwrap_or(false);
+    let dependency_code = if !metadata_current {
+        "dependency_manifest_stale"
+    } else if !backend_current {
+        "dependency_backend_changed"
+    } else if !venv_present {
+        "dependency_venv_missing"
+    } else if !lock_present {
+        "dependency_lock_stale"
+    } else if !marker_present {
+        "dependency_marker_missing"
+    } else if !dependency_files_ready {
+        "dependency_sync_incomplete"
+    } else if validation.is_none() {
+        "dependency_runtime_unverified"
+    } else if !python_import_ready {
+        "python_import_failed"
+    } else {
+        "dependency_ready"
+    };
+    let mut diagnostics = BTreeMap::new();
+    diagnostics.insert("dependency".to_string(), dependency_code.to_string());
+    diagnostics.insert(
+        "python_import".to_string(),
+        if !dependency_files_ready {
+            "dependency_not_ready"
+        } else if validation.is_none() {
+            "python_import_unverified"
+        } else if python_import_ready {
+            "python_import_ready"
+        } else {
+            "python_import_failed"
+        }
+        .to_string(),
+    );
+    diagnostics.insert(
+        "tokenizer".to_string(),
+        if !tokenizer_artifacts_present {
+            "tokenizer_missing"
+        } else if validation.is_none() {
+            "tokenizer_runtime_unverified"
+        } else if tokenizer_ready {
+            "tokenizer_ready"
+        } else {
+            "tokenizer_initialization_failed"
+        }
+        .to_string(),
+    );
+    diagnostics.insert(
+        "embedding".to_string(),
+        if !embedding_artifacts_present {
+            "embedding_model_missing"
+        } else if validation.is_none() {
+            "embedding_runtime_unverified"
+        } else if embedding_ready {
+            "embedding_ready"
+        } else {
+            "embedding_initialization_failed"
+        }
+        .to_string(),
+    );
+    if let Some(validation) = validation {
+        for (key, value) in &validation.diagnostics {
+            diagnostics.insert(key.clone(), value.clone());
+        }
+    }
+    (
+        python_import_ready,
+        tokenizer_ready,
+        embedding_ready,
+        diagnostics,
+    )
+}
+
+fn status_state_for_readiness(
+    state: &SetupState,
+    metadata_current: bool,
+    gpu: bool,
+    dependency_ready: bool,
+    required_models_missing: &[String],
+    python_import_ready: bool,
+    tokenizer_ready: bool,
+    embedding_ready: bool,
+) -> SetupState {
+    let mut projected = state.clone();
+    if !metadata_current {
+        projected.completed_stages.clear();
+        projected.current_stage = SetupStage::Pending;
+    } else if state.gpu != gpu {
+        projected.clear_from(SetupStage::Dependencies);
+    }
+    if !dependency_ready && projected.stage_completed(SetupStage::Dependencies) {
+        projected.clear_from(SetupStage::Dependencies);
+    }
+    let models_incomplete = !required_models_missing.is_empty()
+        || !python_import_ready
+        || !tokenizer_ready
+        || !embedding_ready;
+    if models_incomplete && projected.stage_completed(SetupStage::Models) {
+        projected.clear_from(SetupStage::Models);
+    }
+    // Projection is read-only, but a prior cancellation/error must remain
+    // visible to the caller while stale completion markers are withdrawn.
+    projected.last_error = state.last_error.clone();
+    projected
 }
 
 /// Guard used by commands that must never run before the bootstrap contract
@@ -793,29 +1180,43 @@ pub async fn run_setup(
         state.mark_completed(SetupStage::Complete);
         write_state_atomic(&layout.state_path, &state)?;
     }
+    check_cancelled(&app, &layout, &mut state)?;
+
+    // A complete file/lock manifest only proves that installation finished;
+    // each Python runtime layer must initialize successfully before the setup
+    // contract can report ready.  Persist both success and failure so a stale
+    // venv cannot be mistaken for a validated one on the next launch.
+    let validation_result = validate_runtime(&layout, &mut state, gpu, &app);
+    write_state_atomic(&layout.state_path, &state)?;
     drop(running_guard);
+    validation_result?;
     runtime_status(root)
 }
 
 fn sync_state_metadata(state: &mut SetupState, gpu: bool, requirements_hash: &str) {
     let scripts_hash = scripts_hash();
     let uv_hash = sha256_hex(UV_EXE);
+    let requirements_bundle_hash = requirements_bundle_hash();
     let metadata_changed = state.state_version != SETUP_STATE_VERSION
         || state.app_version != env!("CARGO_PKG_VERSION")
         || state.python_version != PYTHON_VERSION
         || state.requirements_sha256 != requirements_hash
+        || state.requirements_bundle_sha256 != requirements_bundle_hash
         || state.uv_sha256 != uv_hash
         || state.scripts_sha256 != scripts_hash;
     if metadata_changed {
         state.completed_stages.clear();
         state.current_stage = SetupStage::Pending;
+        state.runtime_validation = RuntimeValidationState::default();
     } else if state.gpu != gpu {
         state.clear_from(SetupStage::Dependencies);
+        state.runtime_validation = RuntimeValidationState::default();
     }
     state.state_version = SETUP_STATE_VERSION;
     state.app_version = env!("CARGO_PKG_VERSION").to_string();
     state.python_version = PYTHON_VERSION.to_string();
     state.requirements_sha256 = requirements_hash.to_string();
+    state.requirements_bundle_sha256 = requirements_bundle_hash;
     state.uv_sha256 = uv_hash;
     state.scripts_sha256 = scripts_hash;
     state.gpu = gpu;
@@ -1025,6 +1426,224 @@ fn fail_stage_event(
     };
     emit_progress(app, stage, status, 0.0, None, Some(message.clone()));
     message
+}
+
+fn emit_runtime_validation_progress(
+    app: &Option<AppHandle>,
+    stage: &str,
+    status: &str,
+    message: Option<String>,
+    error: Option<String>,
+) {
+    let Some(app) = app else { return };
+    let payload = serde_json::json!({
+        "stage": stage,
+        "status": status,
+        "progress": if status == "completed" { 100.0 } else { 0.0 },
+        "message": message,
+        "error": error,
+    });
+    let _ = app.emit("setup_progress", payload);
+}
+
+/// Run a probe without inheriting the caller's shell/configuration.  A probe
+/// can import large ML packages, so it has a bounded lifetime and its output
+/// is reduced to a short, secret-free diagnostic before it reaches setup.log.
+fn run_python_probe(layout: &RuntimeLayout, code: &str, label: &str) -> Result<(), String> {
+    let python = layout.python_executable();
+    if !python.is_file() {
+        return Err(format!(
+            "portable Python executable is missing at {}",
+            python.display()
+        ));
+    }
+
+    let models_dir = layout.models_dir.to_string_lossy().to_string();
+    let cache_dir = layout.uv_cache_dir.to_string_lossy().to_string();
+    let mut command = Command::new(&python);
+    command
+        .args(["-c", code])
+        .current_dir(&layout.root)
+        .env("RUNTIME_ROOT", layout.root.to_string_lossy().to_string())
+        .env("MODELS_DIR", &models_dir)
+        .env("CACHE_DIR", &cache_dir)
+        .env("HF_HOME", &cache_dir)
+        .env("TRANSFORMERS_CACHE", &cache_dir)
+        .env("HF_HUB_CACHE", &cache_dir)
+        .env("HUGGINGFACE_HUB_CACHE", &cache_dir)
+        .env("SENTENCE_TRANSFORMERS_HOME", &cache_dir)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{} probe could not start: {}", label, error))?;
+    let started_at = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started_at.elapsed() >= RUNTIME_PROBE_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{} probe timed out after {:?}",
+                    label, RUNTIME_PROBE_TIMEOUT
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{} probe process polling failed: {}", label, error));
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("{} probe output could not be read: {}", label, error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = secret_free_probe_detail(&String::from_utf8_lossy(&output.stderr));
+    if detail.is_empty() {
+        Err(format!(
+            "{} probe failed with status {}",
+            label, output.status
+        ))
+    } else {
+        Err(format!("{} probe failed: {}", label, detail))
+    }
+}
+
+/// Do not persist values that look like credentials even if a third-party
+/// package accidentally prints its environment while failing to initialize.
+fn secret_free_probe_detail(detail: &str) -> String {
+    let mut safe_lines = Vec::new();
+    for line in detail.lines() {
+        let lower = line.to_ascii_lowercase();
+        if [
+            "api_key",
+            "apikey",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "authorization",
+            "bearer ",
+            "password",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+        {
+            continue;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            safe_lines.push(trimmed);
+        }
+    }
+    let mut result = safe_lines.join(" | ");
+    if result.chars().count() > 512 {
+        result = result.chars().take(512).collect::<String>();
+        result.push('…');
+    }
+    result
+}
+
+fn validate_runtime(
+    layout: &RuntimeLayout,
+    state: &mut SetupState,
+    gpu: bool,
+    app: &Option<AppHandle>,
+) -> Result<(), String> {
+    let fingerprint = runtime_validation_fingerprint(&layout.root, state, gpu);
+    let mut validation = RuntimeValidationState {
+        fingerprint,
+        ..RuntimeValidationState::default()
+    };
+    let probes = [
+        (
+            "python-import",
+            PYTHON_IMPORT_PROBE,
+            "Python import",
+            "python_import_ready",
+        ),
+        (
+            "tokenizer",
+            TOKENIZER_PROBE,
+            "Tokenizer initialization",
+            "tokenizer_ready",
+        ),
+        (
+            "embedding",
+            EMBEDDING_PROBE,
+            "Embedding model initialization",
+            "embedding_ready",
+        ),
+    ];
+    let mut failures = Vec::new();
+
+    for (stage, code, label, diagnostic_key) in probes {
+        emit_runtime_validation_progress(
+            app,
+            stage,
+            "running",
+            Some(format!("Validating {}…", label)),
+            None,
+        );
+        match run_python_probe(layout, code, label) {
+            Ok(()) => {
+                match diagnostic_key {
+                    "python_import_ready" => validation.python_import_ready = true,
+                    "tokenizer_ready" => validation.tokenizer_ready = true,
+                    "embedding_ready" => validation.embedding_ready = true,
+                    _ => {}
+                }
+                validation.diagnostics.insert(
+                    stage.to_string(),
+                    format!("{}_ready", stage.replace('-', "_")),
+                );
+                emit_runtime_validation_progress(
+                    app,
+                    stage,
+                    "completed",
+                    Some(format!("{} is ready", label)),
+                    None,
+                );
+            }
+            Err(error) => {
+                validation
+                    .diagnostics
+                    .insert(stage.to_string(), error.clone());
+                failures.push(error.clone());
+                emit_runtime_validation_progress(app, stage, "error", None, Some(error));
+            }
+        }
+    }
+
+    state.runtime_validation = validation;
+    if failures.is_empty() {
+        state.last_error = None;
+        Ok(())
+    } else {
+        state.current_stage = SetupStage::Models;
+        state.last_error = Some(format!(
+            "runtime validation failed: {}",
+            failures.join("; ")
+        ));
+        Err(state
+            .last_error
+            .clone()
+            .unwrap_or_else(|| "runtime validation failed; inspect setup diagnostics".to_string()))
+    }
 }
 
 fn run_uv(layout: &RuntimeLayout, args: &[&str]) -> Result<(), String> {
@@ -1513,6 +2132,244 @@ mod tests {
         assert!(!requirements
             .lines()
             .any(|line| line.trim_start().starts_with("--extra-index-url")));
+    }
+
+    #[test]
+    fn runtime_requirements_include_pkg_resources_provider() {
+        for requirements in [REQUIREMENTS_PLAIN, REQUIREMENTS_CPU, REQUIREMENTS_GPU] {
+            let requirements = String::from_utf8_lossy(requirements);
+            assert!(
+                requirements
+                    .lines()
+                    .any(|line| line.trim() == "setuptools==80.9.0"),
+                "portable runtime requirements must install setuptools for ctranslate2"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_requirements_include_sentencepiece_compatibility_dependency() {
+        for requirements in [REQUIREMENTS_PLAIN, REQUIREMENTS_CPU, REQUIREMENTS_GPU] {
+            let requirements = String::from_utf8_lossy(requirements);
+            assert!(
+                requirements
+                    .lines()
+                    .any(|line| line.trim() == "sentencepiece==0.2.0"),
+                "portable runtime requirements must install SentencePiece for tokenizers"
+            );
+        }
+    }
+
+    #[test]
+    fn every_embedded_requirements_manifest_is_bound_to_runtime_state() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-requirements-bundle-{}-{}",
+            std::process::id(),
+            now_string()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let layout = RuntimeLayout::for_root(root.clone());
+        for (name, contents) in [
+            ("requirements.txt", REQUIREMENTS_PLAIN),
+            ("requirements-cpu.txt", REQUIREMENTS_CPU),
+            ("requirements-gpu.txt", REQUIREMENTS_GPU),
+        ] {
+            fs::write(root.join(name), contents).unwrap();
+        }
+        assert!(embedded_requirements_manifest_current(&layout));
+
+        fs::write(
+            root.join("requirements.txt"),
+            b"sentencepiece==0.2.0\n# changed\n",
+        )
+        .unwrap();
+        assert!(!embedded_requirements_manifest_current(&layout));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_requirements_metadata_is_not_reported_as_a_completed_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-stale-requirements-{}-{}",
+            std::process::id(),
+            now_string()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let layout = RuntimeLayout::for_root(root.clone());
+        let mut state = SetupState::default();
+        for stage in [
+            SetupStage::Resources,
+            SetupStage::Python,
+            SetupStage::Venv,
+            SetupStage::Dependencies,
+            SetupStage::Models,
+            SetupStage::Complete,
+        ] {
+            state.mark_completed(stage);
+        }
+        state.requirements_sha256 = "stale-requirements-hash".to_string();
+        write_state_atomic(&layout.state_path, &state).unwrap();
+
+        let status = runtime_status(&root).unwrap();
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert!(!status.setup_state.stage_completed(SetupStage::Dependencies));
+        assert!(!status.setup_state.stage_completed(SetupStage::Complete));
+        assert_eq!(status.current_stage.as_deref(), Some("pending"));
+        assert_eq!(
+            json["diagnostics"]["dependency"],
+            "dependency_manifest_stale"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lockfile_with_a_stale_requirements_header_is_not_ready() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-stale-lock-{}-{}",
+            std::process::id(),
+            now_string()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let layout = RuntimeLayout::for_root(root.clone());
+        fs::create_dir_all(&layout.venv_dir).unwrap();
+        let python_path = layout.python_executable();
+        fs::create_dir_all(python_path.parent().unwrap()).unwrap();
+        fs::write(&python_path, b"python").unwrap();
+        let gpu = detect_nvidia_gpu();
+        fs::write(
+            layout.requirements_path(gpu),
+            if gpu {
+                REQUIREMENTS_GPU
+            } else {
+                REQUIREMENTS_CPU
+            },
+        )
+        .unwrap();
+        let stale_lock =
+            b"# GameAssistant uv lock manifest\n# requirements-sha256: stale\npackage==1.0\n";
+        fs::write(&layout.lock_path, stale_lock).unwrap();
+        fs::write(
+            &layout.dependencies_marker_path,
+            sha256_hex(stale_lock).as_bytes(),
+        )
+        .unwrap();
+        let mut state = SetupState::default();
+        sync_state_metadata(&mut state, gpu, &runtime_requirements_hash(gpu));
+        state.lock_sha256 = sha256_hex(stale_lock);
+        state.mark_completed(SetupStage::Dependencies);
+        write_state_atomic(&layout.state_path, &state).unwrap();
+
+        let status = runtime_status(&root).unwrap();
+        let json = serde_json::to_value(&status).unwrap();
+
+        assert!(!status.lock_present);
+        assert_eq!(json["dependency_ready"], false);
+        assert_eq!(json["diagnostics"]["dependency"], "dependency_lock_stale");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn runtime_diagnostics_keep_tokenizer_and_embedding_failures_distinct() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-runtime-diagnostics-{}-{}",
+            std::process::id(),
+            now_string()
+        ));
+        let tokenizer_path = RuntimeLayout::for_root(root.clone())
+            .models_dir
+            .join("kotoba-whisper-v2.0-faster")
+            .join("tokenizer.json");
+        fs::create_dir_all(tokenizer_path.parent().unwrap()).unwrap();
+        fs::write(&tokenizer_path, b"{}").unwrap();
+        let embedding_tokenizer_config = RuntimeLayout::for_root(root.clone())
+            .models_dir
+            .join("GLuCoSE-base-ja")
+            .join("tokenizer_config.json");
+        fs::create_dir_all(embedding_tokenizer_config.parent().unwrap()).unwrap();
+        fs::write(embedding_tokenizer_config, b"{}").unwrap();
+
+        let status = runtime_status(&root).unwrap();
+        let json = serde_json::to_value(&status).unwrap();
+
+        // Model files alone do not prove that the runtime can initialize the
+        // tokenizer.  Runtime validation is intentionally required before a
+        // setup status can authorize a session.
+        assert_eq!(json["tokenizer_ready"], false);
+        assert_eq!(json["embedding_ready"], false);
+        assert_eq!(
+            json["diagnostics"]["tokenizer"],
+            "tokenizer_runtime_unverified"
+        );
+        assert_eq!(json["diagnostics"]["embedding"], "embedding_model_missing");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_dependency_files_invalidate_each_runtime_layer_even_with_stale_probe_flags() {
+        let root = std::env::temp_dir().join(format!(
+            "gameassistant-runtime-dependency-loss-{}-{}",
+            std::process::id(),
+            now_string()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let layout = RuntimeLayout::for_root(root.clone());
+        let gpu = detect_nvidia_gpu();
+        fs::write(
+            layout.requirements_path(gpu),
+            if gpu {
+                REQUIREMENTS_GPU
+            } else {
+                REQUIREMENTS_CPU
+            },
+        )
+        .unwrap();
+        let lock = format!(
+            "# GameAssistant uv lock manifest\n# requirements-sha256: {}\npackage==1.0\n",
+            runtime_requirements_hash(gpu)
+        );
+        fs::write(&layout.lock_path, lock.as_bytes()).unwrap();
+        let mut state = SetupState::default();
+        sync_state_metadata(&mut state, gpu, &runtime_requirements_hash(gpu));
+        state.lock_sha256 = sha256_hex(lock.as_bytes());
+        fs::write(
+            &layout.dependencies_marker_path,
+            state.lock_sha256.as_bytes(),
+        )
+        .unwrap();
+        for stage in [
+            SetupStage::Resources,
+            SetupStage::Python,
+            SetupStage::Venv,
+            SetupStage::Dependencies,
+            SetupStage::Models,
+            SetupStage::Complete,
+        ] {
+            state.mark_completed(stage);
+        }
+        state.runtime_validation = RuntimeValidationState {
+            fingerprint: runtime_validation_fingerprint(&root, &state, gpu),
+            python_import_ready: true,
+            tokenizer_ready: true,
+            embedding_ready: true,
+            diagnostics: BTreeMap::new(),
+        };
+        // Simulate a deleted venv after a previous successful setup. The
+        // persisted probe fingerprint must not make any runtime layer look
+        // ready when its dependency files are gone.
+        write_state_atomic(&layout.state_path, &state).unwrap();
+
+        let status = runtime_status(&root).unwrap();
+
+        assert!(!status.dependency_ready);
+        assert!(!status.python_import_ready);
+        assert!(!status.tokenizer_ready);
+        assert!(!status.embedding_ready);
+        assert_eq!(
+            status.diagnostics.get("python_import").map(String::as_str),
+            Some("dependency_not_ready")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

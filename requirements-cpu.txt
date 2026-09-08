@@ -1,6 +1,8 @@
 # GameAssistant embedded runtime dependencies (Windows x64 CPU fallback)
 # Versions are pinned for reproducible first-run setup.
 faster-whisper==1.1.1
+setuptools==80.9.0
+sentencepiece==0.2.0
 sentence-transformers==5.2.0
 style-bert-vits2==2.5.0
 fastapi==0.116.1

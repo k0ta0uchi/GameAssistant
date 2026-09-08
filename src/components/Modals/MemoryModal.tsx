@@ -1,5 +1,5 @@
 import type React from "react";
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useLayoutEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -53,6 +53,137 @@ import {
 
 type SemanticTab = "facts" | "summaries";
 type SemanticError = { message: string; retryable: boolean };
+
+interface ContextMenuAction {
+  label: string;
+  onSelect: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}
+
+interface ContextMenuProps {
+  x: number;
+  y: number;
+  label: string;
+  actions: ContextMenuAction[];
+  onClose: () => void;
+}
+
+/**
+ * A small, keyboard-complete context menu shared by the raw and semantic
+ * memory views.  The native context menu is suppressed only for the memory
+ * row itself; Escape, outside click, and the ContextMenu/Shift+F10 keys all
+ * dismiss it again.
+ */
+const MemoryContextMenu: React.FC<ContextMenuProps> = ({
+  x,
+  y,
+  label,
+  actions,
+  onClose,
+}) => {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const actionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [position, setPosition] = useState({ x, y });
+
+  useLayoutEffect(() => {
+    const viewportWidth =
+      typeof window === "undefined" ? 1024 : window.innerWidth;
+    const viewportHeight =
+      typeof window === "undefined" ? 768 : window.innerHeight;
+    const menuWidth = 236;
+    const menuHeight = Math.min(360, Math.max(64, actions.length * 38 + 20));
+    setPosition({
+      x: Math.max(8, Math.min(x, viewportWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(y, viewportHeight - menuHeight - 8)),
+    });
+  }, [actions.length, x, y]);
+
+  useEffect(() => {
+    const firstEnabled = actions.findIndex((action) => !action.disabled);
+    if (firstEnabled >= 0) actionRefs.current[firstEnabled]?.focus();
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) onClose();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      const enabledIndexes = actions
+        .map((action, index) => (action.disabled ? -1 : index))
+        .filter((index) => index >= 0);
+      if (
+        enabledIndexes.length === 0 ||
+        !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
+      )
+        return;
+      event.preventDefault();
+      const activeIndex = enabledIndexes.indexOf(
+        actionRefs.current.findIndex(
+          (button) => button === document.activeElement,
+        ),
+      );
+      const current = activeIndex < 0 ? 0 : activeIndex;
+      const next =
+        event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? enabledIndexes.length - 1
+            : (current +
+                (event.key === "ArrowUp" ? -1 : 1) +
+                enabledIndexes.length) %
+              enabledIndexes.length;
+      actionRefs.current[enabledIndexes[next]]?.focus();
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [actions, onClose]);
+
+  return (
+    <div
+      ref={menuRef}
+      role="menu"
+      aria-label={label}
+      className="fixed z-[80] min-w-[236px] max-w-[280px] overflow-y-auto rounded-[7px] border border-[#383b3f] bg-[#161718] p-1.5 shadow-2xl shadow-black/50"
+      style={{
+        left: position.x,
+        top: position.y,
+        maxHeight: "min(360px, calc(100vh - 16px))",
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+    >
+      {actions.map((action, index) => (
+        <button
+          key={action.label}
+          ref={(button) => {
+            actionRefs.current[index] = button;
+          }}
+          type="button"
+          role="menuitem"
+          disabled={action.disabled}
+          onClick={() => {
+            onClose();
+            if (!action.disabled) action.onSelect();
+          }}
+          className={`flex w-full items-center rounded-[5px] px-2.5 py-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+            action.danger
+              ? "text-[#f87171] hover:bg-[#eb5757]/10"
+              : "text-[#d0d6e0] hover:bg-[#23252a] hover:text-white"
+          }`}
+        >
+          {action.label}
+        </button>
+      ))}
+    </div>
+  );
+};
 
 const EMPTY_MEMORY_FILTERS: MemoryFilters = {
   statuses: [],
@@ -436,6 +567,18 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
   const [mutating, setMutating] = useState(false);
   const [requestVersion, setRequestVersion] = useState(0);
   const [pendingSubtab, setPendingSubtab] = useState<SemanticTab | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    kind: SemanticTab;
+    id: string;
+  } | null>(null);
+  const [optimisticallyDeletedFactIds, setOptimisticallyDeletedFactIds] =
+    useState<Set<string>>(() => new Set());
+  const [deleteUndoIds, setDeleteUndoIds] = useState<Record<string, string[]>>(
+    {},
+  );
+  const pageRequestId = useRef(0);
 
   const selectedCount =
     subtab === "facts" ? selectedFactIds.length : selectedSummaryIds.length;
@@ -460,47 +603,78 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
     window.setTimeout(() => setNotice(null), 6000);
   };
 
-  const loadPage = async () => {
+  const loadPage = async (overrides?: {
+    factIds?: ReadonlySet<string>;
+    request?: MemoryPageRequest;
+  }) => {
     if (!isOpen) return;
+    const requestId = ++pageRequestId.current;
     setLoading(true);
     setError(null);
+    const requestToUse = overrides?.request || request;
+    const hiddenFactIds = overrides?.factIds || optimisticallyDeletedFactIds;
     try {
       const command =
         subtab === "facts"
           ? "memory_manager_list_facts"
           : "memory_manager_list_summaries";
-      const result = await invoke(command, { request });
+      const result = await invoke(command, { request: requestToUse });
+      if (requestId !== pageRequestId.current) return;
       if (!isRecord(result) || !Array.isArray(result.rows))
         throw new Error("Invalid memory manager response");
       const normalizedPage = normalizePage(result.page);
       if (!normalizedPage)
         throw new Error("Invalid memory manager page response");
+      let hiddenRowsOnPage = 0;
       if (subtab === "facts") {
         const normalizedRows = result.rows.map(normalizeFactRow);
         if (normalizedRows.some((row) => row === null))
           throw new Error("Invalid memory manager fact row");
-        setFacts(normalizedRows as FactRow[]);
+        hiddenRowsOnPage = (normalizedRows as FactRow[]).filter((row) =>
+          hiddenFactIds.has(row.fact_id),
+        ).length;
+        setFacts(
+          (normalizedRows as FactRow[]).filter(
+            (row) => !hiddenFactIds.has(row.fact_id),
+          ),
+        );
       } else {
         const normalizedRows = result.rows.map(normalizeSummaryRow);
         if (normalizedRows.some((row) => row === null))
           throw new Error("Invalid memory manager summary row");
         setSummaries(normalizedRows as SummaryRow[]);
       }
-      setPage(normalizedPage);
+      setPage(
+        subtab === "facts" && normalizedPage.total !== null
+          ? {
+              ...normalizedPage,
+              total: Math.max(0, normalizedPage.total - hiddenRowsOnPage),
+            }
+          : normalizedPage,
+      );
     } catch (err) {
+      if (requestId !== pageRequestId.current) return;
       setError(parseSemanticError(err));
       // Keep the last authoritative page visible behind the error state. A
       // failed read is not an empty result and must never erase rows that the
       // user may still need to inspect or retry.
     } finally {
-      setLoading(false);
+      if (requestId === pageRequestId.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     if (!isOpen) return;
     void loadPage();
-  }, [isOpen, subtab, cursor, filters, search, requestVersion]);
+  }, [
+    isOpen,
+    subtab,
+    cursor,
+    filters,
+    search,
+    requestVersion,
+    optimisticallyDeletedFactIds,
+  ]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -544,7 +718,9 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
       setRawEvidence(null);
       setEvidenceLoading(true);
       void invoke("memory_manager_get_fact_evidence", {
-        fact_id: activeFact.fact_id,
+        // Tauri exposes scalar command parameters in camelCase.  The old
+        // snake_case key is rejected before the command body runs.
+        factId: activeFact.fact_id,
         page: { ...request, cursor: null },
       })
         .then((result: unknown) => {
@@ -575,6 +751,7 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
   }, [activeFact?.fact_id]);
 
   const resetAndReload = () => {
+    setContextMenu(null);
     setCursor(null);
     setCursorHistory([]);
     setPage(null);
@@ -666,6 +843,7 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
     command: string,
     args: unknown,
     success: string,
+    onCommitted?: (undoToken: string | null) => ReadonlySet<string> | undefined,
   ) => {
     setMutating(true);
     try {
@@ -678,8 +856,12 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
         throw new Error("Invalid mutation receipt");
       const receipt = result.receipt;
       showNotice(success, false, stringValue(receipt.undo_token));
+      const hiddenFactIds = onCommitted?.(stringValue(receipt.undo_token));
       resetAndReload();
-      await loadPage();
+      await loadPage({
+        factIds: hiddenFactIds,
+        request: { ...request, cursor: null },
+      });
     } catch (err) {
       const parsed = parseSemanticError(err);
       const parsedConflict = normalizeConflict(err);
@@ -756,8 +938,9 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
 
   const deleteFacts = async () => {
     setConfirmDelete(false);
+    const ids = [...selectedFactIds];
     const expectedRevisions: Record<string, number> = {};
-    selectedFactIds.forEach((id) => {
+    ids.forEach((id) => {
       const revision = facts.find((fact) => fact.fact_id === id)?.revision;
       if (typeof revision === "number") expectedRevisions[id] = revision;
     });
@@ -765,20 +948,52 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
       "memory_manager_delete_facts",
       {
         request: {
-          fact_ids: selectedFactIds,
+          fact_ids: ids,
           expected_revisions: expectedRevisions,
         },
       },
-      `${selectedFactIds.length} Facts deleted; source Raw events retained`,
+      `${ids.length} Facts deleted; source Raw events retained`,
+      (undoToken) => {
+        const hidden = new Set([...optimisticallyDeletedFactIds, ...ids]);
+        setOptimisticallyDeletedFactIds(hidden);
+        setFacts((current) =>
+          current.filter((fact) => !ids.includes(fact.fact_id)),
+        );
+        setSelectedFactIds((current) =>
+          current.filter((factId) => !ids.includes(factId)),
+        );
+        if (activeFact && ids.includes(activeFact.fact_id)) {
+          setActiveFact(null);
+          setEvidence([]);
+          setEvidenceError(null);
+          setRawEvidence(null);
+        }
+        if (undoToken) {
+          setDeleteUndoIds((current) => ({ ...current, [undoToken]: ids }));
+        }
+        return hidden;
+      },
     );
   };
 
   const undo = async (token: string) => {
     try {
       await invoke("memory_manager_undo", { request: { undo_token: token } });
+      const restoredIds = deleteUndoIds[token] || [];
+      const visibleFactIds = new Set(optimisticallyDeletedFactIds);
+      restoredIds.forEach((factId) => visibleFactIds.delete(factId));
+      setOptimisticallyDeletedFactIds(visibleFactIds);
+      setDeleteUndoIds((current) => {
+        const next = { ...current };
+        delete next[token];
+        return next;
+      });
       showNotice("Undo completed");
       resetAndReload();
-      await loadPage();
+      await loadPage({
+        factIds: visibleFactIds,
+        request: { ...request, cursor: null },
+      });
     } catch (err) {
       showNotice(parseSemanticError(err).message || "Undo expired", true);
     }
@@ -817,7 +1032,8 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
   const hydrateRawEvidence = async (eventId: string) => {
     try {
       const result = await invoke("memory_manager_get_raw_event", {
-        event_id: eventId,
+        // Tauri exposes scalar command parameters in camelCase.
+        eventId,
       });
       if (!isRecord(result)) throw new Error("Invalid raw event response");
       const event = normalizeRawRow(result.event);
@@ -827,6 +1043,101 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
       showNotice(parseSemanticError(err).message, true);
     }
   };
+
+  const openFact = (fact: FactRow) => {
+    setActiveFact(fact);
+    setActiveSummary(null);
+    setContextMenu(null);
+  };
+
+  const openSummary = (summary: SummaryRow) => {
+    setActiveSummary(summary);
+    setActiveFact(null);
+    setContextMenu(null);
+  };
+
+  const openSemanticContextMenu = (
+    event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>,
+    kind: SemanticTab,
+    id: string,
+  ) => {
+    event.preventDefault();
+    const row =
+      kind === "facts"
+        ? facts.find((fact) => fact.fact_id === id)
+        : summaries.find((summary) => summary.summary_id === id);
+    if (!row) return;
+    if (kind === "facts") {
+      const fact = row as FactRow;
+      setSelectedFactIds([fact.fact_id]);
+      openFact(fact);
+    } else {
+      const summary = row as SummaryRow;
+      setSelectedSummaryIds([summary.summary_id]);
+      openSummary(summary);
+    }
+    const target = event.currentTarget;
+    const rect = target.getBoundingClientRect();
+    const mouse = event as React.MouseEvent<HTMLElement>;
+    setContextMenu({
+      x: "clientX" in mouse && mouse.clientX ? mouse.clientX : rect.left + 12,
+      y: "clientY" in mouse && mouse.clientY ? mouse.clientY : rect.bottom,
+      kind,
+      id,
+    });
+  };
+
+  const semanticContextActions = useMemo<ContextMenuAction[]>(() => {
+    if (!contextMenu) return [];
+    if (contextMenu.kind === "facts") {
+      const fact = facts.find((item) => item.fact_id === contextMenu.id);
+      if (!fact) return [];
+      return [
+        { label: "Open details", onSelect: () => openFact(fact) },
+        { label: "Edit fact", onSelect: () => openFact(fact) },
+        {
+          label: "Confirm fact",
+          disabled: fact.status !== "auto" || mutating,
+          onSelect: () => {
+            setSelectedFactIds([fact.fact_id]);
+            void confirmActiveFact();
+          },
+        },
+        {
+          label: "Delete fact",
+          danger: true,
+          disabled: mutating,
+          onSelect: () => {
+            setSelectedFactIds([fact.fact_id]);
+            setConfirmDelete(true);
+          },
+        },
+      ];
+    }
+    const summary = summaries.find(
+      (item) => item.summary_id === contextMenu.id,
+    );
+    if (!summary) return [];
+    return [
+      { label: "Open details", onSelect: () => openSummary(summary) },
+      {
+        label: "Retry summary",
+        disabled: !summaryRetryAllowed(summary) || mutating,
+        onSelect: () => void retrySummary(summary),
+      },
+      {
+        label: "View raw evidence",
+        onSelect: () => void hydrateRawEvidence(summary.event_id),
+      },
+    ];
+  }, [
+    contextMenu,
+    facts,
+    summaries,
+    mutating,
+    confirmActiveFact,
+    retrySummary,
+  ]);
 
   const resolveConflict = (resolution: FactConflict["resolution"]) => {
     if (resolution === "keep_current" && conflict) {
@@ -1100,9 +1411,18 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
               <button
                 type="button"
                 key={fact.fact_id}
-                onClick={() => {
-                  setActiveFact(fact);
-                  setActiveSummary(null);
+                aria-haspopup="menu"
+                onClick={() => openFact(fact)}
+                onContextMenu={(event) =>
+                  openSemanticContextMenu(event, "facts", fact.fact_id)
+                }
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "ContextMenu" ||
+                    (event.shiftKey && event.key === "F10")
+                  ) {
+                    openSemanticContextMenu(event, "facts", fact.fact_id);
+                  }
                 }}
                 className={`w-full text-left grid grid-cols-[28px_80px_1fr_1fr_1.2fr_70px_120px] gap-2 items-center px-3 py-2 border-b border-[#1c1e22] text-[11px] hover:bg-[#111214] ${activeFact?.fact_id === fact.fact_id ? "bg-[#1b1e24] border-l-2 border-l-[#e4f222]" : ""}`}
               >
@@ -1135,9 +1455,26 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
               <button
                 type="button"
                 key={summary.summary_id}
-                onClick={() => {
-                  setActiveSummary(summary);
-                  setActiveFact(null);
+                aria-haspopup="menu"
+                onClick={() => openSummary(summary)}
+                onContextMenu={(event) =>
+                  openSemanticContextMenu(
+                    event,
+                    "summaries",
+                    summary.summary_id,
+                  )
+                }
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "ContextMenu" ||
+                    (event.shiftKey && event.key === "F10")
+                  ) {
+                    openSemanticContextMenu(
+                      event,
+                      "summaries",
+                      summary.summary_id,
+                    );
+                  }
                 }}
                 className={`w-full text-left grid grid-cols-[28px_88px_120px_100px_1fr_100px] gap-2 items-center px-3 py-2 border-b border-[#1c1e22] text-[11px] hover:bg-[#111214] ${activeSummary?.summary_id === summary.summary_id ? "bg-[#1b1e24] border-l-2 border-l-[#e4f222]" : ""}`}
               >
@@ -1465,6 +1802,17 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
           )}
         </aside>
       </div>
+      {contextMenu && semanticContextActions.length > 0 && (
+        <MemoryContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          label={
+            contextMenu.kind === "facts" ? "Fact actions" : "Summary actions"
+          }
+          actions={semanticContextActions}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
       {confirmDelete && (
         <div
           role="dialog"
@@ -1626,6 +1974,15 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [activeItem, setActiveItem] = useState<MemoryItem | null>(null);
   const [lastAnchorIndex, setLastAnchorIndex] = useState<number | null>(null);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    id: string;
+  } | null>(null);
+  const [optimisticallyDeletedIds, setOptimisticallyDeletedIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const fetchRequestId = useRef(0);
 
   // ソート状態
   const [sortField, setSortField] = useState<SortField>("timestamp");
@@ -1655,7 +2012,10 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
     content: string;
   } | null>(null);
 
-  const fetchMemories = async () => {
+  const fetchMemories = async (
+    hiddenIds: ReadonlySet<string> = optimisticallyDeletedIds,
+  ) => {
+    const requestId = ++fetchRequestId.current;
     setLoading(true);
     try {
       // Tauri Native LanceDB を呼び出し (最新順で取得)
@@ -1693,18 +2053,24 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
           timestamp: stringValue(row.timestamp) || undefined,
         };
       });
-      setMemories(list);
-      if (list.length > 0 && selectedIds.length === 0 && !activeItem) {
-        setActiveItem(list[0]);
-        setSelectedIds([list[0].id]);
+      // A successful delete is reflected locally before LanceDB's next
+      // snapshot is observable. Keep the tombstone overlay while this read
+      // catches up so a stale snapshot cannot make the row reappear.
+      const visibleList = list.filter((memory) => !hiddenIds.has(memory.id));
+      if (requestId !== fetchRequestId.current) return;
+      setMemories(visibleList);
+      if (visibleList.length > 0 && selectedIds.length === 0 && !activeItem) {
+        setActiveItem(visibleList[0]);
+        setSelectedIds([visibleList[0].id]);
         setLastAnchorIndex(0);
-        populateEditForm(list[0]);
+        populateEditForm(visibleList[0]);
       }
     } catch (err) {
+      if (requestId !== fetchRequestId.current) return;
       console.error("Failed to fetch memories from LanceDB:", err);
       showNotice("メモリーの取得に失敗しました", "error");
     } finally {
-      setLoading(false);
+      if (requestId === fetchRequestId.current) setLoading(false);
     }
   };
 
@@ -1715,6 +2081,8 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
       setManagerTab("raw");
       setSelectedIds([]);
       setActiveItem(null);
+      setContextMenu(null);
+      setOptimisticallyDeletedIds(new Set());
       setLastAnchorIndex(null);
       setBlogResult(null);
       setIsCreatingNew(false);
@@ -1872,6 +2240,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
     index: number,
     e: React.MouseEvent,
   ) => {
+    setContextMenu(null);
     const isCtrl = e.ctrlKey || e.metaKey;
     const isShift = e.shiftKey;
 
@@ -1971,8 +2340,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   };
 
   // 単一 / 選択中アイテムの削除
-  const handleDeleteSelected = async () => {
-    const count = selectedIds.length;
+  const handleDeleteSelected = async (idsOverride?: string[]) => {
+    const idsToDelete = idsOverride ? [...idsOverride] : [...selectedIds];
+    const count = idsToDelete.length;
     if (count === 0) return;
 
     if (!confirm(`選択した ${count} 件のメモリーを完全に削除しますか？`)) {
@@ -1980,11 +2350,23 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
     }
 
     try {
-      await invoke("delete_lance_memories_bulk", { ids: selectedIds });
+      await invoke("delete_lance_memories_bulk", { ids: idsToDelete });
+      const nextHiddenIds = new Set([
+        ...optimisticallyDeletedIds,
+        ...idsToDelete,
+      ]);
+      setOptimisticallyDeletedIds(nextHiddenIds);
+      // Update the rendered snapshot immediately after the backend confirms
+      // the deletion. The follow-up read is still needed for total/count and
+      // to reconcile any rows changed by another window.
+      setMemories((current) =>
+        current.filter((memory) => !idsToDelete.includes(memory.id)),
+      );
       showNotice(`${count} 件のメモリーを LanceDB から削除しました`);
       setSelectedIds([]);
       setActiveItem(null);
-      await fetchMemories();
+      setContextMenu(null);
+      await fetchMemories(nextHiddenIds);
     } catch (e) {
       showNotice(`削除エラー: ${e}`, "error");
     }
@@ -2024,8 +2406,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   };
 
   // 選択メモリーからのブログ生成
-  const handleGenerateBlog = async () => {
-    if (selectedIds.length === 0) {
+  const handleGenerateBlog = async (idsOverride?: string[]) => {
+    const idsToGenerate = idsOverride ? [...idsOverride] : [...selectedIds];
+    if (idsToGenerate.length === 0) {
       showNotice("ブログを生成するメモリーを選択してください", "error");
       return;
     }
@@ -2037,7 +2420,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: selectedIds }),
+          body: JSON.stringify({ ids: idsToGenerate }),
         },
       );
       const data = await res.json();
@@ -2056,6 +2439,64 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
       setIsGeneratingBlog(false);
     }
   };
+
+  const openRawContextMenu = (
+    event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>,
+    item: MemoryItem,
+  ) => {
+    event.preventDefault();
+    // A context action always has an unambiguous target. Existing multi-row
+    // selection is kept only when the user right-clicks one of those rows.
+    if (!selectedIds.includes(item.id)) {
+      setSelectedIds([item.id]);
+    }
+    setActiveItem(item);
+    populateEditForm(item);
+    const target = event.currentTarget;
+    const rect = target.getBoundingClientRect();
+    const mouse = event as React.MouseEvent<HTMLElement>;
+    setContextMenu({
+      x: "clientX" in mouse && mouse.clientX ? mouse.clientX : rect.left + 12,
+      y: "clientY" in mouse && mouse.clientY ? mouse.clientY : rect.bottom,
+      id: item.id,
+    });
+  };
+
+  const rawContextActions = useMemo<ContextMenuAction[]>(() => {
+    if (!contextMenu) return [];
+    const item = memories.find((memory) => memory.id === contextMenu.id);
+    if (!item) return [];
+    return [
+      {
+        label: "Open details",
+        onSelect: () => {
+          setActiveItem(item);
+          populateEditForm(item);
+        },
+      },
+      {
+        label: "Edit memory",
+        onSelect: () => {
+          setActiveItem(item);
+          populateEditForm(item);
+        },
+      },
+      {
+        label: "Edit selected metadata",
+        disabled: selectedIds.length < 2,
+        onSelect: () => setSelectedIds((current) => [...current]),
+      },
+      {
+        label: "Generate blog",
+        onSelect: () => void handleGenerateBlog([item.id]),
+      },
+      {
+        label: "Delete memory",
+        danger: true,
+        onSelect: () => void handleDeleteSelected([item.id]),
+      },
+    ];
+  }, [contextMenu, memories, selectedIds.length]);
 
   const handleBackup = async () => {
     try {
@@ -2113,6 +2554,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   };
 
   const startCreateNew = () => {
+    setContextMenu(null);
     setIsCreatingNew(true);
     setActiveItem(null);
     setSelectedIds([]);
@@ -2245,7 +2687,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                 <span>New Memory</span>
               </button>
               <button
-                onClick={fetchMemories}
+                onClick={() => void fetchMemories()}
                 className="p-1.5 text-[#8a8f98] hover:text-white hover:bg-[#23252a] rounded-[6px] transition-colors"
                 title="データを再読込"
               >
@@ -2269,7 +2711,10 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
             <button
               type="button"
               aria-selected={managerTab === "raw"}
-              onClick={() => setManagerTab("raw")}
+              onClick={() => {
+                setContextMenu(null);
+                setManagerTab("raw");
+              }}
               className={`px-3 py-1 text-xs font-medium rounded ${managerTab === "raw" ? "bg-[#e4f222]/15 text-[#e4f222]" : "text-[#8a8f98] hover:text-white"}`}
             >
               Raw
@@ -2277,7 +2722,10 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
             <button
               type="button"
               aria-selected={managerTab === "semantic"}
-              onClick={() => setManagerTab("semantic")}
+              onClick={() => {
+                setContextMenu(null);
+                setManagerTab("semantic");
+              }}
               className={`px-3 py-1 text-xs font-medium rounded ${managerTab === "semantic" ? "bg-[#e4f222]/15 text-[#e4f222]" : "text-[#8a8f98] hover:text-white"}`}
             >
               Fact / Summary
@@ -2316,10 +2764,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                       0,
                       backfillProgress.total - backfillProgress.processed,
                     )}{" "}
-                  · queued {backfillProgress.queued} ·
-                  skipped {backfillProgress.skipped} · failed{" "}
-                  {backfillProgress.failed} · retries{" "}
-                  {backfillProgress.retry_count ?? 0}
+                  · queued {backfillProgress.queued} · skipped{" "}
+                  {backfillProgress.skipped} · failed {backfillProgress.failed}{" "}
+                  · retries {backfillProgress.retry_count ?? 0}
                   {backfillProgress.attempt_id && (
                     <> · attempt {backfillProgress.attempt_id}</>
                   )}
@@ -2327,8 +2774,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                 {backfillProgress.state !== "running" &&
                   backfillProgress.final_counts && (
                     <span className="truncate text-[#8a8f98]">
-                      Final rows: processed {backfillProgress.final_counts.processed} ·
-                      persisted {backfillProgress.final_counts.persisted} · skipped{" "}
+                      Final rows: processed{" "}
+                      {backfillProgress.final_counts.processed} · persisted{" "}
+                      {backfillProgress.final_counts.persisted} · skipped{" "}
                       {backfillProgress.final_counts.skipped} · failed{" "}
                       {backfillProgress.final_counts.failed} · remaining{" "}
                       {backfillProgress.final_counts.remaining}
@@ -2524,7 +2972,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         </span>
                         <button
                           type="button"
-                          onClick={fetchMemories}
+                          onClick={() => void fetchMemories()}
                           className="rounded border border-[#e4f222]/40 px-3 py-1.5 text-[11px] text-[#e4f222] hover:bg-[#e4f222]/10"
                         >
                           再試行
@@ -2544,6 +2992,21 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                           <div
                             key={m.id}
                             onClick={(e) => handleRowClick(m, index, e)}
+                            onContextMenu={(event) =>
+                              openRawContextMenu(event, m)
+                            }
+                            onKeyDown={(event) => {
+                              if (
+                                event.key === "ContextMenu" ||
+                                (event.shiftKey && event.key === "F10")
+                              ) {
+                                openRawContextMenu(event, m);
+                              }
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            aria-haspopup="menu"
+                            aria-label={`Memory ${m.key || m.id}`}
                             className={`grid grid-cols-[36px_140px_100px_100px_100px_1fr] items-center px-3 py-2 text-xs cursor-pointer select-none transition-colors ${
                               isActive
                                 ? "bg-[#1b1e24] border-l-2 border-l-[#e4f222]"
@@ -2720,7 +3183,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         </button>
 
                         <button
-                          onClick={handleDeleteSelected}
+                          onClick={() => void handleDeleteSelected()}
                           className="w-full py-2 linear-btn-ghost border-[#eb5757]/30 hover:border-[#eb5757] text-[#eb5757] flex items-center justify-center gap-1.5 text-xs font-medium"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -2729,7 +3192,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
 
                         {/* 🌟 選択したメモリーから note ブログ生成 */}
                         <button
-                          onClick={handleGenerateBlog}
+                          onClick={() => void handleGenerateBlog()}
                           disabled={isGeneratingBlog}
                           className="w-full py-2.5 linear-btn-primary flex items-center justify-center gap-2 text-xs font-semibold shadow-lg"
                         >
@@ -2866,7 +3329,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
 
                           {!isCreatingNew && activeItem && (
                             <button
-                              onClick={handleDeleteSelected}
+                              onClick={() => void handleDeleteSelected()}
                               className="p-2 linear-btn-ghost border-[#eb5757]/30 hover:border-[#eb5757] text-[#eb5757] rounded-[6px]"
                               title="このメモリーを削除"
                             >
@@ -2878,7 +3341,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         {/* 1件選択時でもブログ生成が可能 */}
                         {!isCreatingNew && activeItem && (
                           <button
-                            onClick={handleGenerateBlog}
+                            onClick={() => void handleGenerateBlog()}
                             disabled={isGeneratingBlog}
                             className="w-full py-2 linear-btn-ghost border-[#e4f222]/30 hover:border-[#e4f222] text-[#e4f222] flex items-center justify-center gap-1.5 text-xs font-medium"
                           >
@@ -2901,6 +3364,16 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                 </div>
               </div>
             </>
+          )}
+
+          {contextMenu && rawContextActions.length > 0 && (
+            <MemoryContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              label="Memory actions"
+              actions={rawContextActions}
+              onClose={() => setContextMenu(null)}
+            />
           )}
 
           {/* フッター */}

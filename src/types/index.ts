@@ -20,6 +20,13 @@ export interface AsrEvent {
   type: "asr";
   text: string;
   is_final: boolean;
+  /** Canonical source stream used by the native and WebSocket transports. */
+  stream?: string;
+  /** Native wake-word/prompt decision; transports must not re-derive it. */
+  is_prompt?: boolean;
+  latency_ms?: number | null;
+  /** Final events carry their durable identity; partials may be null/absent. */
+  event_id?: string | null;
 }
 
 export interface AsrEntry {
@@ -28,6 +35,17 @@ export interface AsrEntry {
   timestamp: string;
   isDiscord?: boolean;
   isPrompt?: boolean;
+  /** Native Whisper inference latency for this finalized utterance. */
+  latencyMs?: number | null;
+}
+
+/** A durable Fact derived from a live session utterance. */
+export interface FactEntry {
+  id: string;
+  text: string;
+  timestamp: string;
+  source?: string;
+  sourceEventId?: string;
 }
 
 export interface LevelMeterEvent {
@@ -636,6 +654,13 @@ export interface SetupStatus extends GemmaTermsMetadata {
   venv_present?: boolean;
   lock_present?: boolean;
   llama_server_present?: boolean;
+  /** Optional readiness diagnostics emitted by newer portable runtimes. */
+  dependency_ready?: boolean;
+  python_import_ready?: boolean;
+  tokenizer_ready?: boolean;
+  embedding_ready?: boolean;
+  asr_websocket_ready?: boolean;
+  diagnostics?: Record<string, unknown>;
   [key: string]: unknown;
 }
 

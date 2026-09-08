@@ -8,6 +8,7 @@ import { ResourceInfo } from '../../types';
 
 interface SidebarProps {
   sessionRunning: boolean;
+  sessionStarting?: boolean;
   onStartSession: () => void;
   onStopSession: () => void;
   onRestartWhisper: () => void;
@@ -39,6 +40,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({
   sessionRunning,
+  sessionStarting = false,
   onStartSession,
   onStopSession,
   onRestartWhisper,
@@ -85,6 +87,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* セッション操作ボタン */}
         <ActionButtons
           sessionRunning={sessionRunning}
+          sessionStarting={sessionStarting}
           onStart={onStartSession}
           onStop={onStopSession}
           onRestartWhisper={onRestartWhisper}

@@ -53,5 +53,24 @@ __pycache__/
 dist_release/
 skills/k0ta-writing-style/
 
+# Local build, review, and reproduction artifacts
+/_repro_startup_*/
+/runtime/
+/build_spec_report*.log
+/spec_report_cargo_test.log
+/release_build.log
+/debug.log
+/*_review_report.md
+/*_review_task_*.md
+/*_implementation_report.md
+/*_report_task_*.md
+setup-state.json
+src-tauri/src/memory_v2/SCRATCH_*.md
+
+# Downloaded release/runtime binaries are supplied outside the source tree.
+/uv.exe
+/src-tauri/resources/uv.exe
+src-tauri/resources/llama/
+
 
 

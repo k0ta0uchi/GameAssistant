@@ -53,6 +53,30 @@ fn strip_thought_artifacts(text: &str) -> String {
     cleaned.trim().to_string()
 }
 
+/// Remove API-key query values from transport errors before they reach logs
+/// or user-facing error strings.  The Gemini client now authenticates via a
+/// header, but keeping this guard makes the error path safe if a proxy or a
+/// future endpoint reintroduces a `?key=` URL.
+fn sanitize_transport_error(message: &str) -> String {
+    let mut sanitized = message.to_string();
+    for marker in ["?key=", "&key="] {
+        let mut search_from = 0usize;
+        while let Some(relative_start) = sanitized[search_from..].find(marker) {
+            let value_start = search_from + relative_start + marker.len();
+            let value_end = sanitized[value_start..]
+                .char_indices()
+                .find(|(_, character)| {
+                    matches!(*character, '&' | ')' | ' ' | '\"' | '\'' | '\n' | '\r')
+                })
+                .map(|(offset, _)| value_start + offset)
+                .unwrap_or(sanitized.len());
+            sanitized.replace_range(value_start..value_end, "[REDACTED]");
+            search_from = value_start + "[REDACTED]".len();
+        }
+    }
+    sanitized
+}
+
 pub struct AiClient {
     client: reqwest::Client,
 }
@@ -195,9 +219,14 @@ impl AiClient {
 
         for m_name in &model_candidates {
             for (idx, key) in raw_keys.iter().enumerate() {
+                // Keep credentials out of the request URL.  Besides being
+                // safer for proxies and tracing middleware, this prevents a
+                // reqwest transport error from echoing the API key via its
+                // `Display` implementation.  Gemini accepts the
+                // `x-goog-api-key` header for API-key authentication.
                 let url = format!(
-                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                    m_name, key
+                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+                    m_name
                 );
 
                 let budget_info = match options.thinking_budget {
@@ -214,7 +243,13 @@ impl AiClient {
                     ),
                 );
 
-                let res = self.client.post(&url).json(&body).send().await;
+                let res = self
+                    .client
+                    .post(&url)
+                    .header("x-goog-api-key", *key)
+                    .json(&body)
+                    .send()
+                    .await;
                 match res {
                     Ok(resp) => {
                         let status_code = resp.status();
@@ -281,14 +316,16 @@ impl AiClient {
                         }
                     }
                     Err(e) => {
+                        let safe_error = sanitize_transport_error(&e.to_string());
                         crate::logger::global_error(
                             "Gemini",
                             &format!(
                                 "HTTP request error on model='{}', key_index={}: {}",
-                                m_name, idx, e
+                                m_name, idx, safe_error
                             ),
                         );
-                        last_error = format!("HTTP request error ({}, {}): {}", m_name, idx, e);
+                        last_error =
+                            format!("HTTP request error ({}, {}): {}", m_name, idx, safe_error);
                     }
                 }
             }
@@ -358,5 +395,25 @@ impl AiClient {
             .to_string();
 
         Ok(text.trim().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_transport_error;
+
+    #[test]
+    fn transport_errors_redact_query_api_keys() {
+        let error =
+            "error sending request for url (https://example.test/path?key=secret-key&alt=1)";
+        let sanitized = sanitize_transport_error(error);
+        assert!(!sanitized.contains("secret-key"));
+        assert!(sanitized.contains("key=[REDACTED]"));
+    }
+
+    #[test]
+    fn transport_errors_without_query_keys_are_unchanged() {
+        let error = "connection reset by peer";
+        assert_eq!(sanitize_transport_error(error), error);
     }
 }

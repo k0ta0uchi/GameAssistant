@@ -1,3 +1,4 @@
+use crate::memory_v2::domain::SourceKind;
 use crate::memory_v2::policy::{Policy, PrivacyAdmission};
 use crate::memory_v2::repository::{
     summary_fact_is_repairable, CompatMemory, MemoryRepository, SummaryBatchInput,
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -311,7 +312,7 @@ fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     }
     #[cfg(windows)]
     {
-        return metadata.file_attributes() & WINDOWS_REPARSE_POINT != 0;
+        metadata.file_attributes() & WINDOWS_REPARSE_POINT != 0
     }
     #[cfg(not(windows))]
     {
@@ -1001,8 +1002,8 @@ async fn import_legacy_table_with_progress(
             }
         }
         if !pending_items.is_empty() {
-            let items: Vec<MemoryItem> = pending_items.drain(..).collect();
-            let vectors: Vec<Option<Vec<f32>>> = pending_vectors.drain(..).collect();
+            let items: Vec<MemoryItem> = std::mem::take(&mut pending_items);
+            let vectors: Vec<Option<Vec<f32>>> = std::mem::take(&mut pending_vectors);
             for vector in vectors.iter().flatten() {
                 validate_vector(vector)?;
             }
@@ -1146,7 +1147,7 @@ pub async fn get_memory_by_id(root_dir: &Path, id: &str) -> Result<Option<Stored
         .await
         .map_err(|e| format!("Stream batch error: {}", e))?
     {
-        for row in 0..batch.num_rows() {
+        if let Some(row) = (0..batch.num_rows()).next() {
             return Ok(Some(batch_row_to_stored(&batch, row)?));
         }
     }
@@ -1161,7 +1162,11 @@ pub async fn get_memory_by_event_id(
     root_dir: &Path,
     event_id: &str,
 ) -> Result<Option<StoredMemory>, String> {
-    if let Some(row) = get_memory_by_id(root_dir, event_id).await? {
+    // The compatibility table is populated asynchronously after the
+    // authoritative raw journal commit.  A projection create/query race must
+    // not make a just-persisted ASR event look missing; fall through to the
+    // journal-backed resolver on any projection error.
+    if let Ok(Some(row)) = get_memory_by_id(root_dir, event_id).await {
         return Ok(Some(row));
     }
     let canonical = MemoryRepository::canonical_event_id(event_id);
@@ -1169,10 +1174,57 @@ pub async fn get_memory_by_event_id(
     // compatibility projection.  Do not short-circuit merely because the
     // requested value already parses as a UUID; scan the projection to bridge
     // that representation as well.
-    Ok(list_stored_memories(root_dir)
+    if let Ok(rows) = list_stored_memories(root_dir).await {
+        if let Some(row) = rows
+            .into_iter()
+            .find(|row| MemoryRepository::canonical_event_id(&row.id) == canonical)
+        {
+            return Ok(Some(row));
+        }
+    }
+
+    // The compatibility table is intentionally repairable and may be
+    // temporarily unavailable while a projection writer holds its lock.  The
+    // memory-v2 raw event and summary status remain authoritative, so resolve
+    // the event directly instead of making a projection failure hide Fact
+    // processing.
+    let repository = MemoryRepository::open(root_dir).await?;
+    let Some(raw) = repository
+        .read_raw_events()
         .await?
         .into_iter()
-        .find(|row| MemoryRepository::canonical_event_id(&row.id) == canonical))
+        .find(|event| event.event_id().to_string() == canonical)
+    else {
+        return Ok(None);
+    };
+    let (memory_type, source) = match raw.source_kind() {
+        SourceKind::Microphone => ("user_speech", "microphone"),
+        SourceKind::Discord => ("discord_speech", "discord"),
+        SourceKind::Twitch => ("twitch_chat", "twitch"),
+        SourceKind::Manual => ("manual", "manual"),
+        SourceKind::System => ("system", "system"),
+    };
+    let statuses = repository.read_summary_statuses()?;
+    let status = statuses.get(&canonical);
+    let summary = repository
+        .read_facts()
+        .await?
+        .into_iter()
+        .filter(|fact| fact.source_event_id().to_string() == canonical && fact.is_summary_fact())
+        .max_by_key(|fact| fact.revision());
+    Ok(Some(StoredMemory {
+        id: event_id.to_string(),
+        document: raw.content().as_str().to_string(),
+        memory_type: memory_type.to_string(),
+        source: source.to_string(),
+        timestamp: raw.occurred_at().to_string(),
+        user_id: None,
+        summary: summary.as_ref().map(|fact| fact.value().to_string()),
+        summary_status: status.map(|value| value.status.clone()),
+        summary_model: status.and_then(|value| value.model_id.clone()),
+        summary_prompt_version: status.and_then(|value| value.prompt_version.clone()),
+        vector_source: None,
+    }))
 }
 
 pub async fn list_memories(
@@ -1448,6 +1500,111 @@ pub async fn insert_memory_batch_nullable(
     insert_on_table(&table, items, vectors, legacy, true).await
 }
 
+/// Persist live rows at the authoritative memory-v2 boundary and return the
+/// durable identity of every supplied row.  The historical LanceDB table is a
+/// best-effort compatibility projection that callers schedule separately via
+/// [`project_compatibility_rows`]; keeping it off this path means a live ASR
+/// event never waits behind a large Process-all/backfill projection and its
+/// raw write cannot be blocked by the projection table being busy.
+///
+/// The authoritative operation is idempotent: retrying the same event ID is a
+/// durable no-op rather than a duplicate raw row, so the returned count is the
+/// number of rows the caller may schedule summary work for.
+pub async fn insert_memory_batch_nullable_authoritative(
+    root_dir: &Path,
+    items: Vec<MemoryItem>,
+    vectors: Option<Vec<Option<Vec<f32>>>>,
+) -> Result<usize, String> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let item_count = items.len();
+    let vectors = vectors.unwrap_or_else(|| vec![None; items.len()]);
+    if vectors.len() != items.len() {
+        return Err(format!(
+            "Vector count mismatch: expected {}, got {}",
+            items.len(),
+            vectors.len()
+        ));
+    }
+    for vector in vectors.iter().flatten() {
+        validate_vector(vector)?;
+    }
+
+    // The repository owns the durable raw event and manifest transaction.
+    // Do not move this write behind the compatibility projection.
+    let repository = MemoryRepository::open(root_dir).await?;
+    for (item, vector) in items.iter().zip(vectors.iter().cloned()) {
+        repository
+            .append_compat_event(CompatMemory {
+                id: item.id.clone(),
+                memory_type: item.memory_type.clone(),
+                source: item.source.clone(),
+                timestamp: item.timestamp.clone(),
+                document: item.document.clone(),
+            })
+            .await?;
+        if matches!(
+            summary_admission(&item.memory_type, &item.document),
+            SummaryAdmission::Eligible
+        ) {
+            repository
+                .append_summary_status(
+                    &item.id,
+                    SUMMARY_STATUS_PENDING,
+                    Some(SUMMARY_MODEL_ID),
+                    Some(SUMMARY_PROMPT_VERSION),
+                )
+                .await?;
+        }
+        if let Some(vector) = vector {
+            repository
+                .put_embedding(&item.id, vector, VECTOR_SOURCE_DOCUMENT)
+                .await?;
+        }
+    }
+    Ok(item_count)
+}
+
+/// Serialize detached compatibility projections so concurrent live events and
+/// a large backfill projection cannot race LanceDB table commits with each
+/// other.  The durable journal write is never held behind this lock.
+static COMPATIBILITY_PROJECTION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn compatibility_projection_lock() -> &'static tokio::sync::Mutex<()> {
+    COMPATIBILITY_PROJECTION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Best-effort write of already-durable rows into the legacy LanceDB
+/// compatibility table.  Callers run this detached from the live ASR path; a
+/// projection failure must be logged but never rolls back the durable raw
+/// event or removes the row from summary curation.
+pub async fn project_compatibility_rows(
+    root_dir: &Path,
+    items: Vec<MemoryItem>,
+    vectors: Option<Vec<Option<Vec<f32>>>>,
+) -> Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let vectors = vectors.unwrap_or_else(|| vec![None; items.len()]);
+    if vectors.len() != items.len() {
+        return Err(format!(
+            "Vector count mismatch: expected {}, got {}",
+            items.len(),
+            vectors.len()
+        ));
+    }
+    for vector in vectors.iter().flatten() {
+        validate_vector(vector)?;
+    }
+    let _projection_guard = compatibility_projection_lock().lock().await;
+    let db = get_or_create_db(root_dir).await?;
+    let table = get_or_create_memories_table(&db, root_dir).await?;
+    insert_on_table(&table, items, vectors, false, true).await?;
+    Ok(())
+}
+
 async fn existing_ids(table: &Table, ids: &[String]) -> Result<HashSet<String>, String> {
     if ids.is_empty() {
         return Ok(HashSet::new());
@@ -1646,7 +1803,7 @@ pub async fn apply_summary(
     if let Some(ref v) = summary_vector {
         validate_vector(v).map_err(|error| format!("Invalid summary vector: {}", error))?;
     }
-    let existing = get_memory_by_id(root_dir, id).await?;
+    let existing = get_memory_by_event_id(root_dir, id).await?;
     let Some(existing) = existing else {
         return Ok(false);
     };
@@ -1656,9 +1813,18 @@ pub async fn apply_summary(
         return Ok(false);
     }
     if existing.summary_status.as_deref() == Some(SUMMARY_STATUS_COMPLETED) {
-        // A completed edit is authoritative.  Duplicate retries are
-        // successful no-ops and must preserve its text and vector.
-        return Ok(true);
+        // A durable Fact makes this a duplicate retry, not a newly-created
+        // result.  Return false so the live caller does not emit a second UI
+        // notification.  A completed compatibility marker without its Fact
+        // is a partial commit; let the repository repair it below.
+        let canonical_id = MemoryRepository::canonical_event_id(id);
+        let repository = MemoryRepository::open(root_dir).await?;
+        let has_durable_fact = repository.read_facts().await?.iter().any(|fact| {
+            fact.is_summary_fact() && fact.source_event_id().to_string() == canonical_id
+        });
+        if has_durable_fact {
+            return Ok(false);
+        }
     }
     if existing.summary_status.as_deref() != Some(SUMMARY_STATUS_PENDING) {
         return Ok(false);
@@ -1688,7 +1854,7 @@ pub async fn apply_summary(
 }
 
 async fn mark_summary_status(root_dir: &Path, id: &str, next_status: &str) -> Result<bool, String> {
-    let existing = get_memory_by_id(root_dir, id).await?;
+    let existing = get_memory_by_event_id(root_dir, id).await?;
     let Some(existing) = existing else {
         return Ok(false);
     };
@@ -1741,7 +1907,7 @@ async fn mark_summary_status(root_dir: &Path, id: &str, next_status: &str) -> Re
 /// and its document embedding remain untouched; only the summary projection
 /// is moved back to pending and the intent is journaled.
 pub async fn retry_summary(root_dir: &Path, id: &str) -> Result<bool, String> {
-    let existing = get_memory_by_id(root_dir, id).await?;
+    let existing = get_memory_by_event_id(root_dir, id).await?;
     let Some(existing) = existing else {
         return Ok(false);
     };
@@ -1809,7 +1975,7 @@ pub async fn retry_summary(root_dir: &Path, id: &str) -> Result<bool, String> {
 /// a durable Fact and durable terminal outcomes are authoritative and are left
 /// untouched; pending rows remain recoverable after a crash.
 pub async fn queue_summary_backfill(root_dir: &Path, id: &str) -> Result<bool, String> {
-    let existing = get_memory_by_id(root_dir, id).await?;
+    let existing = get_memory_by_event_id(root_dir, id).await?;
     let Some(existing) = existing else {
         return Ok(false);
     };
@@ -2514,7 +2680,8 @@ pub async fn mark_summary_error(root_dir: &Path, id: &str) -> Result<bool, Strin
     mark_summary_status(root_dir, id, SUMMARY_STATUS_ERROR).await
 }
 
-/// Startup reprocessing source: only pending rows, idempotent per event ID.
+/// Memory Manager reprocessing source: only pending rows, idempotent per event
+/// ID. The application never invokes this automatically during session start.
 pub async fn list_pending_summaries(
     root_dir: &Path,
     limit: usize,
@@ -2522,34 +2689,100 @@ pub async fn list_pending_summaries(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let db = get_or_create_db(root_dir).await?;
-    let table = get_or_create_memories_table(&db, root_dir).await?;
-    let mut stream = table
-        .query()
-        .only_if(format!("summary_status = '{}'", SUMMARY_STATUS_PENDING))
-        .execute()
-        .await
-        .map_err(|e| format!("Pending query error: {}", e))?;
     let mut rows = Vec::new();
-    while let Some(batch) = stream
-        .try_next()
-        .await
-        .map_err(|e| format!("Stream batch error: {}", e))?
-    {
-        for r in 0..batch.num_rows() {
-            let row = batch_row_to_stored(&batch, r)?;
-            if summary_admission(&row.memory_type, &row.document) != SummaryAdmission::Eligible {
-                continue;
+    // The compatibility projection is an optimization for old clients.  It
+    // can be empty while a journal replay/materializer is recovering, so a
+    // projection error must not hide authoritative pending raw events.
+    if let Ok(db) = get_or_create_db(root_dir).await {
+        if let Ok(table) = get_or_create_memories_table(&db, root_dir).await {
+            if let Ok(mut stream) = table
+                .query()
+                .only_if(format!("summary_status = '{}'", SUMMARY_STATUS_PENDING))
+                .execute()
+                .await
+            {
+                while let Ok(Some(batch)) = stream.try_next().await {
+                    for r in 0..batch.num_rows() {
+                        let row = batch_row_to_stored(&batch, r)?;
+                        if summary_admission(&row.memory_type, &row.document)
+                            != SummaryAdmission::Eligible
+                        {
+                            continue;
+                        }
+                        rows.push(row);
+                        if rows.len() >= limit {
+                            break;
+                        }
+                    }
+                    if rows.len() >= limit {
+                        break;
+                    }
+                }
             }
-            rows.push(row);
-            if rows.len() >= limit {
-                break;
-            }
-        }
-        if rows.len() >= limit {
-            break;
         }
     }
+
+    // Reconcile the projection with memory-v2.  This both removes stale
+    // pending markers and fills rows whose projection has not been created.
+    let authoritative = MemoryRepository::open(root_dir).await?;
+    let raw_events = authoritative.read_raw_events().await?;
+    let statuses = authoritative.read_summary_statuses()?;
+    let facts = authoritative.read_facts().await?;
+    let mut pending_ids = HashSet::new();
+    for event in raw_events {
+        let canonical_id = event.event_id().to_string();
+        let status = statuses.get(&canonical_id);
+        if status.map(|value| value.status.as_str()) != Some(SUMMARY_STATUS_PENDING)
+            || !matches!(
+                event.source_kind(),
+                SourceKind::Microphone | SourceKind::Discord
+            )
+            || summary_admission(
+                if event.source_kind() == SourceKind::Microphone {
+                    "user_speech"
+                } else {
+                    "discord_speech"
+                },
+                event.content().as_str(),
+            ) != SummaryAdmission::Eligible
+        {
+            continue;
+        }
+        pending_ids.insert(canonical_id.clone());
+        let already_present = rows
+            .iter()
+            .any(|row| MemoryRepository::canonical_event_id(&row.id) == canonical_id);
+        if !already_present {
+            let summary = facts
+                .iter()
+                .filter(|fact| {
+                    fact.is_summary_fact() && fact.source_event_id().to_string() == canonical_id
+                })
+                .max_by_key(|fact| fact.revision())
+                .map(|fact| fact.value().to_string());
+            rows.push(StoredMemory {
+                id: canonical_id.clone(),
+                document: event.content().as_str().to_string(),
+                memory_type: if event.source_kind() == SourceKind::Microphone {
+                    "user_speech".to_string()
+                } else {
+                    "discord_speech".to_string()
+                },
+                source: event.source().to_string(),
+                timestamp: event.occurred_at().to_string(),
+                user_id: None,
+                summary,
+                summary_status: Some(SUMMARY_STATUS_PENDING.to_string()),
+                summary_model: status.and_then(|value| value.model_id.clone()),
+                summary_prompt_version: status.and_then(|value| value.prompt_version.clone()),
+                vector_source: None,
+            });
+        }
+    }
+    rows.retain(|row| {
+        pending_ids.contains(&MemoryRepository::canonical_event_id(&row.id))
+            || !statuses.contains_key(&MemoryRepository::canonical_event_id(&row.id))
+    });
     // Deterministic order for restart reprocessing and tests.
     rows.sort_by(|a, b| a.id.cmp(&b.id));
     rows.truncate(limit);
@@ -2942,6 +3175,92 @@ mod tests {
             timestamp: "2026-09-02T12:00:00+09:00".to_string(),
             user_id: Some("tester".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn authoritative_raw_write_returns_before_the_compatibility_projection() {
+        let root = unique_test_root("authoritative-split-projection");
+        let live_item = item("proj-1", "user_speech", "ユーザーは猫が好きです。");
+
+        // The authoritative insert must not depend on the legacy table; its
+        // count is the number of rows the caller may schedule summaries for.
+        let count = insert_memory_batch_nullable_authoritative(
+            &root,
+            vec![live_item.clone()],
+            Some(vec![None]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+
+        // The raw event is durable in memory-v2 immediately.
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        let canonical = MemoryRepository::canonical_event_id("proj-1");
+        assert!(repository
+            .read_raw_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.event_id().to_string() == canonical));
+
+        // The compatibility projection is a separate, best-effort step.
+        project_compatibility_rows(&root, vec![live_item], Some(vec![None]))
+            .await
+            .unwrap();
+        let projected = get_memory_by_event_id(&root, "proj-1")
+            .await
+            .unwrap()
+            .expect("projected row must be readable");
+        assert_eq!(projected.document, "ユーザーは猫が好きです。");
+
+        // Retrying the authoritative insert stays an idempotent no-op.
+        let retry = insert_memory_batch_nullable_authoritative(
+            &root,
+            vec![item("proj-1", "user_speech", "ユーザーは猫が好きです。")],
+            Some(vec![None]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry, 1);
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        assert_eq!(repository.read_raw_events().await.unwrap().len(), 1);
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn authoritative_raw_event_is_resolvable_without_legacy_projection() {
+        let root = unique_test_root("authoritative-fallback");
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "raw-only-event".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-09-07T12:00:00Z".into(),
+                document: "ユーザーは猫が好きです。".into(),
+            })
+            .await
+            .unwrap();
+        repository
+            .append_summary_status(
+                "raw-only-event",
+                SUMMARY_STATUS_PENDING,
+                Some(SUMMARY_MODEL_ID),
+                Some(SUMMARY_PROMPT_VERSION),
+            )
+            .await
+            .unwrap();
+
+        let row = get_memory_by_event_id(&root, "raw-only-event")
+            .await
+            .unwrap()
+            .expect("raw event should be recoverable from memory-v2");
+        assert_eq!(row.memory_type, "user_speech");
+        assert_eq!(row.document, "ユーザーは猫が好きです。");
+        assert_eq!(row.summary_status.as_deref(), Some(SUMMARY_STATUS_PENDING));
+        assert!(row.summary.is_none());
+        cleanup(&root);
     }
 
     /// 旧バージョン (v1) スキーマの memories テーブルを 1 行付きで用意する。
@@ -3819,8 +4138,18 @@ mod tests {
         .await
         .unwrap();
 
-        for _ in 0..2 {
-            apply_summary(
+        assert!(apply_summary(
+            &root,
+            "idem-1",
+            "冪等な要約",
+            "model",
+            "v2",
+            Some(sample_vector(3.0)),
+        )
+        .await
+        .unwrap());
+        assert!(
+            !apply_summary(
                 &root,
                 "idem-1",
                 "冪等な要約",
@@ -3829,8 +4158,9 @@ mod tests {
                 Some(sample_vector(3.0)),
             )
             .await
-            .unwrap();
-        }
+            .unwrap(),
+            "a duplicate durable Fact must not be reported as a newly-created result"
+        );
 
         let list = list_memories(&root, None, None).await.unwrap();
         assert_eq!(list.total, 1, "re-applying must not duplicate rows");
@@ -3880,6 +4210,41 @@ mod tests {
         // limit が効くこと
         let limited = list_pending_summaries(&root, 1).await.unwrap();
         assert_eq!(limited.len(), 1);
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn pending_summaries_include_authoritative_raw_rows_without_projection() {
+        let root = unique_test_root("pending-raw-only");
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        repository
+            .append_compat_event(CompatMemory {
+                id: "raw-pending".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-09-07T12:00:00Z".into(),
+                document: "ユーザーは猫が好きです。".into(),
+            })
+            .await
+            .unwrap();
+        repository
+            .append_summary_status(
+                "raw-pending",
+                SUMMARY_STATUS_PENDING,
+                Some(SUMMARY_MODEL_ID),
+                Some(SUMMARY_PROMPT_VERSION),
+            )
+            .await
+            .unwrap();
+
+        let pending = list_pending_summaries(&root, 10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].id,
+            MemoryRepository::canonical_event_id("raw-pending")
+        );
+        assert_eq!(pending[0].document, "ユーザーは猫が好きです。");
 
         cleanup(&root);
     }

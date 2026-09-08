@@ -2,13 +2,14 @@ import React from 'react';
 import { StatusBadges } from './StatusBadges';
 import { GeminiCard } from './GeminiCard';
 import { AsrCard, AsrData } from './AsrCard';
-import { SystemStatus, AsrEntry } from '../../types';
+import { SystemStatus, AsrEntry, FactEntry } from '../../types';
 
 interface MainDashboardProps {
   status: SystemStatus;
   geminiResponse: string;
   currentAsr: AsrData | string;
   asrHistory: AsrEntry[] | string[];
+  factHistory: FactEntry[];
   commentaryProgress: number;
   commentaryRemaining: number;
 }
@@ -18,6 +19,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
   geminiResponse,
   currentAsr,
   asrHistory,
+  factHistory,
   commentaryProgress,
   commentaryRemaining,
 }) => {
@@ -37,6 +39,7 @@ export const MainDashboard: React.FC<MainDashboardProps> = ({
         <AsrCard
           currentAsr={currentAsr}
           asrHistory={asrHistory}
+          factHistory={factHistory}
           commentaryProgress={commentaryProgress}
           commentaryRemaining={commentaryRemaining}
         />

@@ -621,7 +621,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   Wake Word Engine
                 </label>
                 <select
-                  value={String(settings.wake_word_engine || "whisper_vad")}
+                  value="whisper_vad"
                   onChange={(e) =>
                     onUpdateSetting("wake_word_engine", e.target.value)
                   }
@@ -633,13 +633,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   >
                     Whisper VAD (無音検出)
                   </option>
-                  <option
-                    value="openwakeword"
-                    className="bg-[#161718] text-[#d0d6e0]"
-                  >
-                    openWakeWord (ねえぐり - neeguri.onnx)
-                  </option>
                 </select>
+                <span className="text-[10px] text-[#62666d]">
+                  openWakeWordは現在未実装のため、Whisper VADを使用します。
+                </span>
               </div>
 
               {/* Whisper VAD Wake Words 設定 (カンマ区切り編集) */}
@@ -667,36 +664,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <span className="text-[10px] text-[#62666d]">
                   Whisper VADモードで呼びかけとして検知する単語をカンマ（,
                   または 、）区切りで追加・編集できます。
-                </span>
-              </div>
-
-              {/* Wake Word Threshold スライダー */}
-              <div className="flex flex-col gap-1.5 bg-[#0f1011] p-3 rounded-[6px] border border-[#23252a]">
-                <div className="flex justify-between font-mono">
-                  <span className="text-[#8a8f98]">
-                    Wake Word Detection Threshold
-                  </span>
-                  <span className="text-[#e4f222] font-semibold">
-                    {Number(settings.wake_word_threshold ?? 0.25).toFixed(2)}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0.05"
-                  max="0.95"
-                  step="0.01"
-                  value={Number(settings.wake_word_threshold ?? 0.25)}
-                  onChange={(e) =>
-                    onUpdateSetting(
-                      "wake_word_threshold",
-                      parseFloat(e.target.value),
-                    )
-                  }
-                  className="w-full accent-[#e4f222] cursor-pointer"
-                />
-                <span className="text-[10px] text-[#62666d]">
-                  低い値ほど敏感に検知し、高い値ほど誤検知を防ぎます（推奨: 0.20
-                  〜 0.35）
                 </span>
               </div>
 
@@ -1380,7 +1347,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
                 <input
                   type="checkbox"
-                  checked={Boolean(settings.create_blog_post)}
+                  // New/legacy portable installs may not have this key yet;
+                  // automatic blog generation is enabled by default and an
+                  // explicit false remains the opt-out.
+                  checked={settings.create_blog_post !== false}
                   onChange={(e) =>
                     onUpdateSetting("create_blog_post", e.target.checked)
                   }

@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
@@ -106,6 +106,12 @@ const SUMMARY_REASON_CODES: [&str; 34] = [
 // that could otherwise create duplicate Fact or embedding rows on replay.
 static MATERIALIZE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 static SUMMARY_BATCH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+// Journal append + materialization + manifest publication form one logical
+// single-writer operation inside the application.  The OS file lock still
+// protects us from another process, but without this gate concurrent tasks in
+// this process can repeatedly reacquire the manifest lock and starve a live
+// event while startup backfill is running.
+static JOURNAL_WRITE_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 fn materialize_lock() -> &'static tokio::sync::Mutex<()> {
     MATERIALIZE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -113,6 +119,10 @@ fn materialize_lock() -> &'static tokio::sync::Mutex<()> {
 
 fn summary_batch_lock() -> &'static tokio::sync::Mutex<()> {
     SUMMARY_BATCH_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn journal_write_lock() -> &'static tokio::sync::Mutex<()> {
+    JOURNAL_WRITE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 pub type StoreResult<T> = Result<T, String>;
@@ -345,12 +355,81 @@ pub struct MemoryRepository {
     journal: Journal,
 }
 
+/// Share one reconciled repository per runtime root.  The first `open` on a
+/// large journal scans every line to build the bounded recovery index, and a
+/// live session would otherwise repeat that multi-hundred-megabyte scan for
+/// every finalized utterance and every summary status transition.  The cached
+/// instance keeps the journal recovery caches warm; those caches key on file
+/// length/mtime and self-invalidate, so an out-of-band writer can never be
+/// hidden by this map, and the OS file lock still serializes cross-process
+/// access.  Durability semantics are unchanged: every write still appends to
+/// the journal, materializes, and publishes the manifest under the same
+/// in-process writer gate.
+static SHARED_REPOSITORIES: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<MemoryRepository>>>> =
+    OnceLock::new();
+
+/// Upper bound on simultaneously cached runtime roots.  Production uses one
+/// root; the bound only exists so a process that touches many roots (tests,
+/// tooling) cannot accumulate unbounded open stores.
+const SHARED_REPOSITORY_LIMIT: usize = 8;
+
+fn shared_repositories() -> &'static tokio::sync::Mutex<HashMap<PathBuf, Arc<MemoryRepository>>> {
+    SHARED_REPOSITORIES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
+}
+
+fn prune_shared_repositories(repositories: &mut HashMap<PathBuf, Arc<MemoryRepository>>) {
+    if repositories.len() < SHARED_REPOSITORY_LIMIT {
+        return;
+    }
+    // Prefer evicting stores whose journal has disappeared (deleted test
+    // roots); fall back to removing an arbitrary entry when everything is
+    // still intact.
+    repositories.retain(|_, repository| repository.store_intact());
+    while repositories.len() >= SHARED_REPOSITORY_LIMIT {
+        let Some(evict) = repositories.keys().next().cloned() else {
+            return;
+        };
+        repositories.remove(&evict);
+    }
+}
+
 impl MemoryRepository {
     /// Open the EXE-adjacent memory-v2 stores and reconcile the journal before
     /// accepting new writes.  No user-profile or current-directory fallback is
     /// used; callers must provide the already resolved runtime root.
+    ///
+    /// Repeated opens for the same root share one reconciled instance so a
+    /// live event does not rescan a large journal; see [`SHARED_REPOSITORIES`].
     pub async fn open(root_dir: impl AsRef<Path>) -> StoreResult<Self> {
         let root_dir = root_dir.as_ref().to_path_buf();
+        {
+            let repositories = shared_repositories().lock().await;
+            if let Some(shared) = repositories.get(&root_dir) {
+                if shared.store_intact() {
+                    // The clone shares the journal recovery caches; every
+                    // write through it keeps them incrementally current.
+                    return Ok(shared.as_ref().clone());
+                }
+            }
+        }
+        let repository = Self::open_and_reconcile(&root_dir).await?;
+        let mut repositories = shared_repositories().lock().await;
+        prune_shared_repositories(&mut repositories);
+        let shared = repositories
+            .entry(root_dir)
+            .or_insert_with(|| Arc::new(repository));
+        Ok(shared.as_ref().clone())
+    }
+
+    /// Cheap sanity check for a cached instance: the durable journal must
+    /// still exist.  A removed store (test cleanup, manual deletion) must
+    /// reopen from scratch instead of appending into a deleted path.
+    fn store_intact(&self) -> bool {
+        self.paths.journal().is_file()
+    }
+
+    async fn open_and_reconcile(root_dir: &Path) -> StoreResult<Self> {
+        let root_dir = root_dir.to_path_buf();
         let paths = MemoryPaths::from_runtime_root(&root_dir).map_err(memory_error)?;
         for path in [
             paths.memory_root(),
@@ -367,6 +446,11 @@ impl MemoryRepository {
 
         let journal = Journal::from_paths(&paths).map_err(|error| error.to_string())?;
         let repository = Self { paths, journal };
+        // Reconciliation may publish a new manifest, so keep it in the same
+        // in-process writer order as subsequent journal mutations.  Include
+        // table creation in the gate as well: LanceDB table initialization can
+        // otherwise race a large startup projection with a live raw write.
+        let _write_guard = journal_write_lock().lock().await;
         repository.ensure_tables().await?;
 
         let journal_size = std::fs::metadata(repository.paths.journal())
@@ -1028,9 +1112,9 @@ impl MemoryRepository {
             }
             if is_should_store_false(input)
                 && input.status == "skipped"
-                && !durable_statuses
+                && durable_statuses
                     .get(&Self::canonical_event_id(&input.entity_id))
-                    .is_some_and(|status| status.status == "deleted")
+                    .is_none_or(|status| status.status != "deleted")
             {
                 if let Some(prior) = existing_facts
                     .iter()
@@ -1108,7 +1192,7 @@ impl MemoryRepository {
     /// domain deserializer so malformed storage fails closed instead of being
     /// silently projected to the UI.
     pub async fn read_raw_events(&self) -> StoreResult<Vec<RawEvent>> {
-        let table = open_table(&self.paths.raw_events().to_path_buf(), RAW_TABLE).await?;
+        let table = open_table(self.paths.raw_events(), RAW_TABLE).await?;
         let mut stream = table.query().execute().await.map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
         while let Some(batch) = stream.try_next().await.map_err(|e| e.to_string())? {
@@ -1134,7 +1218,7 @@ impl MemoryRepository {
 
     /// Read authoritative facts with strict domain validation.
     pub async fn read_facts(&self) -> StoreResult<Vec<Fact>> {
-        let table = open_table(&self.paths.facts().to_path_buf(), FACTS_TABLE).await?;
+        let table = open_table(self.paths.facts(), FACTS_TABLE).await?;
         let mut stream = table.query().execute().await.map_err(|e| e.to_string())?;
         let mut rows = Vec::new();
         while let Some(batch) = stream.try_next().await.map_err(|e| e.to_string())? {
@@ -1381,6 +1465,7 @@ impl MemoryRepository {
     }
 
     async fn commit_operation(&self, envelope: OperationEnvelope) -> StoreResult<bool> {
+        let _write_guard = journal_write_lock().lock().await;
         let journal = self.journal.clone();
         let report = journal.recover().map_err(|error| error.to_string())?;
         if envelope.kind() == OperationKind::RawEvent {
@@ -1422,7 +1507,7 @@ impl MemoryRepository {
             .into_iter()
             .find(|record| record.operation_id() == envelope.operation_id())
         {
-            self.apply_record(&record, false).await?;
+            self.apply_record(record, false).await?;
             self.publish_manifest(&journal)?;
             return Ok(false);
         }
@@ -1471,7 +1556,7 @@ impl MemoryRepository {
             .into_iter()
             .find(|record| record.operation_id() == envelope.operation_id())
         {
-            self.apply_record(&record, true).await?;
+            self.apply_record(record, true).await?;
         }
         self.publish_manifest(&self.journal)?;
         Ok(!already_present)
@@ -1485,6 +1570,7 @@ impl MemoryRepository {
         if envelopes.is_empty() {
             return Ok(0);
         }
+        let _write_guard = journal_write_lock().lock().await;
         let journal = self.journal.clone();
         let mut pending = Vec::new();
         let mut apply_envelopes = Vec::new();
@@ -1497,15 +1583,14 @@ impl MemoryRepository {
             for envelope in &envelopes {
                 if envelope.kind() == OperationKind::RawEvent {
                     if let Some(existing) = index.raw_events.get(envelope.entity_id()) {
-                        if existing.operation_id != envelope.operation_id() {
-                            if existing.fingerprint.as_deref()
+                        if existing.operation_id != envelope.operation_id()
+                            && existing.fingerprint.as_deref()
                                 != raw_event_fingerprint(envelope.payload()).as_deref()
-                            {
-                                return Err(format!(
-                                    "conflicting raw event operation for event {}",
-                                    envelope.entity_id()
-                                ));
-                            }
+                        {
+                            return Err(format!(
+                                "conflicting raw event operation for event {}",
+                                envelope.entity_id()
+                            ));
                         }
                     }
                 }
@@ -1546,7 +1631,7 @@ impl MemoryRepository {
     async fn ensure_tables(&self) -> StoreResult<()> {
         let raw_schema = raw_schema();
         ensure_table(
-            &self.paths.raw_events().to_path_buf(),
+            self.paths.raw_events(),
             RAW_TABLE,
             raw_schema.clone(),
             empty_raw_batch(raw_schema)?,
@@ -1554,7 +1639,7 @@ impl MemoryRepository {
         .await?;
         let facts_schema = facts_schema();
         ensure_table(
-            &self.paths.facts().to_path_buf(),
+            self.paths.facts(),
             FACTS_TABLE,
             facts_schema.clone(),
             empty_facts_batch(facts_schema)?,
@@ -1562,7 +1647,7 @@ impl MemoryRepository {
         .await?;
         let embeddings_schema = embeddings_schema();
         ensure_table(
-            &self.paths.embeddings().to_path_buf(),
+            self.paths.embeddings(),
             EMBEDDINGS_TABLE,
             embeddings_schema.clone(),
             empty_embeddings_batch(embeddings_schema)?,
@@ -1662,7 +1747,7 @@ impl MemoryRepository {
     }
 
     async fn apply_raw_events(&self, events: Vec<RawEvent>) -> StoreResult<()> {
-        let table = open_table(&self.paths.raw_events().to_path_buf(), RAW_TABLE).await?;
+        let table = open_table(self.paths.raw_events(), RAW_TABLE).await?;
         let ids = events
             .iter()
             .map(|event| event.event_id().to_string())
@@ -1688,7 +1773,7 @@ impl MemoryRepository {
         &self,
         embeddings: Vec<(String, Vec<f32>, String)>,
     ) -> StoreResult<()> {
-        let table = open_table(&self.paths.embeddings().to_path_buf(), EMBEDDINGS_TABLE).await?;
+        let table = open_table(self.paths.embeddings(), EMBEDDINGS_TABLE).await?;
         let ids = embeddings
             .iter()
             .map(|(entity_id, _, _)| entity_id.clone())
@@ -1719,7 +1804,7 @@ impl MemoryRepository {
     }
 
     async fn apply_facts(&self, facts: Vec<Fact>) -> StoreResult<()> {
-        let table = open_table(&self.paths.facts().to_path_buf(), FACTS_TABLE).await?;
+        let table = open_table(self.paths.facts(), FACTS_TABLE).await?;
         let ids = facts
             .iter()
             .map(|fact| fact.fact_id().to_string())
@@ -1761,7 +1846,7 @@ impl MemoryRepository {
             OperationKind::RawEvent => {
                 let event: RawEvent = serde_json::from_value(envelope.payload().clone())
                     .map_err(|error| format!("invalid raw event payload: {error}"))?;
-                let table = open_table(&self.paths.raw_events().to_path_buf(), RAW_TABLE).await?;
+                let table = open_table(self.paths.raw_events(), RAW_TABLE).await?;
                 let existing = existing_ids(&table, &[event.event_id().to_string()]).await?;
                 if existing.is_empty() {
                     let schema = raw_schema();
@@ -1780,9 +1865,7 @@ impl MemoryRepository {
                         .ok_or_else(|| {
                             "summary embedding retraction entity_id missing".to_string()
                         })?;
-                    let table =
-                        open_table(&self.paths.embeddings().to_path_buf(), EMBEDDINGS_TABLE)
-                            .await?;
+                    let table = open_table(self.paths.embeddings(), EMBEDDINGS_TABLE).await?;
                     table
                         .delete(&format!("entity_id = '{}'", escape_sql(entity_id)))
                         .await
@@ -1808,8 +1891,7 @@ impl MemoryRepository {
                     .get("source")
                     .and_then(Value::as_str)
                     .unwrap_or("document");
-                let table =
-                    open_table(&self.paths.embeddings().to_path_buf(), EMBEDDINGS_TABLE).await?;
+                let table = open_table(self.paths.embeddings(), EMBEDDINGS_TABLE).await?;
                 let existing = existing_ids(&table, &[entity_id.to_string()]).await?;
                 if existing.is_empty() {
                     let schema = embeddings_schema();
@@ -1830,7 +1912,7 @@ impl MemoryRepository {
                 }
             }
             OperationKind::Fact => {
-                let table = open_table(&self.paths.facts().to_path_buf(), FACTS_TABLE).await?;
+                let table = open_table(self.paths.facts(), FACTS_TABLE).await?;
                 let action = envelope.payload().get("action").and_then(Value::as_str);
                 if action == Some("delete") {
                     let fact_id = envelope
@@ -1973,17 +2055,16 @@ impl MemoryRepository {
                     .get("entity_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "redaction entity_id missing".to_string())?;
-                let raw = open_table(&self.paths.raw_events().to_path_buf(), RAW_TABLE).await?;
+                let raw = open_table(self.paths.raw_events(), RAW_TABLE).await?;
                 raw.delete(&format!("event_id = '{}'", escape_sql(entity_id)))
                     .await
                     .map_err(|error| error.to_string())?;
-                let facts = open_table(&self.paths.facts().to_path_buf(), FACTS_TABLE).await?;
+                let facts = open_table(self.paths.facts(), FACTS_TABLE).await?;
                 facts
                     .delete(&format!("source_event_id = '{}'", escape_sql(entity_id)))
                     .await
                     .map_err(|error| error.to_string())?;
-                let embeddings =
-                    open_table(&self.paths.embeddings().to_path_buf(), EMBEDDINGS_TABLE).await?;
+                let embeddings = open_table(self.paths.embeddings(), EMBEDDINGS_TABLE).await?;
                 embeddings
                     .delete(&format!("entity_id = '{}'", escape_sql(entity_id)))
                     .await
@@ -3011,11 +3092,11 @@ async fn existing_ids(table: &Table, ids: &[String]) -> StoreResult<HashSet<Stri
 
 async fn id_column(table: &Table) -> StoreResult<String> {
     let schema = table.schema().await.map_err(|error| error.to_string())?;
-    Ok(schema
+    schema
         .fields()
         .first()
         .map(|field| field.name().to_string())
-        .ok_or_else(|| "memory store schema has no identity column".to_string())?)
+        .ok_or_else(|| "memory store schema has no identity column".to_string())
 }
 
 #[cfg(test)]
@@ -3023,6 +3104,89 @@ mod tests {
     use super::*;
     use crate::lance_memory::SUMMARY_STATUS_COMPLETED;
     use crate::memory_v2::domain::FactStatus;
+
+    #[tokio::test]
+    async fn repeated_opens_share_one_reconciled_repository_per_root() {
+        let root = std::env::temp_dir().join(format!("memory-v2-shared-open-{}", Uuid::new_v4()));
+        let first = MemoryRepository::open(&root).await.unwrap();
+        let second = MemoryRepository::open(&root).await.unwrap();
+        // Shared instance: clones expose the same journal file and keep the
+        // recovery caches warm, so the second open must not re-run the
+        // reconciliation scan.
+        assert_eq!(first.paths().journal(), second.paths().journal());
+
+        // A write through the first handle must be visible through the shared
+        // instance without any reopen.
+        first
+            .append_compat_event(CompatMemory {
+                id: "shared-open-event".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                document: "ユーザーは猫が好きです。".into(),
+            })
+            .await
+            .unwrap();
+        let shared_raw_ids: Vec<String> = second
+            .read_raw_events()
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.event_id().to_string())
+            .collect();
+        assert!(shared_raw_ids.contains(&MemoryRepository::canonical_event_id("shared-open-event")));
+
+        // Deleting the store invalidates the cached entry; a later open must
+        // rebuild from disk instead of appending into a deleted path.
+        let _ = std::fs::remove_dir_all(&root);
+        let reopened = MemoryRepository::open(&root).await.unwrap();
+        let reopened_raw_ids: Vec<String> = reopened
+            .read_raw_events()
+            .await
+            .unwrap()
+            .iter()
+            .map(|event| event.event_id().to_string())
+            .collect();
+        assert!(
+            reopened_raw_ids.is_empty(),
+            "a reopened store must not resurrect the deleted journal content"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn live_journal_write_waits_for_in_process_backfill_writer() {
+        let root =
+            std::env::temp_dir().join(format!("memory-v2-live-write-gate-{}", Uuid::new_v4()));
+        let repository = MemoryRepository::open(&root).await.unwrap();
+        let gate = journal_write_lock().lock().await;
+        let writer = repository.clone();
+        let task = tokio::spawn(async move {
+            writer
+                .append_compat_event(CompatMemory {
+                    id: "live-event".into(),
+                    memory_type: "user_speech".into(),
+                    source: "User".into(),
+                    timestamp: "2026-01-01T00:00:00Z".into(),
+                    document: "ユーザーは猫が好きです。".into(),
+                })
+                .await
+        });
+
+        // The current-thread test runtime cannot poll the spawned writer until
+        // this task yields, so the un-polled task must not be finished while
+        // the in-process write gate is still held.
+        assert!(
+            !task.is_finished(),
+            "a live write must not race a backfill writer in the same process"
+        );
+
+        // Release the gate before awaiting the writer so the lock guard never
+        // spans an await point.
+        drop(gate);
+        assert!(task.await.unwrap().unwrap());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[tokio::test]
     async fn opens_three_stores_and_publishes_manifest() {

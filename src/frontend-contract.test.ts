@@ -7,6 +7,7 @@ import {
   normalizeDownloadPercent,
   normalizeSetupStatus,
   normalizeLocalSummaryStatus,
+  normalizeFactEntry,
   shouldBlockAppUntilSetupReady,
   shouldShowMainUiForSession,
   isSetupReadyForSession,
@@ -62,6 +63,11 @@ const validSetup: SetupStatus = {
   python_present: true,
   venv_present: true,
   lock_present: true,
+  dependency_ready: true,
+  python_import_ready: true,
+  tokenizer_ready: true,
+  embedding_ready: true,
+  asr_websocket_ready: true,
   gemma_terms_accepted: true,
   gemma_terms_version: GEMMA_TERMS_VERSION,
   gemma_terms_model_sha256: GEMMA_TERMS_MODEL_SHA256,
@@ -77,6 +83,11 @@ const pendingSetup = (termsAccepted = false): SetupStatus => ({
   progress: 0,
   completed_stages: [],
   required_models_ready: false,
+  dependency_ready: false,
+  python_import_ready: false,
+  tokenizer_ready: false,
+  embedding_ready: false,
+  asr_websocket_ready: false,
   gemma_terms_accepted: termsAccepted,
   gemma_terms_version: termsAccepted ? GEMMA_TERMS_VERSION : "",
   gemma_terms_model_sha256: termsAccepted ? GEMMA_TERMS_MODEL_SHA256 : "",
@@ -123,6 +134,20 @@ assert.equal(
   }),
   true,
 );
+// Runtime installation metadata alone must not authorize a session. Every
+// startup validation layer is fail-closed until its concrete probe succeeds.
+for (const layer of [
+  "dependency_ready",
+  "tokenizer_ready",
+  "embedding_ready",
+  "asr_websocket_ready",
+] as const) {
+  assert.equal(
+    isSetupReadyForSession({ ...validSetup, [layer]: false }),
+    false,
+    `${layer} failure must block session startup`,
+  );
+}
 assert.equal(shouldBlockAppUntilSetupReady(false, null), true);
 assert.equal(shouldShowMainUiForSession(true, null), false);
 assert.equal(shouldShowMainUiForSession(true, validSetup), true);
@@ -220,6 +245,22 @@ const clampedSummary = normalizeLocalSummaryStatus({
 assert.equal(clampedSummary?.queueDepth, 0);
 assert.equal(clampedSummary?.fallbackActive, false);
 assert.equal(clampedSummary?.message, null);
+
+const liveFact = normalizeFactEntry({
+  fact_id: "fact:self:summary-1",
+  source_event_id: "event-1",
+  summary: "ユーザーは猫が好きです。",
+  timestamp: "12:34:56",
+  source: "User",
+});
+assert.deepEqual(liveFact, {
+  id: "fact:self:summary-1",
+  text: "ユーザーは猫が好きです。",
+  timestamp: "12:34:56",
+  source: "User",
+  sourceEventId: "event-1",
+});
+assert.equal(normalizeFactEntry({ fact_id: "fact-only" }), null);
 
 const additiveProgress = normalizeMemoryBackfillProgress({
   state: "error",
@@ -834,6 +875,109 @@ const findButton = (
       .length,
     1,
   );
+  renderer.unmount();
+  await settleEffects();
+}
+
+// The native readiness event is the only asynchronous transition that may
+// authorize the WebSocket layer after the initial setup snapshot.
+{
+  const { harness } = makeHarness();
+  harness.status = { ...validSetup, asr_websocket_ready: false };
+  const { renderer, snapshot } = await mountHook(harness);
+  assert.equal(snapshot.current!.setupStatus?.asr_websocket_ready, false);
+  harness.emit("asr_ready", { ready: true });
+  await flush();
+  assert.equal(snapshot.current!.setupStatus?.asr_websocket_ready, true);
+  renderer.unmount();
+  await settleEffects();
+}
+
+// A WebSocket readiness event must not promote an otherwise failed runtime to
+// ready.  `asr_ready` authorizes only the ASR layer; dependency/model failures
+// remain visible until their own setup retry succeeds.
+{
+  const { harness } = makeHarness();
+  harness.status = {
+    ...validSetup,
+    ready: false,
+    setup_required: true,
+    status: "error",
+    error: "Tokenizer initialization failed",
+    tokenizer_ready: false,
+    asr_websocket_ready: false,
+  };
+  const { renderer, snapshot } = await mountHook(harness);
+  harness.emit("asr_ready", { ready: true });
+  await flush();
+  assert.equal(snapshot.current!.setupStatus?.ready, false);
+  assert.equal(snapshot.current!.setupStatus?.setup_required, true);
+  assert.equal(snapshot.current!.setupStatus?.tokenizer_ready, false);
+  assert.equal(snapshot.current!.setupError, "Tokenizer initialization failed");
+  renderer.unmount();
+  await settleEffects();
+}
+
+// A failed startup warmup must remain visible while status polling observes
+// the otherwise-healthy runtime. The next retry/`asr_ready` event is the only
+// transition allowed to clear the WebSocket failure.
+{
+  const { harness } = makeHarness();
+  harness.status = { ...validSetup, asr_websocket_ready: false };
+  const { renderer, snapshot } = await mountHook(harness);
+  const warmupError = "ASR WebSocket connection failed";
+  harness.emit("asr_warmup_failed", { message: warmupError });
+  await flush();
+  assert.equal(snapshot.current!.setupError, warmupError);
+  await snapshot.current!.fetchSetupStatus();
+  assert.equal(snapshot.current!.setupError, warmupError);
+  renderer.unmount();
+  await settleEffects();
+}
+
+// Native ASR latency is retained alongside the finalized transcript so the
+// first-utterance startup and inference timings remain visible to the user.
+{
+  const { harness } = makeHarness();
+  const { renderer, snapshot } = await mountHook(harness);
+  harness.emit("asr_result", {
+    text: "ねえぐり、テスト",
+    is_final: true,
+    stream: "mic",
+    is_prompt: true,
+    latency_ms: 123.4,
+  });
+  await flush();
+  assert.equal(snapshot.current!.asrHistory.length, 1);
+  assert.equal(snapshot.current!.asrHistory[0].latencyMs, 123.4);
+  renderer.unmount();
+  await settleEffects();
+}
+
+// A durable Fact emitted by the live curation path appears in the conversation
+// stream and duplicate deliveries remain idempotent.
+{
+  const { harness } = makeHarness();
+  const { renderer, snapshot } = await mountHook(harness);
+  harness.emit("memory-fact-created", {
+    fact_id: "fact:self:summary-1",
+    source_event_id: "event-1",
+    summary: "ユーザーは猫が好きです。",
+    timestamp: "12:34:56",
+    source: "User",
+  });
+  await flush();
+  assert.equal(snapshot.current!.factHistory.length, 1);
+  assert.equal(snapshot.current!.factHistory[0].text, "ユーザーは猫が好きです。");
+  harness.emit("memory-fact-created", {
+    fact_id: "fact:self:summary-1",
+    source_event_id: "event-1",
+    summary: "ユーザーは猫が好きです。",
+    timestamp: "12:34:56",
+    source: "User",
+  });
+  await flush();
+  assert.equal(snapshot.current!.factHistory.length, 1);
   renderer.unmount();
   await settleEffects();
 }

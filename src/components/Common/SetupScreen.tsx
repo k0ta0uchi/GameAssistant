@@ -189,14 +189,31 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
   const elevationRequired = Boolean(status?.elevation_required);
   const isCancelled = Boolean(status?.cancelled) && !running;
   const termsAccepted = hasValidGemmaTerms(status);
-  const isComplete = Boolean(status?.ready && status?.required_models_ready === true && termsAccepted) && !running;
+  const runtimeReady =
+    status?.dependency_ready === true &&
+    status?.python_import_ready === true &&
+    status?.tokenizer_ready === true &&
+    status?.embedding_ready === true &&
+    status?.asr_websocket_ready === true;
+  const asrPreparing =
+    status?.ready === true &&
+    !runtimeReady &&
+    !hasError &&
+    !isCancelled &&
+    !running;
+  const isComplete = Boolean(
+    status?.ready &&
+      status?.required_models_ready === true &&
+      runtimeReady &&
+      termsAccepted,
+  ) && !running;
   const termsAcceptanceRequired = isTermsAcceptanceRequired(status);
   const termsAcceptanceRunning = termsAcceptanceRequired && running;
   const showAcceptTerms = termsAcceptanceRequired && !running && !isComplete;
   const isExplicitlyPending = status?.running === false
     && (!currentStage || cleanStage(currentStage) === 'pending')
     && !progress?.status;
-  const showStart = !running && !hasError && !isComplete && !isCancelled && !showAcceptTerms
+  const showStart = !running && !hasError && !isComplete && !isCancelled && !asrPreparing && !showAcceptTerms
     && (isExplicitlyPending || Boolean(currentStage));
   const startLabel = isExplicitlyPending ? 'セットアップを開始' : 'セットアップを続行';
   const missingModelIds = new Set(status?.required_models_missing || []);
@@ -204,6 +221,42 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
   // If a newer backend reports an unknown model id, retain a useful fallback
   // instead of rendering an empty manual-install section.
   const manualModels = missingManualModels.length > 0 ? missingManualModels : MANUAL_MODEL_GUIDANCE;
+
+  const runtimeDiagnostics = [
+    {
+      key: 'dependency_ready',
+      label: '依存パッケージ',
+      detail: 'SentencePieceを含むPython依存関係',
+    },
+    {
+      key: 'python_import_ready',
+      label: 'Python import',
+      detail: '依存パッケージの実行時import',
+    },
+    {
+      key: 'tokenizer_ready',
+      label: 'Tokenizer',
+      detail: '日本語Tokenizerの初期化',
+    },
+    {
+      key: 'embedding_ready',
+      label: 'Embeddingモデル',
+      detail: 'GLuCoSE-base-jaの読み込み',
+    },
+    {
+      key: 'asr_websocket_ready',
+      label: 'ASR WebSocket',
+      detail: '実際に音声を送受信する接続',
+    },
+  ] as const;
+  const hasRuntimeDiagnostics = runtimeDiagnostics.some(
+    ({ key }) => typeof status?.[key] === 'boolean',
+  );
+  const diagnosticLabel = (value: boolean | undefined): string => {
+    if (value === true) return '準備完了';
+    if (value === false) return '未準備';
+    return '未確認';
+  };
 
   // The action button is replaced as setup moves between terms, retry,
   // cancel, and running states. Focus it after each replacement rather than
@@ -352,6 +405,30 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
                 </div>
               )}
 
+              {hasRuntimeDiagnostics && (
+                <div className="mt-5 rounded-lg border border-[#383b3f] bg-[#121314] p-3" role="status" aria-label="ランタイム診断">
+                  <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#8a8f98]">Runtime diagnostics</div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {runtimeDiagnostics.map(({ key, label, detail }) => {
+                      const value = status?.[key];
+                      const ready = value === true;
+                      const known = typeof value === 'boolean';
+                      return (
+                        <div key={key} className="flex items-center justify-between gap-3 rounded-md border border-[#23252a] bg-[#0f1011] px-3 py-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-xs font-semibold text-[#d0d6e0]">{label}</div>
+                            <div className="truncate text-[10px] text-[#62666d]">{detail}</div>
+                          </div>
+                          <span className={`shrink-0 text-[10px] font-medium ${ready ? 'text-[#27a644]' : known ? 'text-[#eb5757]' : 'text-[#8a8f98]'}`}>
+                            {diagnosticLabel(value)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="mt-7 flex flex-wrap gap-2">
                 {elevationRequired && (
                   <button onClick={onRequestElevation} disabled={elevationRequesting} className="linear-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs disabled:cursor-wait disabled:opacity-60">
@@ -377,6 +454,10 @@ export const SetupScreen: React.FC<SetupScreenProps> = ({
                   <>
                     <button ref={initialFocusRef} onClick={onRetry} className="linear-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs"><Play className="h-3.5 w-3.5" /> 再開する</button>
                   </>
+                ) : asrPreparing ? (
+                  <button ref={initialFocusRef} disabled className="linear-btn-ghost inline-flex cursor-wait items-center gap-2 px-4 py-2.5 text-xs text-[#8a8f98]" aria-busy="true">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> ASR WebSocketを準備中…
+                  </button>
                 ) : showStart ? (
                   <button ref={initialFocusRef} onClick={onStart} className="linear-btn-primary inline-flex items-center gap-2 px-4 py-2.5 text-xs"><Play className="h-3.5 w-3.5" /> {startLabel}</button>
                 ) : running ? (

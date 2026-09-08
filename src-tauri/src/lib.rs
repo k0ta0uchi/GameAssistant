@@ -22,7 +22,7 @@ pub mod model_manager;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use ai_client::{AiClient, AiGenerateOptions, ChatMessage};
@@ -419,11 +419,54 @@ async fn ai_generate(
 
 // --- AI / セッション オーケストレーション ---
 #[tauri::command]
-fn session_start(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    bootstrap::runtime_is_ready(&state.root_dir)?;
-    state
-        .session_mgr
-        .start_session_with_services(Some(app), Some(state.twitch_service.clone()));
+async fn session_start(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let requested_at = Instant::now();
+    let readiness_id = uuid::Uuid::new_v4().to_string();
+    state.log_mgr.info(
+        "Session",
+        &format!(
+            "session_start_requested phase=readiness_gate readiness_id={}",
+            readiness_id
+        ),
+    );
+    if let Err(error) = bootstrap::runtime_is_ready(&state.root_dir) {
+        state.log_mgr.error(
+            "Session",
+            &format!(
+                "session_start_failed phase=runtime_ready readiness_id={} error={}",
+                readiness_id, error
+            ),
+        );
+        return Err(error);
+    }
+    // Startup warmup normally makes this an immediate readiness check.  If a
+    // user clicks while the background warmup is still loading Whisper, wait
+    // here instead of attaching the microphone to a server that cannot yet
+    // consume audio (which would otherwise create a large startup backlog).
+    if let Err(error) = state.session_mgr.ensure_asr_ready().await {
+        state.log_mgr.error(
+            "Session",
+            &format!(
+                "session_start_failed phase=asr_ready readiness_id={} error={}",
+                readiness_id, error
+            ),
+        );
+        return Err(format!("ASR worker is not ready: {}", error));
+    }
+    state.log_mgr.info(
+        "ASR",
+        &format!(
+            "asr_ready phase=readiness_gate readiness_id={} wait_ms={}",
+            readiness_id,
+            requested_at.elapsed().as_millis()
+        ),
+    );
+    emit_asr_ready(&app, &state.session_mgr);
+    state.session_mgr.start_session_with_request_id(
+        Some(app),
+        Some(state.twitch_service.clone()),
+        readiness_id,
+    );
     Ok(())
 }
 
@@ -434,51 +477,43 @@ fn session_stop(app: AppHandle, state: State<AppState>) {
         .stop_session_with_services(Some(&state.twitch_service), Some(app));
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
-static IS_WARMING_UP: AtomicBool = AtomicBool::new(false);
-static IS_WARMED_UP: AtomicBool = AtomicBool::new(false);
-
 // --- ASR ウォームアップ (GUI 表示時事前ロード) ---
 #[tauri::command]
-async fn warmup_asr(state: State<'_, AppState>) -> Result<String, String> {
-    if IS_WARMED_UP.load(Ordering::SeqCst) {
-        return Ok("Already warmed up".to_string());
+async fn warmup_asr(app: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    if let Err(error) = bootstrap::runtime_is_ready(&state.root_dir) {
+        let message = format!("ASR warmup blocked: {}", error);
+        state.log_mgr.error("ASR", &message);
+        emit_asr_warmup_failed(&app, &message);
+        return Err(message);
     }
-
-    if IS_WARMING_UP.swap(true, Ordering::SeqCst) {
-        let asr_engine = state.session_mgr.asr_engine.clone();
-        return asr_engine
-            .ws_client
-            .warmup()
-            .await
-            .map(|_| "Warmup completed".to_string());
-    }
-
-    let asr_engine = state.session_mgr.asr_engine.clone();
-    let log_mgr = state.log_mgr.clone();
-
-    log_mgr.info(
+    state.log_mgr.info(
         "ASR",
         "Warmup requested: Preloading Faster-Whisper CUDA INT8 server into VRAM...",
     );
 
-    if let Err(e) = asr_engine.ws_client.warmup().await {
-        IS_WARMING_UP.store(false, Ordering::SeqCst);
-        return Err(e);
+    match state.session_mgr.ensure_asr_ready().await {
+        Ok(()) => {
+            state.log_mgr.info(
+                "ASR",
+                "Faster-Whisper CUDA INT8 warmup complete! Ready for instant transcription.",
+            );
+            emit_asr_ready(&app, &state.session_mgr);
+            Ok("Warmup completed for Faster-Whisper CUDA INT8".to_string())
+        }
+        Err(error) => {
+            state
+                .log_mgr
+                .error("ASR", &format!("Warmup failed: {}", error));
+            emit_asr_warmup_failed(&app, &error);
+            Err(error)
+        }
     }
-
-    IS_WARMED_UP.store(true, Ordering::SeqCst);
-    IS_WARMING_UP.store(false, Ordering::SeqCst);
-
-    log_mgr.info(
-        "ASR",
-        "Faster-Whisper CUDA INT8 warmup complete! Ready for instant transcription.",
-    );
-    Ok("Warmup completed for Faster-Whisper CUDA INT8".to_string())
 }
 
 #[tauri::command]
 async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
+    bootstrap::runtime_is_ready(&state.root_dir)
+        .map_err(|error| format!("Whisper restart blocked: {}", error))?;
     state
         .log_mgr
         .info("ASR", "Restarting Whisper GPU worker...");
@@ -537,12 +572,16 @@ fn cancel_download_model(state: State<AppState>, model_id: String) -> bool {
 // --- Portable runtime bootstrap ---
 #[tauri::command]
 fn get_runtime_status(state: State<AppState>) -> Result<bootstrap::RuntimeStatus, String> {
-    bootstrap::runtime_status(&state.root_dir)
+    let mut status = bootstrap::runtime_status(&state.root_dir)?;
+    status.asr_websocket_ready = state.session_mgr.asr_engine.ws_client.is_ready();
+    Ok(status)
 }
 
 #[tauri::command]
 fn get_setup_status(state: State<AppState>) -> Result<bootstrap::RuntimeStatus, String> {
-    bootstrap::runtime_status(&state.root_dir)
+    let mut status = bootstrap::runtime_status(&state.root_dir)?;
+    status.asr_websocket_ready = state.session_mgr.asr_engine.ws_client.is_ready();
+    Ok(status)
 }
 
 #[tauri::command]
@@ -552,7 +591,17 @@ async fn setup_runtime(
 ) -> Result<bootstrap::RuntimeStatus, String> {
     let root_dir = state.root_dir.clone();
     let model_mgr = state.model_mgr.clone();
-    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
+    let warmup_app = app.clone();
+    let status = bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await?;
+    if status.ready {
+        spawn_startup_asr_warmup(
+            warmup_app,
+            root_dir,
+            state.session_mgr.clone(),
+            state.log_mgr.clone(),
+        );
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -562,7 +611,17 @@ async fn run_setup(
 ) -> Result<bootstrap::RuntimeStatus, String> {
     let root_dir = state.root_dir.clone();
     let model_mgr = state.model_mgr.clone();
-    bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await
+    let warmup_app = app.clone();
+    let status = bootstrap::run_setup(&root_dir, Some(model_mgr), Some(app)).await?;
+    if status.ready {
+        spawn_startup_asr_warmup(
+            warmup_app,
+            root_dir,
+            state.session_mgr.clone(),
+            state.log_mgr.clone(),
+        );
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -706,6 +765,123 @@ fn load_dotenv(root_dir: &std::path::Path) {
     }
 }
 
+/// Take one non-blocking LanceDB snapshot for each application launch.  The
+/// copy is deliberately detached from `session_start`: a large database must
+/// never delay microphone activation or compete with the live ASR callback.
+fn spawn_startup_lance_backup(root_dir: PathBuf, log_mgr: Arc<LogManager>) {
+    tauri::async_runtime::spawn(async move {
+        let backup_root = root_dir.clone();
+        let result =
+            tokio::task::spawn_blocking(move || lance_memory::backup_lance_db(&backup_root)).await;
+
+        match result {
+            Ok(Ok(backup_name)) => log_mgr.info(
+                "LanceDB",
+                &format!("Auto-backup created at app startup: {}", backup_name),
+            ),
+            Ok(Err(error)) => log_mgr.warn(
+                "LanceDB",
+                &format!("Startup auto-backup skipped: {}", error),
+            ),
+            Err(error) => log_mgr.warn(
+                "LanceDB",
+                &format!("Startup auto-backup worker failed: {}", error),
+            ),
+        }
+    });
+}
+
+fn emit_asr_ready(app: &AppHandle, session_mgr: &SessionManager) {
+    // This event is intentionally guarded by the client's readiness bit.  A
+    // spawned Python child or a second probe connection is not sufficient;
+    // the client bit flips only after the exact audio WebSocket is attached.
+    if !session_mgr.asr_engine.ws_client.is_ready() {
+        return;
+    }
+    let _ = app.emit(
+        "asr_ready",
+        serde_json::json!({
+            "ready": true,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+}
+
+fn emit_asr_warmup_failed(app: &AppHandle, error: &str) {
+    let _ = app.emit(
+        "asr_warmup_failed",
+        serde_json::json!({
+            "message": error,
+        }),
+    );
+}
+
+/// Keep the ASR process/model hot while the main window is idle.  This is
+/// called only after the portable runtime is ready; the session command still
+/// performs an idempotent readiness wait for clicks that race this worker.
+/// The frontend listens for `toast_notice`, so the warmup lifecycle is also
+/// surfaced to the user (begin/complete/failure) instead of only the log.
+fn spawn_startup_asr_warmup(
+    app: AppHandle,
+    root_dir: PathBuf,
+    session_mgr: Arc<SessionManager>,
+    log_mgr: Arc<LogManager>,
+) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = bootstrap::runtime_is_ready(&root_dir) {
+            let message = format!("Startup ASR warmup blocked: {}", error);
+            log_mgr.warn("ASR", &message);
+            let _ = app.emit(
+                "toast_notice",
+                serde_json::json!({
+                    "message": "⚠️ ランタイム検証に失敗したため、音声認識の準備を開始できません。",
+                    "type": "warning"
+                }),
+            );
+            emit_asr_warmup_failed(&app, &message);
+            return;
+        }
+        log_mgr.info(
+            "ASR",
+            "Startup warmup requested: preparing Faster-Whisper before the first session...",
+        );
+        let _ = app.emit(
+            "toast_notice",
+            serde_json::json!({
+                "message": "🎙️ 音声認識エンジン（Faster-Whisper）を起動準備中です...",
+                "type": "info"
+            }),
+        );
+        match session_mgr.ensure_asr_ready().await {
+            Ok(()) => {
+                log_mgr.info(
+                    "ASR",
+                    "Startup warmup complete: Faster-Whisper is ready for immediate transcription.",
+                );
+                let _ = app.emit(
+                    "toast_notice",
+                    serde_json::json!({
+                        "message": "✅ 音声認識の準備が完了しました。すぐにセッションを開始できます。",
+                        "type": "success"
+                    }),
+                );
+                emit_asr_ready(&app, &session_mgr);
+            }
+            Err(error) => {
+                log_mgr.warn("ASR", &format!("Startup ASR warmup deferred: {}", error));
+                let _ = app.emit(
+                    "toast_notice",
+                    serde_json::json!({
+                        "message": "⚠️ 音声認識エンジンの準備に失敗しました。セッション開始時に再試行されます。",
+                        "type": "warning"
+                    }),
+                );
+                emit_asr_warmup_failed(&app, &error);
+            }
+        }
+    });
+}
+
 pub fn run() {
     let root_dir = resolve_project_root();
     // Several legacy helpers (for example the app log and nod WAV lookup) use
@@ -846,6 +1022,12 @@ pub fn run() {
             );
             log_mgr.info("System", &format!("Project root directory: {:?}", root_dir));
 
+            // Database snapshots belong to application startup, not to the
+            // Start Session button. Run the potentially large copy on a
+            // blocking worker so the window and audio controls stay
+            // responsive while it is created.
+            spawn_startup_lance_backup(root_dir.clone(), log_mgr.clone());
+
             // Extract embedded scripts/uv immediately, then continue long-running
             // Python/dependency/model setup in the background so the UI can poll
             // get_runtime_status and show progress/retry controls.
@@ -867,11 +1049,20 @@ pub fn run() {
                     // a transient stage transition while the main UI initializes.
                     if status.ready {
                         log_mgr.info("Bootstrap", "runtime already ready; setup worker skipped");
+                        spawn_startup_asr_warmup(
+                            app.handle().clone(),
+                            root_dir.clone(),
+                            session_mgr.clone(),
+                            log_mgr.clone(),
+                        );
                     } else if model_manager::gemma_terms_accepted(&root_dir) {
                         let setup_root = root_dir.clone();
                         let setup_manager = model_mgr_for_setup.clone();
                         let setup_app = app.handle().clone();
                         let setup_log = log_mgr.clone();
+                        let setup_session = session_mgr.clone();
+                        let setup_warmup_log = log_mgr.clone();
+                        let setup_warmup_root = setup_root.clone();
                         let elevated_setup = std::env::args().any(|arg| arg == "--elevated-setup");
                         if elevated_setup {
                             // The elevated process is a setup worker only.  Keep the
@@ -896,6 +1087,12 @@ pub fn run() {
                                 }
                             } else {
                                 setup_log.info("Bootstrap", "setup worker completed");
+                                spawn_startup_asr_warmup(
+                                    setup_app.clone(),
+                                    setup_warmup_root,
+                                    setup_session,
+                                    setup_warmup_log,
+                                );
                                 if elevated_setup {
                                     // The elevated helper is only a setup worker; return to
                                     // the original standard-user process once it completes.
@@ -933,7 +1130,7 @@ pub fn run() {
         .run(move |app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    state.session_mgr.stop_session();
+                    state.session_mgr.shutdown();
                     tauri::async_runtime::block_on(state.session_mgr.unload_local_summary_model());
                 }
             }

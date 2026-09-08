@@ -1,16 +1,27 @@
 import React, { useRef, useEffect } from 'react';
-import { Mic, Clock, CheckCircle2, Radio, MessageSquare, Sparkles, Headphones } from 'lucide-react';
-import { AsrEntry } from '../../types';
+import {
+  Mic,
+  Clock,
+  CheckCircle2,
+  Radio,
+  MessageSquare,
+  Sparkles,
+  Headphones,
+  BrainCircuit,
+} from 'lucide-react';
+import { AsrEntry, FactEntry } from '../../types';
 
 export interface AsrData {
   text: string;
   isFinal: boolean;
   isPrompt?: boolean;
+  latencyMs?: number | null;
 }
 
 interface AsrCardProps {
   currentAsr: AsrData | string;
   asrHistory?: AsrEntry[] | string[];
+  factHistory?: FactEntry[];
   commentaryProgress: number; // 0 - 100
   commentaryRemaining: number; // 秒
 }
@@ -18,6 +29,7 @@ interface AsrCardProps {
 export const AsrCard: React.FC<AsrCardProps> = ({
   currentAsr,
   asrHistory = [],
+  factHistory = [],
   commentaryProgress,
   commentaryRemaining,
 }) => {
@@ -27,13 +39,14 @@ export const AsrCard: React.FC<AsrCardProps> = ({
   const asrText = typeof currentAsr === 'string' ? currentAsr : currentAsr?.text || '';
   const isFinal = typeof currentAsr === 'string' ? true : currentAsr?.isFinal ?? true;
   const isPromptActive = typeof currentAsr === 'object' ? !!currentAsr?.isPrompt : false;
+  const currentLatency = typeof currentAsr === 'object' ? currentAsr?.latencyMs : null;
 
   // 履歴更新時や発話更新時に最下部へ自動スクロール
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [asrHistory, asrText]);
+  }, [asrHistory, asrText, factHistory]);
 
   return (
     <div className="linear-card p-4 flex flex-col gap-3 flex-1 min-h-[220px]">
@@ -41,7 +54,7 @@ export const AsrCard: React.FC<AsrCardProps> = ({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-[#8a8f98]">
           <Mic className="w-3.5 h-3.5 text-[#27a644]" />
-          <span>Speech Recognition (Whisper Live)</span>
+          <span>Live Conversation &amp; Memory</span>
         </div>
 
         {/* 自動ツッコミタイマー */}
@@ -64,7 +77,7 @@ export const AsrCard: React.FC<AsrCardProps> = ({
         ref={scrollRef}
         className="flex-1 overflow-y-auto pr-1 flex flex-col gap-2 font-sans text-xs scroll-smooth"
       >
-        {asrHistory.length === 0 && !asrText && (
+        {asrHistory.length === 0 && factHistory.length === 0 && !asrText && (
           <div className="h-full flex flex-col items-center justify-center text-[#525866] italic py-8 gap-2">
             <MessageSquare className="w-5 h-5 opacity-40" />
             <span>マイクまたは Discord 音声の文字起こしがここにリアルタイム表示されます</span>
@@ -79,6 +92,7 @@ export const AsrCard: React.FC<AsrCardProps> = ({
           const key = isObj ? (item as AsrEntry).id : `asr_${idx}`;
           const isDiscord = isObj ? (item as AsrEntry).isDiscord : text.startsWith('[Discord]');
           const isPrompt = isObj ? (item as AsrEntry).isPrompt : false;
+          const latencyMs = isObj ? (item as AsrEntry).latencyMs : null;
 
           return (
             <div
@@ -108,6 +122,9 @@ export const AsrCard: React.FC<AsrCardProps> = ({
                   </span>
                 )}
                 {time && <span className="text-[10px] font-mono text-[#525866]">{time}</span>}
+                {typeof latencyMs === 'number' && Number.isFinite(latencyMs) && (
+                  <span className="text-[10px] font-mono text-[#525866]">{Math.round(latencyMs)}ms</span>
+                )}
               </div>
               <span className={`leading-relaxed break-words ${isPrompt ? 'font-medium text-[#faf5ff]' : ''}`}>
                 {text}
@@ -116,7 +133,48 @@ export const AsrCard: React.FC<AsrCardProps> = ({
           );
         })}
 
-        {/* 2. 最下部: 現在のアクティブ発話行（リアルタイムインプレース色分け） */}
+        {/* 2. Gemmaが会話から抽出して永続化したFact */}
+        {factHistory.length > 0 && (
+          <section
+            className="mt-1 pt-2 border-t border-[#252a2f]"
+            aria-labelledby="live-facts-heading"
+          >
+            <div
+              id="live-facts-heading"
+              className="flex items-center gap-1.5 px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[#a78bfa]"
+            >
+              <BrainCircuit className="w-3 h-3" aria-hidden="true" />
+              <span>Auto-extracted FACT</span>
+              <span className="font-mono text-[#6d5db3]">{factHistory.length}</span>
+            </div>
+            <ul className="flex flex-col gap-1.5" aria-live="polite">
+              {factHistory.map((fact) => (
+                <li
+                  key={fact.id}
+                  className="flex items-start gap-2.5 px-2.5 py-2 rounded-[7px] bg-[#171326]/90 border border-[#7c5cc6]/45 shadow-[0_0_14px_rgba(124,92,198,0.08)]"
+                >
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold font-mono bg-[#2a1b4a] text-[#c4b5fd] border border-[#8b5cf6]/55 shrink-0 mt-0.5">
+                    <Sparkles className="w-2.5 h-2.5 text-[#e879f9]" aria-hidden="true" />
+                    FACT
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs leading-relaxed text-[#f0eaff] break-words">
+                      {fact.text}
+                    </div>
+                    {(fact.timestamp || fact.source) && (
+                      <div className="mt-1 flex items-center gap-2 text-[10px] font-mono text-[#8277a3]">
+                        {fact.timestamp && <span>{fact.timestamp}</span>}
+                        {fact.source && <span>{fact.source}</span>}
+                      </div>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* 3. 最下部: 現在のアクティブ発話行（リアルタイムインプレース色分け） */}
         {asrText && (
           <div
             className={`sticky bottom-0 mt-1 flex items-start gap-2.5 px-3 py-2 rounded-[8px] border shadow-lg backdrop-blur ${
@@ -153,7 +211,12 @@ export const AsrCard: React.FC<AsrCardProps> = ({
                   : 'text-[#e4f222] font-medium'
               }`}
             >
-              {asrText}
+              <span>{asrText}</span>
+              {isFinal && typeof currentLatency === 'number' && Number.isFinite(currentLatency) && (
+                <span className="ml-2 shrink-0 text-[10px] font-mono text-[#62666d]">
+                  {Math.round(currentLatency)}ms
+                </span>
+              )}
             </div>
           </div>
         )}

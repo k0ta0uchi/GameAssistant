@@ -135,8 +135,15 @@ pub struct LocalSummaryService {
     serial: std::sync::Arc<tokio::sync::Mutex<()>>,
     running: std::sync::Arc<tokio::sync::Mutex<Option<LlamaServer>>>,
     idle_generation: std::sync::Arc<AtomicU64>,
+    // Live ASR candidates use the foreground queue. Explicit retry/backfill
+    // work uses a separate queue so a large recovery pass
+    // cannot make a newly-finalized utterance wait behind hundreds of old
+    // rows.  The worker always selects foreground work first at request
+    // boundaries while keeping both queues bounded.
     queue_tx: std::sync::Arc<mpsc::Sender<SummaryRequest>>,
     queue_rx: std::sync::Arc<tokio::sync::Mutex<Option<mpsc::Receiver<SummaryRequest>>>>,
+    background_queue_tx: std::sync::Arc<mpsc::Sender<SummaryRequest>>,
+    background_queue_rx: std::sync::Arc<tokio::sync::Mutex<Option<mpsc::Receiver<SummaryRequest>>>>,
     queue_depth: std::sync::Arc<AtomicUsize>,
     in_flight: std::sync::Arc<AtomicUsize>,
     runtime_phase: std::sync::Arc<AtomicU8>,
@@ -149,6 +156,7 @@ pub struct LocalSummaryService {
 impl LocalSummaryService {
     pub fn new(root_dir: PathBuf) -> Self {
         let (queue_tx, queue_rx) = mpsc::channel(SUMMARY_QUEUE_CAPACITY);
+        let (background_queue_tx, background_queue_rx) = mpsc::channel(SUMMARY_QUEUE_CAPACITY);
         Self {
             root_dir,
             serial: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -156,6 +164,10 @@ impl LocalSummaryService {
             idle_generation: std::sync::Arc::new(AtomicU64::new(0)),
             queue_tx: std::sync::Arc::new(queue_tx),
             queue_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(queue_rx))),
+            background_queue_tx: std::sync::Arc::new(background_queue_tx),
+            background_queue_rx: std::sync::Arc::new(tokio::sync::Mutex::new(Some(
+                background_queue_rx,
+            ))),
             queue_depth: std::sync::Arc::new(AtomicUsize::new(0)),
             in_flight: std::sync::Arc::new(AtomicUsize::new(0)),
             runtime_phase: std::sync::Arc::new(AtomicU8::new(RUNTIME_IDLE)),
@@ -224,6 +236,27 @@ impl LocalSummaryService {
             .await
     }
 
+    /// Queue retry/backfill work at lower priority than a live event.
+    /// It shares the same admission, inference, retry, and persistence
+    /// contract as [`summarize_event`], but cannot monopolize the foreground
+    /// queue while the user is speaking.
+    pub async fn summarize_event_background(
+        &self,
+        event_type: &str,
+        source: &str,
+        timestamp: &str,
+        content: &str,
+    ) -> Result<SummaryDecision, String> {
+        let Some(content) = admitted_summary_content(event_type, content)? else {
+            return Ok(SummaryDecision {
+                should_store: false,
+                summary: None,
+            });
+        };
+        self.summarize_admitted_event_with_priority(event_type, source, timestamp, &content, true)
+            .await
+    }
+
     /// Explicit backfill path used by the Memory Manager's "all memories"
     /// action.  It deliberately shares the live candidate allowlist: legacy
     /// storage rows may be scanned by the caller, but non-candidate event types
@@ -242,7 +275,7 @@ impl LocalSummaryService {
                 summary: None,
             });
         };
-        self.summarize_admitted_event(event_type, source, timestamp, &content)
+        self.summarize_admitted_event_with_priority(event_type, source, timestamp, &content, true)
             .await
     }
 
@@ -253,17 +286,30 @@ impl LocalSummaryService {
         timestamp: &str,
         content: &str,
     ) -> Result<SummaryDecision, String> {
+        self.summarize_admitted_event_with_priority(event_type, source, timestamp, content, false)
+            .await
+    }
+
+    async fn summarize_admitted_event_with_priority(
+        &self,
+        event_type: &str,
+        source: &str,
+        timestamp: &str,
+        content: &str,
+        background: bool,
+    ) -> Result<SummaryDecision, String> {
         let (model_path, server_path) = self.precheck()?;
         self.ensure_worker().await;
         for attempt in 0..=1 {
             let reply = match self
-                .enqueue_summary(
+                .enqueue_summary_with_priority(
                     event_type.to_string(),
                     source.to_string(),
                     timestamp.to_string(),
                     content.to_string(),
                     model_path.clone(),
                     server_path.clone(),
+                    background,
                 )
                 .await
             {
@@ -347,9 +393,36 @@ impl LocalSummaryService {
         model_path: PathBuf,
         server_path: PathBuf,
     ) -> Result<oneshot::Receiver<Result<SummaryDecision, String>>, String> {
+        self.enqueue_summary_with_priority(
+            event_type,
+            source,
+            timestamp,
+            content,
+            model_path,
+            server_path,
+            false,
+        )
+        .await
+    }
+
+    async fn enqueue_summary_with_priority(
+        &self,
+        event_type: String,
+        source: String,
+        timestamp: String,
+        content: String,
+        model_path: PathBuf,
+        server_path: PathBuf,
+        background: bool,
+    ) -> Result<oneshot::Receiver<Result<SummaryDecision, String>>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.queue_depth.fetch_add(1, Ordering::SeqCst);
-        if let Err(error) = self.queue_tx.try_send(SummaryRequest {
+        let sender = if background {
+            &self.background_queue_tx
+        } else {
+            &self.queue_tx
+        };
+        if let Err(error) = sender.try_send(SummaryRequest {
             event_type,
             source,
             timestamp,
@@ -373,16 +446,36 @@ impl LocalSummaryService {
 
     /// Spawn the single consumer of the bounded queue on first use.
     async fn ensure_worker(&self) {
-        let mut slot = self.queue_rx.lock().await;
-        if let Some(rx) = slot.take() {
-            tokio::spawn(Self::worker_loop(self.clone(), rx));
-        }
+        let mut live_slot = self.queue_rx.lock().await;
+        let Some(live_rx) = live_slot.take() else {
+            return;
+        };
+        let mut background_slot = self.background_queue_rx.lock().await;
+        let Some(background_rx) = background_slot.take() else {
+            return;
+        };
+        tokio::spawn(Self::worker_loop(self.clone(), live_rx, background_rx));
     }
 
     /// Sole consumer: pops one request at a time, so inference stays strictly
     /// serial even though producers run concurrently.
-    async fn worker_loop(self, mut rx: mpsc::Receiver<SummaryRequest>) {
-        while let Some(request) = rx.recv().await {
+    async fn worker_loop(
+        self,
+        mut live_rx: mpsc::Receiver<SummaryRequest>,
+        mut background_rx: mpsc::Receiver<SummaryRequest>,
+    ) {
+        loop {
+            // `biased` is intentional: when both queues are ready, the live
+            // candidate is selected first.  A background request still makes
+            // progress whenever no live request is waiting.
+            let request = tokio::select! {
+                biased;
+                request = live_rx.recv() => request,
+                request = background_rx.recv() => request,
+            };
+            let Some(request) = request else {
+                break;
+            };
             self.queue_depth.fetch_sub(1, Ordering::SeqCst);
             self.notify_status();
             let SummaryRequest {
