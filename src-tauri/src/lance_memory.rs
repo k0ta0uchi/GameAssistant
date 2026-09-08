@@ -1853,7 +1853,12 @@ pub async fn apply_summary(
     Ok(result.persisted > 0)
 }
 
-async fn mark_summary_status(root_dir: &Path, id: &str, next_status: &str) -> Result<bool, String> {
+async fn mark_summary_status(
+    root_dir: &Path,
+    id: &str,
+    next_status: &str,
+    reason: Option<&str>,
+) -> Result<bool, String> {
     let existing = get_memory_by_event_id(root_dir, id).await?;
     let Some(existing) = existing else {
         return Ok(false);
@@ -1872,11 +1877,13 @@ async fn mark_summary_status(root_dir: &Path, id: &str, next_status: &str) -> Re
 
     let repository = MemoryRepository::open(root_dir).await?;
     repository
-        .append_summary_status(
+        .append_summary_status_with_reason(
             id,
             next_status,
             Some(SUMMARY_MODEL_ID),
             Some(SUMMARY_PROMPT_VERSION),
+            reason,
+            None,
         )
         .await?;
     let db = get_or_create_db(root_dir).await?;
@@ -2666,18 +2673,48 @@ async fn apply_summary_backfill_batch_with_repository_and_statuses(
 /// Mark a row as skipped (Gemma judged it non-persistent). The row is kept;
 /// search excludes it. Never deletes.
 pub async fn mark_summary_skipped(root_dir: &Path, id: &str) -> Result<bool, String> {
-    mark_summary_status(root_dir, id, SUMMARY_STATUS_SKIPPED).await
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_SKIPPED, None).await
+}
+
+/// Mark a candidate as skipped while retaining the stable reason that caused
+/// the terminal decision (normally `model_declined`).
+pub async fn mark_summary_skipped_with_reason(
+    root_dir: &Path,
+    id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_SKIPPED, Some(reason)).await
 }
 
 /// Mark a row as fallback (summary failed; raw text stays searchable).
 /// The row is kept; never deletes.
 pub async fn mark_summary_fallback(root_dir: &Path, id: &str) -> Result<bool, String> {
-    mark_summary_status(root_dir, id, SUMMARY_STATUS_FALLBACK).await
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_FALLBACK, None).await
+}
+
+/// Mark a candidate as fallback while preserving a stable machine-readable
+/// reason for Memory Manager and explicit retry flows.
+pub async fn mark_summary_fallback_with_reason(
+    root_dir: &Path,
+    id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_FALLBACK, Some(reason)).await
 }
 
 /// Mark a row as error. The row is kept; never deletes.
 pub async fn mark_summary_error(root_dir: &Path, id: &str) -> Result<bool, String> {
-    mark_summary_status(root_dir, id, SUMMARY_STATUS_ERROR).await
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_ERROR, None).await
+}
+
+/// Mark a candidate as an error while preserving a stable machine-readable
+/// reason for diagnostics.
+pub async fn mark_summary_error_with_reason(
+    root_dir: &Path,
+    id: &str,
+    reason: &str,
+) -> Result<bool, String> {
+    mark_summary_status(root_dir, id, SUMMARY_STATUS_ERROR, Some(reason)).await
 }
 
 /// Memory Manager reprocessing source: only pending rows, idempotent per event
@@ -3959,6 +3996,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_summary_failure_reason_is_persisted_with_terminal_status() {
+        let root = unique_test_root("live-summary-reason");
+        insert_memory_batch_nullable(
+            &root,
+            vec![item(
+                "live-reason-event",
+                "user_speech",
+                "raw survives timeout",
+            )],
+            Some(vec![None]),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(mark_summary_fallback_with_reason(
+            &root,
+            "live-reason-event",
+            "summary_runtime_timeout",
+        )
+        .await
+        .unwrap());
+        let statuses = MemoryRepository::open(&root)
+            .await
+            .unwrap()
+            .read_summary_statuses()
+            .unwrap();
+        let status = statuses
+            .get(&MemoryRepository::canonical_event_id("live-reason-event"))
+            .expect("terminal status must be journaled");
+        assert_eq!(status.status, SUMMARY_STATUS_FALLBACK);
+        assert_eq!(status.reason.as_deref(), Some("summary_runtime_timeout"));
+        assert_eq!(
+            get_memory_by_event_id(&root, "live-reason-event")
+                .await
+                .unwrap()
+                .unwrap()
+                .document,
+            "raw survives timeout"
+        );
+
+        cleanup(&root);
+    }
+
+    #[tokio::test]
     async fn event_lookup_bridges_canonical_id_to_legacy_projection_id() {
         let root = unique_test_root("event-lookup-canonical");
         let legacy_id = "legacy-retry-event";
@@ -4508,7 +4590,7 @@ mod tests {
         // a Fact.  An explicit all-memory pass must recover this row instead
         // of treating the stale pending marker as active forever.
         assert!(
-            mark_summary_status(&root, "stale-pending", SUMMARY_STATUS_PENDING)
+            mark_summary_status(&root, "stale-pending", SUMMARY_STATUS_PENDING, None)
                 .await
                 .unwrap()
         );

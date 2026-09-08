@@ -372,6 +372,7 @@ static SHARED_REPOSITORIES: OnceLock<tokio::sync::Mutex<HashMap<PathBuf, Arc<Mem
 /// root; the bound only exists so a process that touches many roots (tests,
 /// tooling) cannot accumulate unbounded open stores.
 const SHARED_REPOSITORY_LIMIT: usize = 8;
+const LARGE_JOURNAL_MATERIALIZE_CHUNK: usize = 256;
 
 fn shared_repositories() -> &'static tokio::sync::Mutex<HashMap<PathBuf, Arc<MemoryRepository>>> {
     SHARED_REPOSITORIES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
@@ -476,10 +477,31 @@ impl MemoryRepository {
             {
                 repository.publish_manifest_for_sequence(committed_sequence)?;
             } else {
-                return Err(
-                    "large journal requires materialization before opening (manifest is stale)"
-                        .to_string(),
-                );
+                // A missing/stale manifest is recoverable.  The compact index
+                // has already validated every frame and retained each
+                // operation's byte offset, so replay only batches newer than
+                // the manifest in bounded chunks instead of constructing a
+                // full in-memory RecoveryReport for a several-hundred-MB log.
+                let materialized_sequence = manifest
+                    .as_ref()
+                    .map(|manifest| manifest.committed_sequence())
+                    .filter(|sequence| *sequence <= committed_sequence)
+                    .unwrap_or(0);
+                repository
+                    .materialize_large_journal(&index, materialized_sequence)
+                    .await?;
+                let final_index = repository
+                    .journal
+                    .recover_index()
+                    .map_err(|error| error.to_string())?;
+                let final_sequence = final_index.next_sequence.saturating_sub(1);
+                if final_sequence != committed_sequence {
+                    return Err(
+                        "journal changed while materializing large journal; retry opening"
+                            .to_string(),
+                    );
+                }
+                repository.publish_manifest_for_sequence(final_sequence)?;
             }
         } else {
             let report = repository
@@ -500,6 +522,64 @@ impl MemoryRepository {
 
     pub fn paths(&self) -> &MemoryPaths {
         &self.paths
+    }
+
+    /// Replay committed operations that are newer than the durable manifest
+    /// pointer.  `JournalIndex` intentionally stores metadata rather than
+    /// payloads; offsets let this method fetch only one bounded chunk at a time
+    /// and keep startup memory proportional to the chunk size.
+    async fn materialize_large_journal(
+        &self,
+        index: &super::journal::JournalIndex,
+        materialized_sequence: u64,
+    ) -> StoreResult<()> {
+        let mut operations = index
+            .operations
+            .values()
+            .filter(|operation| {
+                index
+                    .committed_batch_sequences
+                    .get(&operation.batch_id)
+                    .copied()
+                    .is_some_and(|commit_sequence| commit_sequence > materialized_sequence)
+            })
+            .collect::<Vec<_>>();
+        operations.sort_by_key(|operation| operation.sequence);
+
+        for chunk in operations.chunks(LARGE_JOURNAL_MATERIALIZE_CHUNK) {
+            let offsets = chunk
+                .iter()
+                .map(|operation| {
+                    operation.offset.ok_or_else(|| {
+                        "large journal index is missing an operation offset".to_string()
+                    })
+                })
+                .collect::<StoreResult<Vec<_>>>()?;
+            let records = self
+                .journal
+                .read_operation_records_at_offsets(&offsets)
+                .map_err(|error| error.to_string())?;
+            if records.len() != chunk.len() {
+                return Err(
+                    "large journal materialization returned an incomplete chunk".to_string()
+                );
+            }
+            for (record, operation) in records.iter().zip(chunk) {
+                if record.operation_id() != operation.operation_id
+                    || record.operation_kind() != operation.operation_kind
+                    || record.sequence() != operation.sequence
+                {
+                    return Err(
+                        "large journal changed while reading an indexed operation".to_string()
+                    );
+                }
+            }
+            // Box the nested async materializer future so adding this bounded
+            // recovery path does not force the compiler to eagerly expand the
+            // large LanceDB query future at every call site.
+            Box::pin(self.apply_records_batched(&records)).await?;
+        }
+        Ok(())
     }
 
     /// Return the canonical event identity used by memory-v2 for a legacy or
@@ -744,8 +824,15 @@ impl MemoryRepository {
         model_id: Option<&str>,
         _prompt_version: Option<&str>,
     ) -> StoreResult<bool> {
-        self.append_summary_status_with_attempt(entity_id, status, model_id, _prompt_version, None)
-            .await
+        self.append_summary_status_with_reason(
+            entity_id,
+            status,
+            model_id,
+            _prompt_version,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Record a status transition with an explicit attempt identity.  A
@@ -760,10 +847,34 @@ impl MemoryRepository {
         _prompt_version: Option<&str>,
         attempt_id: Option<&str>,
     ) -> StoreResult<bool> {
+        self.append_summary_status_with_reason(
+            entity_id,
+            status,
+            model_id,
+            _prompt_version,
+            None,
+            attempt_id,
+        )
+        .await
+    }
+
+    /// Record a status transition together with its stable machine-readable
+    /// terminal reason.  Live summary callbacks use this path so a timeout,
+    /// model decline, or malformed output remains actionable in Memory
+    /// Manager after the raw event has been preserved.
+    pub async fn append_summary_status_with_reason(
+        &self,
+        entity_id: &str,
+        status: &str,
+        model_id: Option<&str>,
+        _prompt_version: Option<&str>,
+        reason: Option<&str>,
+        attempt_id: Option<&str>,
+    ) -> StoreResult<bool> {
         let explicit_attempt = attempt_id.is_some();
         let attempt_id = attempt_id
             .map(str::to_string)
-            .unwrap_or_else(|| summary_attempt_id(entity_id, status, model_id, None));
+            .unwrap_or_else(|| summary_attempt_id(entity_id, status, model_id, reason));
         let canonical_id = Self::canonical_event_id(entity_id);
         if let Some(current) = self.read_summary_statuses()?.get(&canonical_id) {
             // Legacy status rows are intentionally reopenable by the explicit
@@ -795,7 +906,7 @@ impl MemoryRepository {
             status,
             model_id,
             Some(SUMMARY_PROMPT_VERSION),
-            None,
+            reason,
             Some(attempt_id.as_str()),
         )?;
         self.commit_operation(envelope).await
@@ -3196,6 +3307,101 @@ mod tests {
         assert!(repository.paths().facts().is_dir());
         assert!(repository.paths().embeddings().is_dir());
         assert!(repository.paths().manifest().is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stale_manifest_on_large_journal_is_reconciled_before_live_write() {
+        let root =
+            std::env::temp_dir().join(format!("memory-v2-large-stale-manifest-{}", Uuid::new_v4()));
+        let paths = MemoryPaths::from_runtime_root(&root).unwrap();
+        let journal = Journal::from_paths(&paths).unwrap();
+        for path in [paths.raw_events(), paths.facts(), paths.embeddings()] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let baseline = summary_status_envelope_with_attempt(
+            "large-stale-manifest-baseline",
+            "pending",
+            None,
+            None,
+            None,
+            Some("attempt-large-stale-baseline"),
+        )
+        .unwrap();
+        journal
+            .write_batch(
+                "large-stale-manifest-baseline-batch",
+                &[(
+                    baseline.operation_id().to_string(),
+                    OperationKind::SummaryStatus,
+                    serde_json::to_value(&baseline).unwrap(),
+                )],
+            )
+            .unwrap();
+        // Publish a valid manifest for the baseline, then append the large
+        // batch. This exercises a genuinely stale pointer (rather than only a
+        // missing manifest) like an interrupted prior materialization.
+        ManifestSelector::from_paths(&paths)
+            .unwrap()
+            .select(1, 3)
+            .unwrap();
+        let entity_id = stable_uuid("large-stale-manifest-status").to_string();
+        let payload = json!({
+            "entity_id": entity_id,
+            "event_id": entity_id,
+            "attempt_id": "attempt-large-stale-manifest",
+            "status": "pending",
+            "model_id": SUMMARY_MODEL_ID,
+            "prompt_version": SUMMARY_PROMPT_VERSION,
+            "reason": null,
+            // Keep the operation semantically small while making the journal
+            // cross the production compact-recovery threshold. This mirrors a
+            // large compatibility journal whose manifest was not advanced.
+            "padding": "x".repeat(65 * 1024 * 1024),
+        });
+        let envelope = OperationEnvelope::new(
+            OperationKind::SummaryStatus,
+            &entity_id,
+            "1970-01-01T00:00:00Z",
+            None,
+            payload,
+        )
+        .unwrap();
+        journal
+            .write_batch(
+                "large-stale-manifest-batch",
+                &[(
+                    envelope.operation_id().to_string(),
+                    OperationKind::SummaryStatus,
+                    serde_json::to_value(&envelope).unwrap(),
+                )],
+            )
+            .unwrap();
+        assert!(
+            std::fs::metadata(paths.journal()).unwrap().len() >= 64 * 1024 * 1024,
+            "fixture must exercise compact journal recovery"
+        );
+
+        let repository = MemoryRepository::open(&root)
+            .await
+            .expect("a stale manifest must be repaired before accepting live writes");
+        assert!(repository.paths().manifest().is_file());
+        assert!(repository
+            .append_compat_event(CompatMemory {
+                id: "large-stale-manifest-live-event".into(),
+                memory_type: "user_speech".into(),
+                source: "User".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                document: "live event after stale-manifest recovery".into(),
+            })
+            .await
+            .unwrap());
+        assert!(repository
+            .read_raw_events()
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| { event.event_id() == stable_uuid("large-stale-manifest-live-event") }));
         let _ = std::fs::remove_dir_all(root);
     }
 

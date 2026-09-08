@@ -2227,7 +2227,12 @@ impl SessionManager {
         context: Option<SessionContext>,
     ) {
         let Some(redacted_content) = admit_redacted_memory_text(&event.content) else {
-            let _ = lance_memory::mark_summary_fallback(&self.root_dir, &event.id).await;
+            let _ = lance_memory::mark_summary_fallback_with_reason(
+                &self.root_dir,
+                &event.id,
+                "invalid_model_output",
+            )
+            .await;
             return;
         };
         event.content = redacted_content;
@@ -2244,7 +2249,15 @@ impl SessionManager {
         {
             Ok(decision) => decision,
             Err(error) => {
-                match lance_memory::mark_summary_fallback(&self.root_dir, &event.id).await {
+                let reason = runtime_failure_reason(&error)
+                    .unwrap_or_else(|| inference_failure_reason(&error));
+                match lance_memory::mark_summary_fallback_with_reason(
+                    &self.root_dir,
+                    &event.id,
+                    reason,
+                )
+                .await
+                {
                     Ok(_) => self.log_mgr.warn(
                         "Memory",
                         &format!(
@@ -2280,7 +2293,13 @@ impl SessionManager {
         };
 
         if !decision.should_store {
-            match lance_memory::mark_summary_skipped(&self.root_dir, &event.id).await {
+            match lance_memory::mark_summary_skipped_with_reason(
+                &self.root_dir,
+                &event.id,
+                "model_declined",
+            )
+            .await
+            {
                 Ok(true) => self.log_mgr.info(
                     "Memory",
                     &memory_event_log_message(
@@ -2326,7 +2345,13 @@ impl SessionManager {
         {
             Some(text) => text,
             _ => {
-                match lance_memory::mark_summary_fallback(&self.root_dir, &event.id).await {
+                match lance_memory::mark_summary_fallback_with_reason(
+                    &self.root_dir,
+                    &event.id,
+                    "empty_summary",
+                )
+                .await
+                {
                     Ok(_) => self.log_mgr.warn(
                         "Memory",
                         &memory_event_log_message(
@@ -2447,20 +2472,28 @@ impl SessionManager {
                     "summary_completion_unchanged",
                 ),
             ),
-            Err(error) => self.log_mgr.warn(
-                "Memory",
-                &format!(
-                    "{} error={}",
-                    memory_event_log_message(
-                        &event.id,
-                        &event.r#type,
-                        &event.author,
-                        &event.content,
-                        "summary_completion_failed"
+            Err(error) => {
+                let _ = lance_memory::mark_summary_fallback_with_reason(
+                    &self.root_dir,
+                    &event.id,
+                    "journal_commit_failed",
+                )
+                .await;
+                self.log_mgr.warn(
+                    "Memory",
+                    &format!(
+                        "{} error={}",
+                        memory_event_log_message(
+                            &event.id,
+                            &event.r#type,
+                            &event.author,
+                            &event.content,
+                            "summary_completion_failed"
+                        ),
+                        error
                     ),
-                    error
-                ),
-            ),
+                );
+            }
         }
     }
 
@@ -2664,6 +2697,26 @@ impl SessionManager {
         app_handle: Option<&AppHandle>,
     ) -> Option<PersistedAsrEvent> {
         let event_id = uuid::Uuid::new_v4().to_string();
+        // Allocate the durable identity and append the redacted SessionEvent
+        // before any wake-word/UI/AI work.  This keeps the in-memory session
+        // history lossless even when a later detector or transport step
+        // fails, and makes the callback's first observable action the same
+        // event that will be written to the authoritative raw journal.
+        let (event_type, author) = match stream {
+            "mic" => ("user_speech", "User"),
+            "discord" => ("discord_speech", "Discord"),
+            _ => return None,
+        };
+        let content = admit_redacted_memory_text(text)?;
+        let event = SessionEvent {
+            id: event_id.clone(),
+            r#type: event_type.to_string(),
+            author: author.to_string(),
+            content,
+            timestamp: Local::now().to_rfc3339(),
+        };
+        self.append_event_to_session(event.clone(), Some(context));
+
         let detector_is_current = self.is_current_session(context);
         let decision = if detector_is_current {
             self.asr_engine
@@ -2755,21 +2808,6 @@ impl SessionManager {
             );
         }
 
-        let (event_type, author) = match stream {
-            "mic" => ("user_speech", "User"),
-            "discord" => ("discord_speech", "Discord"),
-            _ => return None,
-        };
-        let content = admit_redacted_memory_text(text)?;
-        let event = SessionEvent {
-            id: event_id,
-            r#type: event_type.to_string(),
-            author: author.to_string(),
-            content,
-            timestamp: Local::now().to_rfc3339(),
-        };
-
-        self.append_event_to_session(event.clone(), Some(context));
         if !self
             .save_event_to_memory_with_app_context(
                 &event,

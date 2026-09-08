@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod ai_client;
 pub mod asr;
 pub mod audio;

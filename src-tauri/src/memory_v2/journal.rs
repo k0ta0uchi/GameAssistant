@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -142,6 +142,12 @@ pub(crate) struct IndexedOperation {
     pub(crate) operation_kind: String,
     pub(crate) payload_digest: String,
     pub(crate) sequence: u64,
+    /// Byte offset of the operation frame in the journal.  The compact index
+    /// deliberately omits the payload, but a stale manifest still needs to
+    /// replay only the missing operations without loading the whole journal.
+    /// Incremental in-process updates may leave this unset; a fresh index
+    /// rebuilt from disk always records it.
+    pub(crate) offset: Option<u64>,
     pub(crate) raw_event: Option<IndexedRawEvent>,
     pub(crate) summary_status: Option<IndexedSummaryStatus>,
     pub(crate) summary_status_error: Option<String>,
@@ -809,6 +815,51 @@ impl Journal {
         Ok(index)
     }
 
+    /// Read operation frames at offsets supplied by a previously validated
+    /// compact index.  Keeping this seek/read step in the journal layer lets a
+    /// large-journal reconciliation materialize bounded chunks without
+    /// rebuilding a `RecoveryReport` containing every historical payload.
+    pub(crate) fn read_operation_records_at_offsets(
+        &self,
+        offsets: &[u64],
+    ) -> Result<Vec<JournalRecord>, JournalError> {
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _lock = FileLock::acquire(&self.lock_path)?;
+        let file = File::open(&self.path)?;
+        let mut reader = BufReader::new(file);
+        let mut line_bytes = Vec::new();
+        let mut records = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            reader.seek(SeekFrom::Start(*offset))?;
+            line_bytes.clear();
+            let read = reader.read_until(b'\n', &mut line_bytes)?;
+            if read == 0 || !line_bytes.ends_with(b"\n") {
+                return Err(JournalError::MalformedCompleteLine {
+                    line: 0,
+                    message: format!("missing operation frame at offset {offset}"),
+                });
+            }
+            let mut raw = &line_bytes[..line_bytes.len() - 1];
+            raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+            let line =
+                std::str::from_utf8(raw).map_err(|error| JournalError::MalformedCompleteLine {
+                    line: 0,
+                    message: error.to_string(),
+                })?;
+            let record = parse_record(line, 0)?;
+            if record.state != JournalState::Operation {
+                return Err(JournalError::MidFileCorruption {
+                    line: 0,
+                    message: format!("indexed offset {offset} is not an operation frame"),
+                });
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
     fn cached_index(&self) -> Result<Option<Arc<JournalIndex>>, JournalError> {
         let metadata = std::fs::metadata(&self.path)?;
         let file_len = metadata.len();
@@ -930,6 +981,7 @@ impl Journal {
                         operation_kind: record.operation_kind,
                         payload_digest: canonical_payload_digest(&record.payload)?,
                         sequence: record.sequence,
+                        offset: Some(line_start),
                         raw_event: metadata.raw_event,
                         summary_status: metadata.summary_status,
                         summary_status_error: metadata.summary_status_error,
@@ -1703,6 +1755,7 @@ fn update_index_after_batch(
                 operation_kind: record.operation_kind.clone(),
                 payload_digest: canonical_payload_digest(&record.payload)?,
                 sequence: record.sequence,
+                offset: None,
                 raw_event: metadata.raw_event,
                 summary_status: metadata.summary_status,
                 summary_status_error: metadata.summary_status_error,
