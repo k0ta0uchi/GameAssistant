@@ -27,6 +27,11 @@ Obsidian/
 .specify/
 specs/
 
+# Local review/specification documents (retain locally, never commit)
+/specs/004-asr-wakeword-fact-blog-reliability/
+/doc/
+/docs/
+
 wheels/
 
 test/
