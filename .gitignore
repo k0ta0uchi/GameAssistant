@@ -54,6 +54,11 @@ dist_release/
 skills/k0ta-writing-style/
 
 # Local build, review, and reproduction artifacts
+.uv-cache*/
+.uv-repro-cache*/
+.hf-cache/
+.python/
+.ruff_cache/
 /_repro_startup_*/
 /runtime/
 /build_spec_report*.log
