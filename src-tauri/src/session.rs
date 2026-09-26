@@ -4044,9 +4044,9 @@ impl SessionManager {
         let _ = self.audio_input_mgr.start_mic_stream(
             Some(audio_device),
             app_handle.clone(),
-            move |samples: Vec<f32>| {
+            Some(Arc::new(move |samples: Vec<f32>| {
                 ws_for_mic.send_audio("mic", &samples);
-            },
+            })),
         );
 
         // 3. Discord 音声ループバックキャプチャ＆文字起こし開始 (オプション)
@@ -4064,9 +4064,10 @@ impl SessionManager {
 
             let _ = self.audio_input_mgr.start_discord_stream(
                 Some(discord_device),
-                move |samples: Vec<f32>| {
+                app_handle.clone(),
+                Some(Arc::new(move |samples: Vec<f32>| {
                     ws_for_discord.send_audio("discord", &samples);
-                },
+                })),
             );
         }
 
@@ -4205,6 +4206,38 @@ impl SessionManager {
 
     pub fn stop_session(&self) {
         let _ = self.stop_session_internal();
+    }
+
+    pub fn start_audio_preview(
+        &self,
+        mic_device: Option<String>,
+        discord_device: Option<String>,
+        enable_discord: bool,
+        app_handle: AppHandle,
+    ) {
+        if !self.is_active.load(Ordering::SeqCst) {
+            let _ = self.audio_input_mgr.start_mic_stream(
+                mic_device,
+                Some(app_handle.clone()),
+                None,
+            );
+
+            if enable_discord {
+                let _ = self.audio_input_mgr.start_discord_stream(
+                    discord_device,
+                    Some(app_handle),
+                    None,
+                );
+            } else {
+                self.audio_input_mgr.stop_discord();
+            }
+        }
+    }
+
+    pub fn stop_audio_preview(&self) {
+        if !self.is_active.load(Ordering::SeqCst) {
+            self.audio_input_mgr.stop();
+        }
     }
 
     /// Final process teardown used by the Tauri exit hook. Normal session

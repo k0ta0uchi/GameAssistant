@@ -27,6 +27,16 @@ fn main() {
             println!("cargo:rerun-if-changed={}", resource.display());
             println!("cargo:rerun-if-changed={}", manifest.display());
         }
+
+        cc::Build::new()
+            .cpp(true)
+            .flag("/utf-8")
+            .file("src/process_loopback.cpp")
+            .compile("process_loopback");
+        println!("cargo:rerun-if-changed=src/process_loopback.cpp");
+        println!("cargo:rustc-link-lib=mmdevapi");
+        println!("cargo:rustc-link-lib=ole32");
+        println!("cargo:rustc-link-lib=user32");
     }
 
     // The optional server is embedded only when the release maintainer places

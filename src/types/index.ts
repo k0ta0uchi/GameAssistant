@@ -53,6 +53,11 @@ export interface LevelMeterEvent {
   level: number;
 }
 
+export interface DiscordLevelMeterEvent {
+  type: "discord_level_meter";
+  level: number;
+}
+
 export interface GeminiResponseEvent {
   type: "gemini_response";
   text: string;
@@ -91,6 +96,7 @@ export type WsMessage =
   | LogHistoryEvent
   | AsrEvent
   | LevelMeterEvent
+  | DiscordLevelMeterEvent
   | GeminiResponseEvent
   | ResourceStatusEvent
   | CommentaryTimerEvent

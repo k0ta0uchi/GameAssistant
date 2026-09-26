@@ -24,6 +24,7 @@ interface SidebarProps {
   discordDevices: string[];
   selectedDiscordDevice: string;
   onDiscordDeviceChange: (dev: string) => void;
+  discordLevelMeter?: number;
 
   windows: string[];
   selectedWindow: string;
@@ -57,6 +58,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   discordDevices,
   selectedDiscordDevice,
   onDiscordDeviceChange,
+  discordLevelMeter = 0,
   windows,
   selectedWindow,
   onWindowChange,
@@ -110,6 +112,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
           discordDevices={discordDevices}
           selectedDiscordDevice={selectedDiscordDevice}
           onDiscordDeviceChange={onDiscordDeviceChange}
+          discordLevelMeter={discordLevelMeter}
         />
 
         {/* ターゲットウィンドウカード */}
@@ -146,3 +149,4 @@ export const Sidebar: React.FC<SidebarProps> = ({
     </aside>
   );
 };
+

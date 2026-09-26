@@ -15,6 +15,7 @@ export function App() {
     isConnected,
     status,
     levelMeter,
+    discordLevelMeter,
     currentAsr,
     asrHistory,
     factHistory,
@@ -122,6 +123,7 @@ export function App() {
             selectedDevice={selectedDevice}
             onDeviceChange={(dev) => updateSetting("audio_device", dev)}
             levelMeter={levelMeter}
+            discordLevelMeter={discordLevelMeter}
             enableDiscordCapture={enableDiscordCapture}
             onToggleDiscordCapture={(enabled) =>
               updateSetting("enable_discord_capture", enabled)
@@ -255,3 +257,4 @@ export function App() {
 }
 
 export default App;
+

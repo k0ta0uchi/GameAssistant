@@ -4,3 +4,7 @@
 fn main() {
     gameassistant_lib::run();
 }
+
+// build trigger
+
+// build trigger 2

@@ -715,6 +715,7 @@ export function useAppState() {
 
   // 音声レベル
   const [levelMeter, setLevelMeter] = useState<number>(0);
+  const [discordLevelMeter, setDiscordLevelMeter] = useState<number>(0);
 
   // 音声認識 (ASR)
   const [currentAsr, setCurrentAsr] = useState<{
@@ -869,6 +870,12 @@ export function useAppState() {
                   setStatus((prev) => ({ ...prev, asr: false }));
                 }, 450);
               }
+            }
+          });
+
+          await register<number>("discord_level_meter", (event) => {
+            if (typeof event.payload === "number") {
+              setDiscordLevelMeter(event.payload);
             }
           });
 
@@ -1411,6 +1418,19 @@ export function useAppState() {
   }, [fetchPreview]);
 
   // 3. デバイス一覧取得（既存の設定値を保護）
+    // 常時オーディオプレビュー (セッション開始前でもメーターを動かす)
+  useEffect(() => {
+    if (!status.session && isTauriEnv()) {
+      import("@tauri-apps/api/core").then(({ invoke }) => {
+        invoke("start_audio_preview", {
+          micDevice: selectedDevice,
+          discordDevice: selectedDiscordDevice,
+          enableDiscord: enableDiscordCapture,
+        }).catch((err) => console.warn("Failed to start audio preview:", err));
+      });
+    }
+  }, [status.session, selectedDevice, selectedDiscordDevice, enableDiscordCapture]);
+
   const fetchDevices = useCallback(async () => {
     try {
       if (isTauriEnv()) {
@@ -1418,20 +1438,25 @@ export function useAppState() {
         const audioData = await invoke<{
           input_devices: string[];
           default_device: string | null;
+          output_devices?: string[];
+          default_output_device?: string | null;
         }>("list_audio_devices");
-        if (audioData && audioData.input_devices.length > 0) {
-          setInputDevices(audioData.input_devices);
-          setDiscordDevices([
-            "Auto (Discord App / System Loopback)",
-            ...audioData.input_devices,
-          ]);
-          setSelectedDevice((prev) => {
-            if (prev) return prev;
-            return audioData.default_device || audioData.input_devices[0];
+        if (audioData) {
+          if (audioData.input_devices && audioData.input_devices.length > 0) {
+            setInputDevices(audioData.input_devices);
+            setSelectedDevice((prev) => {
+              if (prev) return prev;
+              return audioData.default_device || audioData.input_devices[0];
+            });
+          }
+          const discordDevs = (audioData.output_devices && audioData.output_devices.length > 0)
+            ? audioData.output_devices
+            : ["Default (System Playback Loopback)"];
+          setDiscordDevices(discordDevs);
+          setSelectedDiscordDevice((prev) => {
+            if (prev && discordDevs.includes(prev)) return prev;
+            return audioData.default_output_device || discordDevs[0];
           });
-          setSelectedDiscordDevice(
-            (prev) => prev || "Auto (Discord App / System Loopback)",
-          );
           return;
         }
       }
@@ -2468,6 +2493,7 @@ export function useAppState() {
     isConnected,
     status,
     levelMeter,
+    discordLevelMeter,
     currentAsr,
     asrHistory,
     factHistory,
@@ -2518,3 +2544,5 @@ export function useAppState() {
     cancelSetup,
   };
 }
+
+

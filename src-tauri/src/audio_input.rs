@@ -1,5 +1,4 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::StreamConfig;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -10,17 +9,110 @@ use tauri::{AppHandle, Emitter};
 
 use crate::logger::LogManager;
 
+pub type PcmCallback = Arc<dyn Fn(Vec<f32>) + Send + Sync>;
+
+#[cfg(windows)]
+extern "C" {
+    fn start_discord_process_loopback(
+        callback: extern "C" fn(*const f32, i32, i32, i32, *mut std::ffi::c_void),
+        user_data: *mut std::ffi::c_void,
+    ) -> i32;
+    fn stop_discord_process_loopback();
+    #[allow(dead_code)]
+    fn is_discord_process_loopback_running() -> bool;
+}
+
+#[cfg(windows)]
+struct DiscordCallbackContext {
+    app_handle: Option<AppHandle>,
+    on_pcm_data: Option<PcmCallback>,
+    is_running: Arc<AtomicBool>,
+    max_meter_val: Mutex<f64>,
+    last_meter_emit: Mutex<Instant>,
+}
+
+#[cfg(windows)]
+extern "C" fn discord_audio_callback(
+    samples_ptr: *const f32,
+    num_samples: i32,
+    sample_rate: i32,
+    channels: i32,
+    user_data: *mut std::ffi::c_void,
+) {
+    if samples_ptr.is_null() || num_samples <= 0 || user_data.is_null() {
+        return;
+    }
+
+    let ctx = unsafe { &*(user_data as *const DiscordCallbackContext) };
+    if !ctx.is_running.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts(samples_ptr, num_samples as usize) };
+
+    // 音量レベルメーターの計算
+    let meter_val = calculate_meter_level(slice);
+    {
+        let mut cur = ctx.max_meter_val.lock();
+        if meter_val > *cur {
+            *cur = meter_val;
+        }
+    }
+
+    // 50ms ごとに最大ピークを emit
+    let should_emit = {
+        let mut last = ctx.last_meter_emit.lock();
+        if last.elapsed() >= Duration::from_millis(50) {
+            *last = Instant::now();
+            true
+        } else {
+            false
+        }
+    };
+
+    if should_emit {
+        let emit_val = {
+            let mut cur = ctx.max_meter_val.lock();
+            let v = *cur;
+            *cur = 0.0;
+            v
+        };
+        if let Some(ref handle) = ctx.app_handle {
+            let _ = handle.emit("discord_level_meter", emit_val);
+        }
+    }
+
+    // 音声データが検出された場合（有音時）、Whisper へ PCM 転送 (16kHz モノラル)
+    if meter_val > 0.5 {
+        if let Some(ref cb) = ctx.on_pcm_data {
+            let resampled = resample_linear(
+                slice,
+                sample_rate as u32,
+                16000,
+                channels as usize,
+            );
+            if !resampled.is_empty() {
+                cb(resampled);
+            }
+        }
+    }
+}
+
 enum AudioCommand {
     StartMic {
         device_name: Option<String>,
         app_handle: Option<AppHandle>,
-        on_pcm_data: Arc<dyn Fn(Vec<f32>) + Send + Sync>,
+        on_pcm_data: Option<PcmCallback>,
     },
     StartDiscord {
+        #[allow(dead_code)]
         device_name: Option<String>,
-        on_pcm_data: Arc<dyn Fn(Vec<f32>) + Send + Sync>,
+        app_handle: Option<AppHandle>,
+        on_pcm_data: Option<PcmCallback>,
     },
-    Stop,
+    StopMic,
+    StopDiscord,
+    StopAll,
 }
 
 pub struct AudioInputManager {
@@ -41,9 +133,11 @@ impl AudioInputManager {
         let is_running_clone = is_running.clone();
         let log_mgr_clone = log_mgr.clone();
 
+        #[allow(unused_assignments)]
         let handle = thread::spawn(move || {
             let mut mic_stream: Option<cpal::Stream> = None;
-            let mut discord_stream: Option<cpal::Stream> = None;
+            #[cfg(windows)]
+            let mut _discord_ctx: Option<Box<DiscordCallbackContext>> = None;
 
             while let Ok(cmd) = rx.recv() {
                 match cmd {
@@ -57,18 +151,15 @@ impl AudioInputManager {
                         }
 
                         let host = cpal::default_host();
-                        let device = if let Some(name) = device_name {
+                        let all_inputs = host.input_devices().map(|iter| iter.collect::<Vec<_>>()).unwrap_or_default();
+                        let device = if let Some(ref name) = device_name {
                             if name.is_empty()
                                 || name == "Default (System Default)"
                                 || name == "Default"
                             {
                                 host.default_input_device()
                             } else {
-                                host.input_devices()
-                                    .ok()
-                                    .and_then(|mut devs| {
-                                        devs.find(|d| d.name().map(|n| n == name).unwrap_or(false))
-                                    })
+                                find_device_fuzzy(&all_inputs, name)
                                     .or_else(|| host.default_input_device())
                             }
                         } else {
@@ -88,7 +179,7 @@ impl AudioInputManager {
                             Err(e) => {
                                 log_mgr_clone.error(
                                     "Audio",
-                                    &format!("Failed to get default config: {}", e),
+                                    &format!("Failed to get default input config: {}", e),
                                 );
                                 continue;
                             }
@@ -98,16 +189,16 @@ impl AudioInputManager {
                         log_mgr_clone.info(
                             "Audio",
                             &format!(
-                                "Connecting to microphone: '{}' (sample_rate: {}, channels: {})",
+                                "Connecting to microphone: '{}' (sample_rate: {}, channels: {}, format: {:?})",
                                 dev_name,
                                 default_cfg.sample_rate().0,
-                                default_cfg.channels()
+                                default_cfg.channels(),
+                                default_cfg.sample_format()
                             ),
                         );
 
-                        let stream_config: StreamConfig = default_cfg.into();
-                        let in_sample_rate = stream_config.sample_rate.0;
-                        let in_channels = stream_config.channels as usize;
+                        let in_sample_rate = default_cfg.sample_rate().0;
+                        let in_channels = default_cfg.channels() as usize;
                         let target_sample_rate = 16000u32;
 
                         let last_meter_emit = Arc::new(Mutex::new(Instant::now()));
@@ -115,46 +206,36 @@ impl AudioInputManager {
                         let app_handle_meter = app_handle.clone();
                         let on_pcm_cb = on_pcm_data.clone();
 
-                        let err_fn = move |err| {
-                            eprintln!("Mic audio stream error: {}", err);
-                        };
-
-                        let stream_res = dev.build_input_stream(
-                            &stream_config,
-                            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        let stream_res = build_flexible_input_stream(
+                            &dev,
+                            &default_cfg,
+                            move |data: &[f32]| {
                                 if !is_running_cb.load(Ordering::SeqCst) {
                                     return;
                                 }
 
-                                // 1. レベルメーター計算 (RMS)
-                                let mut sum_sq = 0.0f32;
-                                for i in (0..data.len()).step_by(in_channels) {
-                                    sum_sq += data[i] * data[i];
-                                }
-                                let rms =
-                                    (sum_sq / (data.len() / in_channels).max(1) as f32).sqrt();
-
+                                // 1. レベルメーター計算 (Peak & RMS ハイブリッド)
                                 if last_meter_emit.lock().elapsed() >= Duration::from_millis(50) {
                                     *last_meter_emit.lock() = Instant::now();
                                     if let Some(ref handle) = app_handle_meter {
-                                        let meter_val = (rms * 250.0).clamp(0.0, 100.0);
+                                        let meter_val = calculate_meter_level(data);
                                         let _ = handle.emit("level_meter", meter_val);
                                     }
                                 }
 
-                                // 2. 16kHz モノラルへリサンプリングし、ストリーミングキューへ直接送信
-                                let resampled = resample_linear(
-                                    data,
-                                    in_sample_rate,
-                                    target_sample_rate,
-                                    in_channels,
-                                );
-                                if !resampled.is_empty() {
-                                    on_pcm_cb(resampled);
+                                // 2. 16kHz モノラルへリサンプリングし、コールバックがあれば転送
+                                if let Some(ref cb) = on_pcm_cb {
+                                    let resampled = resample_linear(
+                                        data,
+                                        in_sample_rate,
+                                        target_sample_rate,
+                                        in_channels,
+                                    );
+                                    if !resampled.is_empty() {
+                                        cb(resampled);
+                                    }
                                 }
                             },
-                            err_fn,
-                            None,
                         );
 
                         match stream_res {
@@ -172,92 +253,65 @@ impl AudioInputManager {
                         }
                     }
                     AudioCommand::StartDiscord {
-                        device_name,
+                        device_name: _,
+                        app_handle,
                         on_pcm_data,
                     } => {
-                        if let Some(s) = discord_stream.take() {
-                            let _ = s.pause();
-                        }
+                        #[cfg(windows)]
+                        {
+                            unsafe { stop_discord_process_loopback(); }
+                            _discord_ctx = None;
 
-                        let host = cpal::default_host();
-                        let device = if let Some(name) = device_name {
-                            if name.is_empty()
-                                || name == "Default (System Default)"
-                                || name == "Default"
-                            {
-                                host.default_input_device()
+                            log_mgr_clone.info("Discord", "Starting Discord process loopback capture (OBS Application Audio Capture)...");
+
+                            let ctx = Box::new(DiscordCallbackContext {
+                                app_handle,
+                                on_pcm_data,
+                                is_running: is_running_clone.clone(),
+                                max_meter_val: Mutex::new(0.0),
+                                last_meter_emit: Mutex::new(Instant::now()),
+                            });
+                            let ctx_ptr = Box::into_raw(ctx);
+
+                            let res = unsafe {
+                                start_discord_process_loopback(
+                                    discord_audio_callback,
+                                    ctx_ptr as *mut std::ffi::c_void,
+                                )
+                            };
+
+                            if res == 0 {
+                                is_running_clone.store(true, Ordering::SeqCst);
+                                _discord_ctx = Some(unsafe { Box::from_raw(ctx_ptr) });
+                                log_mgr_clone.info("Discord", "Discord process loopback started successfully (target: Discord.exe)");
                             } else {
-                                host.input_devices()
-                                    .ok()
-                                    .and_then(|mut devs| {
-                                        devs.find(|d| d.name().map(|n| n == name).unwrap_or(false))
-                                    })
-                                    .or_else(|| host.default_input_device())
-                            }
-                        } else {
-                            host.default_input_device()
-                        };
-
-                        if let Some(dev) = device {
-                            let default_cfg = match dev.default_input_config() {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    log_mgr_clone.error(
-                                        "Discord",
-                                        &format!("Failed to get default config: {}", e),
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            let dev_name = dev.name().unwrap_or_else(|_| "Unknown".to_string());
-                            log_mgr_clone.info("Discord", &format!("Starting Discord Audio Capture stream on '{}' (sample_rate: {}, channels: {})", dev_name, default_cfg.sample_rate().0, default_cfg.channels()));
-
-                            let stream_config: StreamConfig = default_cfg.into();
-                            let in_sample_rate = stream_config.sample_rate.0;
-                            let in_channels = stream_config.channels as usize;
-                            let target_sample_rate = 16000u32;
-
-                            let is_running_cb = is_running_clone.clone();
-                            let on_pcm_cb = on_pcm_data.clone();
-
-                            let err_fn = move |err| {
-                                eprintln!("Discord audio stream error: {}", err);
-                            };
-
-                            if let Ok(stream) = dev.build_input_stream(
-                                &stream_config,
-                                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                                    if !is_running_cb.load(Ordering::SeqCst) {
-                                        return;
-                                    }
-
-                                    let resampled = resample_linear(
-                                        data,
-                                        in_sample_rate,
-                                        target_sample_rate,
-                                        in_channels,
-                                    );
-                                    if !resampled.is_empty() {
-                                        on_pcm_cb(resampled);
-                                    }
-                                },
-                                err_fn,
-                                None,
-                            ) {
-                                if stream.play().is_ok() {
-                                    discord_stream = Some(stream);
-                                    log_mgr_clone.info("Discord", "Discord Audio stream active");
-                                }
+                                unsafe { drop(Box::from_raw(ctx_ptr)); }
+                                log_mgr_clone.error("Discord", "Failed to start Discord process loopback capture");
                             }
                         }
                     }
-                    AudioCommand::Stop => {
+                    AudioCommand::StopMic => {
                         if let Some(s) = mic_stream.take() {
                             let _ = s.pause();
                         }
-                        if let Some(s) = discord_stream.take() {
+                        log_mgr_clone.info("Audio", "Microphone stream stopped");
+                    }
+                    AudioCommand::StopDiscord => {
+                        #[cfg(windows)]
+                        {
+                            unsafe { stop_discord_process_loopback(); }
+                            _discord_ctx = None;
+                        }
+                        log_mgr_clone.info("Discord", "Discord process loopback stopped");
+                    }
+                    AudioCommand::StopAll => {
+                        if let Some(s) = mic_stream.take() {
                             let _ = s.pause();
+                        }
+                        #[cfg(windows)]
+                        {
+                            unsafe { stop_discord_process_loopback(); }
+                            _discord_ctx = None;
                         }
                         is_running_clone.store(false, Ordering::SeqCst);
                         log_mgr_clone.info("Audio", "All audio streams stopped");
@@ -280,24 +334,33 @@ impl AudioInputManager {
 
     pub fn stop(&self) {
         if let Some(ref tx) = *self.cmd_tx.lock() {
-            let _ = tx.send(AudioCommand::Stop);
+            let _ = tx.send(AudioCommand::StopAll);
         }
     }
 
-    pub fn start_mic_stream<F>(
+    pub fn stop_mic(&self) {
+        if let Some(ref tx) = *self.cmd_tx.lock() {
+            let _ = tx.send(AudioCommand::StopMic);
+        }
+    }
+
+    pub fn stop_discord(&self) {
+        if let Some(ref tx) = *self.cmd_tx.lock() {
+            let _ = tx.send(AudioCommand::StopDiscord);
+        }
+    }
+
+    pub fn start_mic_stream(
         &self,
         device_name: Option<String>,
         app_handle: Option<AppHandle>,
-        on_pcm_data: F,
-    ) -> Result<(), String>
-    where
-        F: Fn(Vec<f32>) + Send + Sync + 'static,
-    {
+        on_pcm_data: Option<PcmCallback>,
+    ) -> Result<(), String> {
         if let Some(ref tx) = *self.cmd_tx.lock() {
             tx.send(AudioCommand::StartMic {
                 device_name,
                 app_handle,
-                on_pcm_data: Arc::new(on_pcm_data),
+                on_pcm_data,
             })
             .map_err(|e| format!("Failed to send start mic audio command: {}", e))?;
             Ok(())
@@ -306,24 +369,80 @@ impl AudioInputManager {
         }
     }
 
-    pub fn start_discord_stream<F>(
+    pub fn start_discord_stream(
         &self,
         device_name: Option<String>,
-        on_pcm_data: F,
-    ) -> Result<(), String>
-    where
-        F: Fn(Vec<f32>) + Send + Sync + 'static,
-    {
+        app_handle: Option<AppHandle>,
+        on_pcm_data: Option<PcmCallback>,
+    ) -> Result<(), String> {
         if let Some(ref tx) = *self.cmd_tx.lock() {
             tx.send(AudioCommand::StartDiscord {
                 device_name,
-                on_pcm_data: Arc::new(on_pcm_data),
+                app_handle,
+                on_pcm_data,
             })
             .map_err(|e| format!("Failed to send start discord audio command: {}", e))?;
             Ok(())
         } else {
             Err("Audio worker thread not available".to_string())
         }
+    }
+}
+
+/// サポートされている任意のサンプルフォーマット (F32, I16, U16) で入力ストリームを構築する
+fn build_flexible_input_stream<F>(
+    dev: &cpal::Device,
+    default_cfg: &cpal::SupportedStreamConfig,
+    mut on_data: F,
+) -> Result<cpal::Stream, String>
+where
+    F: FnMut(&[f32]) + Send + Sync + 'static,
+{
+    let stream_config: cpal::StreamConfig = default_cfg.clone().into();
+    let err_fn = move |err| {
+        eprintln!("[Audio Stream Error]: {}", err);
+    };
+
+    match default_cfg.sample_format() {
+        cpal::SampleFormat::F32 => {
+            dev.build_input_stream(&stream_config, move |data: &[f32], _| on_data(data), err_fn, None)
+                .map_err(|e| format!("Failed to build F32 stream: {}", e))
+        }
+        cpal::SampleFormat::I16 => {
+            let mut buf = Vec::new();
+            dev.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _| {
+                    buf.clear();
+                    buf.reserve(data.len());
+                    for &s in data {
+                        buf.push(s as f32 / 32768.0);
+                    }
+                    on_data(&buf);
+                },
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Failed to build I16 stream: {}", e))
+        }
+        cpal::SampleFormat::U16 => {
+            let mut buf = Vec::new();
+            dev.build_input_stream(
+                &stream_config,
+                move |data: &[u16], _| {
+                    buf.clear();
+                    buf.reserve(data.len());
+                    for &s in data {
+                        buf.push((s as f32 - 32768.0) / 32768.0);
+                    }
+                    on_data(&buf);
+                },
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Failed to build U16 stream: {}", e))
+        }
+        other => Err(format!("Unsupported audio sample format: {:?}", other)),
     }
 }
 
@@ -361,3 +480,103 @@ pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32, channels: usi
 
     output
 }
+
+/// 全チャンネルの振幅（Peak & RMS ハイブリッド）からパーセンテージ（0.0 - 100.0, 小数点第1位）を算出する
+pub fn calculate_meter_level(data: &[f32]) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut max_abs = 0.0f32;
+    let mut sum_sq = 0.0f32;
+    for &s in data {
+        let abs = s.abs();
+        if abs > max_abs {
+            max_abs = abs;
+        }
+        sum_sq += s * s;
+    }
+    let rms = (sum_sq / data.len() as f32).sqrt();
+    // Peak 60% + RMS 40% のブレンドで素早い反応と持続音を両立
+    let level = max_abs * 0.6 + rms * 0.4;
+    // 人間の聴覚特性に合わせた自然なカーブ (sqrt)
+    let meter = (level.sqrt() * 100.0).clamp(0.0, 100.0);
+    (meter * 10.0).round() as f64 / 10.0
+}
+
+/// OBS Studio 風の柔軟なデバイス検索（完全一致 -> trim -> 大文字小文字無視 -> 部分一致）
+pub fn find_device_fuzzy(devs: &[cpal::Device], target: &str) -> Option<cpal::Device> {
+    let target_clean = target.trim();
+    if target_clean.is_empty() {
+        return None;
+    }
+    // 1. 完全一致
+    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n == target).unwrap_or(false)) {
+        return Some(d.clone());
+    }
+    // 2. trim() 一致
+    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n.trim() == target_clean).unwrap_or(false)) {
+        return Some(d.clone());
+    }
+    // 3. 大文字小文字無視
+    let target_lower = target_clean.to_lowercase();
+    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n.trim().to_lowercase() == target_lower).unwrap_or(false)) {
+        return Some(d.clone());
+    }
+    // 4. 部分一致 (contains)
+    if let Some(d) = devs.iter().find(|d| {
+        d.name().map(|n| {
+            let nl = n.to_lowercase();
+            nl.contains(&target_lower) || target_lower.contains(&nl)
+        }).unwrap_or(false)
+    }) {
+        return Some(d.clone());
+    }
+    None
+}
+
+/// OBS Silent Loopback Fix: 出力デバイスに対して無音 (0.0) を流すダミーストリームを作成し、
+/// WASAPI ループバックがスリープ・停止するのを防止して常時ウェイク状態に保つ
+pub fn build_keep_alive_render_stream(
+    dev: &cpal::Device,
+    cfg: &cpal::SupportedStreamConfig,
+) -> Option<cpal::Stream> {
+    let stream_cfg: cpal::StreamConfig = cfg.clone().into();
+    let stream = match cfg.sample_format() {
+        cpal::SampleFormat::F32 => dev.build_output_stream(
+            &stream_cfg,
+            |data: &mut [f32], _| {
+                for s in data.iter_mut() {
+                    *s = 0.0;
+                }
+            },
+            |_| {},
+            None,
+        ).ok(),
+        cpal::SampleFormat::I16 => dev.build_output_stream(
+            &stream_cfg,
+            |data: &mut [i16], _| {
+                for s in data.iter_mut() {
+                    *s = 0;
+                }
+            },
+            |_| {},
+            None,
+        ).ok(),
+        cpal::SampleFormat::U16 => dev.build_output_stream(
+            &stream_cfg,
+            |data: &mut [u16], _| {
+                for s in data.iter_mut() {
+                    *s = 32768;
+                }
+            },
+            |_| {},
+            None,
+        ).ok(),
+        _ => None,
+    };
+    if let Some(ref s) = stream {
+        let _ = s.play();
+    }
+    stream
+}
+

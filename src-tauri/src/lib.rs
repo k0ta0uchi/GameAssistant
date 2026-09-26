@@ -309,6 +309,23 @@ fn list_audio_devices() -> AudioDevicesResponse {
 }
 
 #[tauri::command]
+fn start_audio_preview(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    mic_device: Option<String>,
+    discord_device: Option<String>,
+    enable_discord: Option<bool>,
+) {
+    let enable_discord = enable_discord.unwrap_or(false);
+    state.session_mgr.start_audio_preview(mic_device, discord_device, enable_discord, app);
+}
+
+#[tauri::command]
+fn stop_audio_preview(state: State<'_, AppState>) {
+    state.session_mgr.stop_audio_preview();
+}
+
+#[tauri::command]
 async fn list_lance_memories(
     state: State<'_, AppState>,
     limit: Option<usize>,
@@ -1366,6 +1383,8 @@ pub fn run() {
             save_prompt,
             reset_prompt,
             list_audio_devices,
+            start_audio_preview,
+            stop_audio_preview,
             list_lance_memories,
             get_lance_migration_status,
             delete_lance_memory,
