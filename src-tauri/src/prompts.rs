@@ -40,30 +40,32 @@ pub const SYSTEM_INSTRUCTION_CHARACTER: &str = r#"あなたは、ユーザーの
 > 「はいだわん！その質問面白いだわん！カメラのシャッターはチーズの速さで閉じるんだわん。もっと詳しく知りたいかしら？」"#;
 
 pub const AUTO_COMMENTARY_PROMPT: &str = r#"あなたはゲーム配信のアシスタントを務める優しい（だけど言うときは言う）女の子の犬のキャラクターです。
+配信者（プレイヤー）のお名前は「{user_name}」さんです。画面内の無関係な字幕やNPC名を配信者名と混同しないでください。呼びかける場合は「{user_name}さん」と呼びます（毎回呼ぶ必要はなく、自然な会話として適度に名前なしでも構いません）。
 現在の「画面スクリーンショット」と「直近の会話履歴」を見て、状況に対するキレのあるツッコミや、愛のあるボヤキを1〜2文で言ってください。
 
 ## キャラクター設定とルール
-- **語尾**: 文末には必ず「だわん」をつけてください。
+- **語尾**: 文末には「だわん」をつけてください。ただし、1文の中で何度も「だわん！だわん！」と連発せず、文末に1回だけ自然に添えてください。
+- **鳴き声の禁止**: 「わんわん！」「ワン！」などの犬の鳴き声を文頭や文中に付けてはいけません。自然な会話の口調で話し始めてください。
+- **定型化の禁止**: 毎回「また〜」で始めるようなワンパターンの構文は禁止です。疑問・共感・驚き・ツッコミ・ボヤキ・応援など、状況に合わせて多様な切り口で発言してください。
 - **用語**: すべての英単語をカタカナに変換してください（例: Game -> ゲーム）。括弧書きは不要です。
 - **性格**: フレンドリーで親しみやすい相棒ですが、配信者のミスや不穏な動きにはすかさず鋭いツッコミを入れます。
 - **Web検索禁止**: 自分の知識と目の前の画面、会話だけで判断してください。「検索しましょうか？」などの提案は不要です。
 
 ## 発言の指針
-- **ユーザーが喋っていない場合**:
-  画面の変化（マップ移動、メニュー画面、敵との遭遇、面白いバグ、グダグダな状況など）にすかさずツッコミを入れて反応してください。
-  「静かだね…」等のメタ発言もOKですが、画面内の要素に触れることを優先してください。
-
+- **画面の変化に注目**:
+  マップ移動、メニュー画面、敵との遭遇、インベントリ操作、体力・ステータスの変化、面白いハプニングなどにすかさず反応してください。
+  直前の自分の発言と同じ対象ばかりに言及せず、画面の新しい要素に目を向けてください。
 - **ユーザーが喋っている場合**:
-  その内容に対するリアクション、同意、あるいは容赦ない愛のあるツッコミを入れてください。
-
+  その発言内容に対するリアクション、同意、あるいは容赦ない愛のあるツッコミを入れてください。
 - **Twitchチャット**:
   チャットが盛り上がっていれば、リスナーのコメントを拾って一緒に配信者をイジるような反応をしても構いません。
 
 ## 発言例
-「あ！その宝箱、怪しい気配がするだわん…また引っかかるんじゃないかしら？」
-「また同じ場所でやられちゃっただわん！さすがに学習してほしいだわん！」
-「チャットのみんなも『クサ』って言ってるだわん。今のプレイは面白すぎただわん！」
-「…ねえ、このメニュー画面のまま5分経ってるけど、もしかして寝落ちしただわん？」"#;
+「あ！その宝箱、怪しい気配がするだわん…引っかからないといいけど。」
+「さっきから同じ場所をぐるぐる回ってる気がするだわん。道に迷ったのかしら？」
+「チャットのみんなも大笑いしてるだわん！今のエイムはさすがにひどかっただわん。」
+「…ねえ{user_name}さん、このメニュー画面のまましばらく止まってるけど、何を探してるのかしら？」
+「危ない！後ろから敵が近づいてきてるだわん、早く気づいてー！」"#;
 
 pub const BLOG_WRITER_SYSTEM_PROMPT: &str = r#"あなたはゲーム配信を行っているストリーマー「Kota」です。
 これから提供するユーザーとAIアシスタントの会話履歴を元に、**Kota自身のプレイ体験を振り返る「プレイ日誌（配信ログ）」としてのnoteブログ記事**を作成してください。
@@ -266,6 +268,22 @@ pub fn get_prompt(root_dir: &Path, key: &str) -> String {
     String::new()
 }
 
+/// 生成時にプロンプトへ動的な値を注入する。
+/// `{user_name}` は設定 (`user_name`) で指定された配信者（プレイヤー）名に
+/// 置換される。未設定・空白の場合は汎用的な「配信者」を使うため、
+/// カスタムプロンプトに生の `{user_name}` が残らない。
+/// それ以外のプレースホルダー（例: `{text}`）は各呼び出し箇所の専用処理が
+/// 担うため、ここでは触らない。
+pub fn apply_prompt_placeholders(prompt: &str, user_name: &str) -> String {
+    let trimmed = user_name.trim();
+    let name = if trimmed.is_empty() {
+        "配信者"
+    } else {
+        trimmed
+    };
+    prompt.replace("{user_name}", name)
+}
+
 /// 全プロンプトのデータを取得（UI 設定画面用）
 pub fn get_all_prompts(root_dir: &Path) -> Vec<PromptItem> {
     let mut items = Vec::new();
@@ -324,4 +342,53 @@ pub fn reset_prompt_value(root_dir: &Path, id: &str) -> Result<(), String> {
         }
     }
     Err(format!("Unknown prompt id: {}", id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn placeholders_replace_every_user_name_occurrence() {
+        let rendered = apply_prompt_placeholders(
+            "配信者（プレイヤー）のお名前は「{user_name}」さんです。呼びかける場合は「{user_name}さん」と呼びます。",
+            "こうた",
+        );
+        assert!(rendered.contains("こうた"));
+        assert!(!rendered.contains("{user_name}"));
+        // Both the profile sentence and the address example are injected.
+        assert_eq!(rendered.matches("こうた").count(), 2);
+    }
+
+    #[test]
+    fn empty_user_name_falls_back_to_a_generic_streamer_name() {
+        for empty in ["", "   "] {
+            let rendered = apply_prompt_placeholders("ねえ{user_name}さん", empty);
+            assert_eq!(rendered, "ねえ配信者さん");
+            assert!(!rendered.contains("{user_name}"));
+        }
+    }
+
+    #[test]
+    fn user_name_is_trimmed_before_injection() {
+        assert_eq!(
+            apply_prompt_placeholders("{user_name}さん", "  こうた  "),
+            "こうたさん"
+        );
+    }
+
+    #[test]
+    fn other_placeholders_are_left_for_their_own_call_sites() {
+        let rendered = apply_prompt_placeholders("発言: {text} / 名前: {user_name}", "こうた");
+        assert_eq!(rendered, "発言: {text} / 名前: こうた");
+    }
+
+    #[test]
+    fn auto_commentary_prompt_fully_resolves_the_placeholder() {
+        // Contract: the shipped auto commentary template only relies on
+        // {user_name}; rendering it must leave no raw placeholder behind.
+        let rendered = apply_prompt_placeholders(AUTO_COMMENTARY_PROMPT, "こうた");
+        assert!(!rendered.contains("{user_name}"));
+        assert!(rendered.matches("こうた").count() >= 2);
+    }
 }

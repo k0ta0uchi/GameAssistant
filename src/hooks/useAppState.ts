@@ -109,7 +109,9 @@ export const isPortableRuntimeReadyForMainUi = (
       isRuntimeStatus(setup.status) &&
       setup.ready === true &&
       setup.required_models_ready === true &&
-      (setup.error === undefined || setup.error === null || setup.error === "") &&
+      (setup.error === undefined ||
+        setup.error === null ||
+        setup.error === "") &&
       setup.dependency_ready === true &&
       setup.python_import_ready === true &&
       setup.tokenizer_ready === true &&
@@ -568,7 +570,8 @@ const normalizeRuntimeInitializationStage = (
     status,
     progress: normalizeProgress(record.progress),
     elapsed_ms:
-      typeof record.elapsed_ms === "number" && Number.isFinite(record.elapsed_ms)
+      typeof record.elapsed_ms === "number" &&
+      Number.isFinite(record.elapsed_ms)
         ? Math.max(0, Math.round(record.elapsed_ms))
         : undefined,
     error: firstString(record.error),
@@ -584,7 +587,9 @@ export const normalizeRuntimeInitializationStatus = (
   const status = record.status;
   if (
     typeof status !== "string" ||
-    !RUNTIME_INITIALIZATION_STATES.includes(status as RuntimeInitializationState) ||
+    !RUNTIME_INITIALIZATION_STATES.includes(
+      status as RuntimeInitializationState,
+    ) ||
     typeof record.progress !== "number" ||
     !Array.isArray(record.stages) ||
     typeof record.asr_ready !== "boolean" ||
@@ -613,7 +618,8 @@ export const normalizeRuntimeInitializationStatus = (
         : undefined,
     message: optionalString("message"),
     elapsed_ms:
-      typeof record.elapsed_ms === "number" && Number.isFinite(record.elapsed_ms)
+      typeof record.elapsed_ms === "number" &&
+      Number.isFinite(record.elapsed_ms)
         ? Math.max(0, Math.round(record.elapsed_ms))
         : undefined,
     started_at: optionalString("started_at"),
@@ -635,8 +641,18 @@ const idleRuntimeInitializationStatus = (): RuntimeInitializationStatus => ({
   started_at: null,
   completed_at: null,
   stages: [
-    { id: "asr", label: "ASR / Faster-Whisper", status: "pending", progress: 0 },
-    { id: "embedding", label: "GLuCoSE-base-ja", status: "pending", progress: 0 },
+    {
+      id: "asr",
+      label: "ASR / Faster-Whisper",
+      status: "pending",
+      progress: 0,
+    },
+    {
+      id: "embedding",
+      label: "GLuCoSE-base-ja",
+      status: "pending",
+      progress: 0,
+    },
     { id: "memory_v2", label: "memory-v2", status: "pending", progress: 0 },
   ],
   asr_ready: false,
@@ -935,6 +951,7 @@ export function useAppState() {
                         isDiscord,
                         isPrompt,
                         latencyMs: event.payload.latency_ms ?? null,
+                        seq: Date.now(),
                       },
                     ];
                   });
@@ -962,7 +979,8 @@ export function useAppState() {
                     item.sourceEventId === fact.sourceEventId),
               );
               if (duplicate) return prev;
-              return [...prev.slice(-29), fact];
+              // seq: 到着順を記録し、文字起こしストリームに時系列で混ぜる
+              return [...prev.slice(-29), { ...fact, seq: Date.now() }];
             });
           });
 
@@ -984,6 +1002,18 @@ export function useAppState() {
               });
             }
           });
+
+          // Auto Commentary がバックエンドで撮影した最新フレームを
+          // Target Window カードのプレビューへ即時反映する。
+          // 以前はプレビューが「選択時/手動更新時」の静止画のまま古くなっていた。
+          await register<{ image?: string; source?: string }>(
+            "window_preview_updated",
+            (event) => {
+              if (event.payload?.image) {
+                setPreviewImage(event.payload.image);
+              }
+            },
+          );
 
           await register<{
             type: string;
@@ -1116,7 +1146,9 @@ export function useAppState() {
           // every stage transition.  Keep the UI truthful even when a stage
           // takes minutes (for example a large memory-v2 journal recovery).
           await register<unknown>("runtime_initialization", (event) => {
-            const snapshot = normalizeRuntimeInitializationStatus(event.payload);
+            const snapshot = normalizeRuntimeInitializationStatus(
+              event.payload,
+            );
             if (!snapshot) return;
             setRuntimeInitialization(snapshot);
           });
@@ -1189,7 +1221,8 @@ export function useAppState() {
                 : "mic";
           const isPrompt = Boolean(msg.is_prompt);
           const latencyMs =
-            typeof msg.latency_ms === "number" && Number.isFinite(msg.latency_ms)
+            typeof msg.latency_ms === "number" &&
+            Number.isFinite(msg.latency_ms)
               ? msg.latency_ms
               : null;
 
@@ -1418,7 +1451,7 @@ export function useAppState() {
   }, [fetchPreview]);
 
   // 3. デバイス一覧取得（既存の設定値を保護）
-    // 常時オーディオプレビュー (セッション開始前でもメーターを動かす)
+  // 常時オーディオプレビュー (セッション開始前でもメーターを動かす)
   useEffect(() => {
     if (!status.session && isTauriEnv()) {
       import("@tauri-apps/api/core").then(({ invoke }) => {
@@ -1429,7 +1462,12 @@ export function useAppState() {
         }).catch((err) => console.warn("Failed to start audio preview:", err));
       });
     }
-  }, [status.session, selectedDevice, selectedDiscordDevice, enableDiscordCapture]);
+  }, [
+    status.session,
+    selectedDevice,
+    selectedDiscordDevice,
+    enableDiscordCapture,
+  ]);
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -1449,9 +1487,10 @@ export function useAppState() {
               return audioData.default_device || audioData.input_devices[0];
             });
           }
-          const discordDevs = (audioData.output_devices && audioData.output_devices.length > 0)
-            ? audioData.output_devices
-            : ["Default (System Playback Loopback)"];
+          const discordDevs =
+            audioData.output_devices && audioData.output_devices.length > 0
+              ? audioData.output_devices
+              : ["Default (System Playback Loopback)"];
           setDiscordDevices(discordDevs);
           setSelectedDiscordDevice((prev) => {
             if (prev && discordDevs.includes(prev)) return prev;
@@ -1565,10 +1604,14 @@ export function useAppState() {
         const list = await invoke<ModelStatus[]>("get_models_status", {
           customDir: null,
         });
-        setModelsStatus(list);
-        const hasMissing = list.some((m) => m.required && !m.is_installed);
+        const validList = list.filter((m) => {
+          const key = `${m.id} ${m.name} ${m.hf_repo}`.toLowerCase();
+          return !key.includes("sup-simcse") && !key.includes("sup_simcse");
+        });
+        setModelsStatus(validList);
+        const hasMissing = validList.some((m) => m.required && !m.is_installed);
         setMissingRequiredModels(hasMissing);
-        return list;
+        return validList;
       }
     } catch (e) {
       console.warn("Failed to fetch models status:", e);
@@ -1757,8 +1800,12 @@ export function useAppState() {
     };
 
     void register<DownloadProgressEvent>("download_progress", (event) => {
-      if (disposed || !setupDownloadActiveRef.current) return;
+      if (disposed) return;
       const payload = event.payload;
+      if (payload?.status === "completed") {
+        void fetchModelsStatus();
+      }
+      if (!setupDownloadActiveRef.current) return;
       if (!payload || !isExpectedGemmaDownload(payload.model_id)) return;
       const status =
         payload.status === "completed" ? "completed" : payload.status;
@@ -1924,6 +1971,9 @@ export function useAppState() {
         throw new Error("初期化結果を読み取れませんでした。");
       }
       setRuntimeInitialization(normalized);
+      if (normalized.status === "completed") {
+        void fetchModelsStatus();
+      }
       return normalized;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1936,7 +1986,16 @@ export function useAppState() {
       showToast(`エンジン初期化エラー: ${message}`, "warning");
       return null;
     }
-  }, [showToast]);
+  }, [fetchModelsStatus, showToast]);
+
+  // 必須モデル不足の警告が出ている間、ダウンロード完了や配置を検知して自動解消するポーリング
+  useEffect(() => {
+    if (!isTauriEnv() || !missingRequiredModels) return;
+    const interval = window.setInterval(() => {
+      void fetchModelsStatus();
+    }, 4000);
+    return () => window.clearInterval(interval);
+  }, [missingRequiredModels, fetchModelsStatus]);
 
   // Mounting the main screen is the explicit initialization boundary.  The
   // ref prevents React StrictMode/effect replays from starting a second run;
@@ -2544,5 +2603,3 @@ export function useAppState() {
     cancelSetup,
   };
 }
-
-

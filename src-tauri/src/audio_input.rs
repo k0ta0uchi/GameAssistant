@@ -85,12 +85,7 @@ extern "C" fn discord_audio_callback(
     // 音声データが検出された場合（有音時）、Whisper へ PCM 転送 (16kHz モノラル)
     if meter_val > 0.5 {
         if let Some(ref cb) = ctx.on_pcm_data {
-            let resampled = resample_linear(
-                slice,
-                sample_rate as u32,
-                16000,
-                channels as usize,
-            );
+            let resampled = resample_linear(slice, sample_rate as u32, 16000, channels as usize);
             if !resampled.is_empty() {
                 cb(resampled);
             }
@@ -151,7 +146,10 @@ impl AudioInputManager {
                         }
 
                         let host = cpal::default_host();
-                        let all_inputs = host.input_devices().map(|iter| iter.collect::<Vec<_>>()).unwrap_or_default();
+                        let all_inputs = host
+                            .input_devices()
+                            .map(|iter| iter.collect::<Vec<_>>())
+                            .unwrap_or_default();
                         let device = if let Some(ref name) = device_name {
                             if name.is_empty()
                                 || name == "Default (System Default)"
@@ -259,7 +257,9 @@ impl AudioInputManager {
                     } => {
                         #[cfg(windows)]
                         {
-                            unsafe { stop_discord_process_loopback(); }
+                            unsafe {
+                                stop_discord_process_loopback();
+                            }
                             _discord_ctx = None;
 
                             log_mgr_clone.info("Discord", "Starting Discord process loopback capture (OBS Application Audio Capture)...");
@@ -285,8 +285,13 @@ impl AudioInputManager {
                                 _discord_ctx = Some(unsafe { Box::from_raw(ctx_ptr) });
                                 log_mgr_clone.info("Discord", "Discord process loopback started successfully (target: Discord.exe)");
                             } else {
-                                unsafe { drop(Box::from_raw(ctx_ptr)); }
-                                log_mgr_clone.error("Discord", "Failed to start Discord process loopback capture");
+                                unsafe {
+                                    drop(Box::from_raw(ctx_ptr));
+                                }
+                                log_mgr_clone.error(
+                                    "Discord",
+                                    "Failed to start Discord process loopback capture",
+                                );
                             }
                         }
                     }
@@ -299,7 +304,9 @@ impl AudioInputManager {
                     AudioCommand::StopDiscord => {
                         #[cfg(windows)]
                         {
-                            unsafe { stop_discord_process_loopback(); }
+                            unsafe {
+                                stop_discord_process_loopback();
+                            }
                             _discord_ctx = None;
                         }
                         log_mgr_clone.info("Discord", "Discord process loopback stopped");
@@ -310,7 +317,9 @@ impl AudioInputManager {
                         }
                         #[cfg(windows)]
                         {
-                            unsafe { stop_discord_process_loopback(); }
+                            unsafe {
+                                stop_discord_process_loopback();
+                            }
                             _discord_ctx = None;
                         }
                         is_running_clone.store(false, Ordering::SeqCst);
@@ -404,10 +413,14 @@ where
     };
 
     match default_cfg.sample_format() {
-        cpal::SampleFormat::F32 => {
-            dev.build_input_stream(&stream_config, move |data: &[f32], _| on_data(data), err_fn, None)
-                .map_err(|e| format!("Failed to build F32 stream: {}", e))
-        }
+        cpal::SampleFormat::F32 => dev
+            .build_input_stream(
+                &stream_config,
+                move |data: &[f32], _| on_data(data),
+                err_fn,
+                None,
+            )
+            .map_err(|e| format!("Failed to build F32 stream: {}", e)),
         cpal::SampleFormat::I16 => {
             let mut buf = Vec::new();
             dev.build_input_stream(
@@ -510,24 +523,36 @@ pub fn find_device_fuzzy(devs: &[cpal::Device], target: &str) -> Option<cpal::De
         return None;
     }
     // 1. 完全一致
-    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n == target).unwrap_or(false)) {
+    if let Some(d) = devs
+        .iter()
+        .find(|d| d.name().map(|n| n == target).unwrap_or(false))
+    {
         return Some(d.clone());
     }
     // 2. trim() 一致
-    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n.trim() == target_clean).unwrap_or(false)) {
+    if let Some(d) = devs
+        .iter()
+        .find(|d| d.name().map(|n| n.trim() == target_clean).unwrap_or(false))
+    {
         return Some(d.clone());
     }
     // 3. 大文字小文字無視
     let target_lower = target_clean.to_lowercase();
-    if let Some(d) = devs.iter().find(|d| d.name().map(|n| n.trim().to_lowercase() == target_lower).unwrap_or(false)) {
+    if let Some(d) = devs.iter().find(|d| {
+        d.name()
+            .map(|n| n.trim().to_lowercase() == target_lower)
+            .unwrap_or(false)
+    }) {
         return Some(d.clone());
     }
     // 4. 部分一致 (contains)
     if let Some(d) = devs.iter().find(|d| {
-        d.name().map(|n| {
-            let nl = n.to_lowercase();
-            nl.contains(&target_lower) || target_lower.contains(&nl)
-        }).unwrap_or(false)
+        d.name()
+            .map(|n| {
+                let nl = n.to_lowercase();
+                nl.contains(&target_lower) || target_lower.contains(&nl)
+            })
+            .unwrap_or(false)
     }) {
         return Some(d.clone());
     }
@@ -542,36 +567,42 @@ pub fn build_keep_alive_render_stream(
 ) -> Option<cpal::Stream> {
     let stream_cfg: cpal::StreamConfig = cfg.clone().into();
     let stream = match cfg.sample_format() {
-        cpal::SampleFormat::F32 => dev.build_output_stream(
-            &stream_cfg,
-            |data: &mut [f32], _| {
-                for s in data.iter_mut() {
-                    *s = 0.0;
-                }
-            },
-            |_| {},
-            None,
-        ).ok(),
-        cpal::SampleFormat::I16 => dev.build_output_stream(
-            &stream_cfg,
-            |data: &mut [i16], _| {
-                for s in data.iter_mut() {
-                    *s = 0;
-                }
-            },
-            |_| {},
-            None,
-        ).ok(),
-        cpal::SampleFormat::U16 => dev.build_output_stream(
-            &stream_cfg,
-            |data: &mut [u16], _| {
-                for s in data.iter_mut() {
-                    *s = 32768;
-                }
-            },
-            |_| {},
-            None,
-        ).ok(),
+        cpal::SampleFormat::F32 => dev
+            .build_output_stream(
+                &stream_cfg,
+                |data: &mut [f32], _| {
+                    for s in data.iter_mut() {
+                        *s = 0.0;
+                    }
+                },
+                |_| {},
+                None,
+            )
+            .ok(),
+        cpal::SampleFormat::I16 => dev
+            .build_output_stream(
+                &stream_cfg,
+                |data: &mut [i16], _| {
+                    for s in data.iter_mut() {
+                        *s = 0;
+                    }
+                },
+                |_| {},
+                None,
+            )
+            .ok(),
+        cpal::SampleFormat::U16 => dev
+            .build_output_stream(
+                &stream_cfg,
+                |data: &mut [u16], _| {
+                    for s in data.iter_mut() {
+                        *s = 32768;
+                    }
+                },
+                |_| {},
+                None,
+            )
+            .ok(),
         _ => None,
     };
     if let Some(ref s) = stream {
@@ -579,4 +610,3 @@ pub fn build_keep_alive_render_stream(
     }
     stream
 }
-

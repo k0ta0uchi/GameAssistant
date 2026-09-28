@@ -147,10 +147,10 @@ impl MemoryManifest {
         let expected = [RAW_EVENTS_TABLE, FACTS_TABLE, EMBEDDINGS_TABLE];
         for table in expected {
             if self.schema_versions.get(table) != Some(&TABLE_SCHEMA_VERSION)
-                || !self
+                || self
                     .schema_hashes
                     .get(table)
-                    .is_some_and(|hash| hash == &expected_schema_hash(table))
+                    .is_none_or(|hash| hash != &expected_schema_hash(table))
             {
                 return Err(ManifestError::InvalidSchema);
             }

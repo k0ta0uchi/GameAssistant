@@ -13,7 +13,12 @@ fn main() {
             if name.contains("Voicemeeter Input (VB-Audio Voicemeeter VAIO)") {
                 println!("Target found: {}", name);
                 let cfg = d.default_output_config().expect("default config");
-                println!("Config: {} Hz, {} ch, {:?}", cfg.sample_rate().0, cfg.channels(), cfg.sample_format());
+                println!(
+                    "Config: {} Hz, {} ch, {:?}",
+                    cfg.sample_rate().0,
+                    cfg.channels(),
+                    cfg.sample_format()
+                );
 
                 let stream_cfg: cpal::StreamConfig = cfg.into();
                 let count = Arc::new(AtomicUsize::new(0));
@@ -21,21 +26,27 @@ fn main() {
                 let c_clone = count.clone();
                 let p_clone = peak.clone();
 
-                let stream = d.build_input_stream(
-                    &stream_cfg,
-                    move |data: &[f32], _| {
-                        c_clone.fetch_add(data.len(), Ordering::Relaxed);
-                        let mut m = 0.0f32;
-                        for &s in data {
-                            let a = s.abs();
-                            if a > m { m = a; }
-                        }
-                        let mut p = p_clone.lock().unwrap();
-                        if m > *p { *p = m; }
-                    },
-                    |err| eprintln!("Stream error: {}", err),
-                    None,
-                ).expect("build input stream");
+                let stream = d
+                    .build_input_stream(
+                        &stream_cfg,
+                        move |data: &[f32], _| {
+                            c_clone.fetch_add(data.len(), Ordering::Relaxed);
+                            let mut m = 0.0f32;
+                            for &s in data {
+                                let a = s.abs();
+                                if a > m {
+                                    m = a;
+                                }
+                            }
+                            let mut p = p_clone.lock().unwrap();
+                            if m > *p {
+                                *p = m;
+                            }
+                        },
+                        |err| eprintln!("Stream error: {}", err),
+                        None,
+                    )
+                    .expect("build input stream");
 
                 stream.play().expect("play stream");
                 println!("Stream playing. Listening for 10 seconds...");
@@ -51,7 +62,10 @@ fn main() {
                     };
                     let bar_len = (val * 50.0).min(50.0) as usize;
                     let bar = "#".repeat(bar_len);
-                    println!("Sec {:>2}/10 | Samples: {:>6} | Peak: {:.4} |{}", sec, samples, val, bar);
+                    println!(
+                        "Sec {:>2}/10 | Samples: {:>6} | Peak: {:.4} |{}",
+                        sec, samples, val, bar
+                    );
                 }
                 return;
             }

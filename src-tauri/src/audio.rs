@@ -36,7 +36,10 @@ pub fn list_input_devices() -> AudioDevicesResponse {
         for device in devices {
             if let Ok(name) = device.name() {
                 let trimmed = name.trim().to_string();
-                if !trimmed.is_empty() && !output_devices.contains(&trimmed) && !output_devices.contains(&name) {
+                if !trimmed.is_empty()
+                    && !output_devices.contains(&trimmed)
+                    && !output_devices.contains(&name)
+                {
                     output_devices.push(name);
                 }
             }

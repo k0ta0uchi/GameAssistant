@@ -37,6 +37,8 @@ export interface AsrEntry {
   isPrompt?: boolean;
   /** Native Whisper inference latency for this finalized utterance. */
   latencyMs?: number | null;
+  /** Arrival stamp (Date.now()) used to interleave with FACTs in the live stream. */
+  seq?: number;
 }
 
 /** A durable Fact derived from a live session utterance. */
@@ -46,6 +48,8 @@ export interface FactEntry {
   timestamp: string;
   source?: string;
   sourceEventId?: string;
+  /** Arrival stamp (Date.now()) used to interleave with transcripts in the live stream. */
+  seq?: number;
 }
 
 export interface LevelMeterEvent {
@@ -383,8 +387,10 @@ export const normalizeMemoryBackfillProgress = (
       "delete_tombstone",
       "inference_failed",
     ];
-    return known.find((reason) => value === reason || value.includes(reason)) ||
-      "inference_failed";
+    return (
+      known.find((reason) => value === reason || value.includes(reason)) ||
+      "inference_failed"
+    );
   };
   const reasonSource =
     raw.reasonCounts === undefined ? raw.reason_counts : raw.reasonCounts;
@@ -407,17 +413,17 @@ export const normalizeMemoryBackfillProgress = (
       ? { code: fatalSource.trim() }
       : fatalSource && typeof fatalSource === "object"
         ? (() => {
-          const candidate = fatalSource as Record<string, unknown>;
-          const code =
-            typeof candidate.code === "string" && candidate.code.trim()
-              ? candidate.code
-              : null;
-          if (!code) return null;
-          const message =
-            typeof candidate.message === "string" && candidate.message.trim()
-              ? candidate.message
-              : undefined;
-          return { code, ...(message ? { message } : {}) };
+            const candidate = fatalSource as Record<string, unknown>;
+            const code =
+              typeof candidate.code === "string" && candidate.code.trim()
+                ? candidate.code
+                : null;
+            if (!code) return null;
+            const message =
+              typeof candidate.message === "string" && candidate.message.trim()
+                ? candidate.message
+                : undefined;
+            return { code, ...(message ? { message } : {}) };
           })()
         : null;
   const reason = canonicalReason(

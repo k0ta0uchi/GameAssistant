@@ -26,7 +26,10 @@ fn main() {
                         let sample_rate = cfg.sample_rate().0;
                         let channels = cfg.channels();
                         let format = cfg.sample_format();
-                        println!("  Format: {} Hz, {} ch, {:?}", sample_rate, channels, format);
+                        println!(
+                            "  Format: {} Hz, {} ch, {:?}",
+                            sample_rate, channels, format
+                        );
 
                         let stream_cfg: cpal::StreamConfig = cfg.clone().into();
                         let count = Arc::new(AtomicUsize::new(0));
@@ -61,10 +64,14 @@ fn main() {
                                 let mut m = 0.0f32;
                                 for &s in data {
                                     let a = s.abs();
-                                    if a > m { m = a; }
+                                    if a > m {
+                                        m = a;
+                                    }
                                 }
                                 let mut p = peak_c.lock().unwrap();
-                                if m > *p { *p = m; }
+                                if m > *p {
+                                    *p = m;
+                                }
                             },
                             move |err| eprintln!("Loopback stream err: {}", err),
                             None,
@@ -73,7 +80,13 @@ fn main() {
                         if let Ok(ref s) = loopback {
                             let _ = s.play();
                             println!("  [OK] Loopback input stream playing");
-                            streams.push((name.clone(), keep_alive.ok(), loopback.ok(), count, max_peak));
+                            streams.push((
+                                name.clone(),
+                                keep_alive.ok(),
+                                loopback.ok(),
+                                count,
+                                max_peak,
+                            ));
                         } else if let Err(ref e) = loopback {
                             println!("  [ERROR] Loopback stream failed to build: {}", e);
                         }
@@ -98,7 +111,10 @@ fn main() {
             };
             let bar_len = (p * 50.0).min(50.0) as usize;
             let bar = "#".repeat(bar_len);
-            println!("{:<40} | Samples/sec: {:>6} | Peak: {:.4} |{}", name, samples, p, bar);
+            println!(
+                "{:<40} | Samples/sec: {:>6} | Peak: {:.4} |{}",
+                name, samples, p, bar
+            );
         }
     }
 }

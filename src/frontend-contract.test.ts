@@ -173,9 +173,7 @@ assert.equal(
 // The static index.html loader must be dismissed even when App renders the
 // first-run SetupScreen (which does not mount LoadingScreen).
 {
-  const dom = new JSDOM(
-    '<!doctype html><div id="app-startup-loader"></div>',
-  );
+  const dom = new JSDOM('<!doctype html><div id="app-startup-loader"></div>');
   const loader = dom.window.document.getElementById("app-startup-loader");
   dismissStartupLoader(dom.window.document);
   assert.equal(loader?.classList.contains("loaded"), true);
@@ -490,7 +488,8 @@ class TauriHarness {
     if (command === "list_lance_memories")
       return { success: true, memories: this.memoryItems };
     if (command === "memory_manager_process_all") return this.backfillResult;
-    if (command === "memory_manager_retry_summary") return this.summaryRetryResult;
+    if (command === "memory_manager_retry_summary")
+      return this.summaryRetryResult;
     if (command === "memory_manager_list_facts")
       return {
         rows: [
@@ -517,7 +516,10 @@ class TauriHarness {
       };
     if (command === "memory_manager_list_summaries" && this.failSummaryRead)
       throw new Error("summary read failed");
-    if (command === "memory_manager_list_summaries" && this.malformedSummaryResponse)
+    if (
+      command === "memory_manager_list_summaries" &&
+      this.malformedSummaryResponse
+    )
       return {
         rows: [{}],
         page: {
@@ -570,7 +572,12 @@ class TauriHarness {
           operation_id: "op-1",
         },
         evidence: [],
-        page: { next_cursor: null, has_more: false, total: 0, snapshot_sequence: 1 },
+        page: {
+          next_cursor: null,
+          has_more: false,
+          total: 0,
+          snapshot_sequence: 1,
+        },
       };
     if (command === "memory_manager_get_raw_event")
       return {
@@ -968,7 +975,10 @@ const findButton = (
   });
   await flush();
   assert.equal(snapshot.current!.factHistory.length, 1);
-  assert.equal(snapshot.current!.factHistory[0].text, "ユーザーは猫が好きです。");
+  assert.equal(
+    snapshot.current!.factHistory[0].text,
+    "ユーザーは猫が好きです。",
+  );
   harness.emit("memory-fact-created", {
     fact_id: "fact:self:summary-1",
     source_event_id: "event-1",
@@ -978,6 +988,29 @@ const findButton = (
   });
   await flush();
   assert.equal(snapshot.current!.factHistory.length, 1);
+  renderer.unmount();
+  await settleEffects();
+}
+
+// Auto Commentaryがキャプチャした最新フレームはTarget Windowカードの
+// プレビューへ即時反映される。画像のない通知で既存プレビューを壊してはならない。
+{
+  const { harness } = makeHarness();
+  const { renderer, snapshot } = await mountHook(harness);
+  harness.emit("window_preview_updated", {
+    image: "data:image/png;base64,QUJD",
+    source: "auto_commentary",
+  });
+  await flush();
+  assert.equal(snapshot.current!.previewImage, "data:image/png;base64,QUJD");
+
+  harness.emit("window_preview_updated", { source: "auto_commentary" });
+  await flush();
+  assert.equal(
+    snapshot.current!.previewImage,
+    "data:image/png;base64,QUJD",
+    "a payload without an image must keep the previous preview",
+  );
   renderer.unmount();
   await settleEffects();
 }
@@ -1537,7 +1570,7 @@ const findButton = (
 // explicitly requires setup and has not recorded the complete acknowledgement.
 {
   const dom = new JSDOM(
-    "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+    '<!doctype html><html><body><div id="root"></div></body></html>',
   );
   Object.defineProperty(globalThis, "window", {
     configurable: true,
@@ -1572,14 +1605,14 @@ const findButton = (
         }),
       );
     });
-    assert.equal(
-      Boolean(findButton(host, "規約を確認して同意")),
-      false,
-    );
+    assert.equal(Boolean(findButton(host, "規約を確認して同意")), false);
   };
   await render(null);
   await render({ ...pendingSetup(), status: "unknown" });
-  await render({ ...pendingSetup(), error: "setup status unavailable" }, "setup status unavailable");
+  await render(
+    { ...pendingSetup(), error: "setup status unavailable" },
+    "setup status unavailable",
+  );
   await render(
     { ...pendingSetup(), status: "error", error: "runtime setup failed" },
     "runtime setup failed",
@@ -1601,7 +1634,7 @@ const findButton = (
 // API is temporarily unavailable.
 {
   const dom = new JSDOM(
-    "<!doctype html><html><body><div id=\"root\"></div></body></html>",
+    '<!doctype html><html><body><div id="root"></div></body></html>',
   );
   Object.defineProperty(globalThis, "window", {
     configurable: true,
@@ -1641,7 +1674,10 @@ const findButton = (
   assert.ok(manualButton);
   await act(async () => manualButton!.click());
   assert.match(host.textContent || "", /公式リポジトリ/);
-  assert.match(host.textContent || "", /models[\\/]kotoba-whisper-v2\.0-faster/);
+  assert.match(
+    host.textContent || "",
+    /models[\\/]kotoba-whisper-v2\.0-faster/,
+  );
   assert.match(host.textContent || "", /\.gameassistant-install\.json/);
   assert.ok(
     host.querySelector(
@@ -1738,7 +1774,11 @@ const findButton = (
     root.render(
       React.createElement(SetupScreen, {
         ...props,
-        status: { ...pendingSetup(), error: "previous setup cancellation", cancelled: true },
+        status: {
+          ...pendingSetup(),
+          error: "previous setup cancellation",
+          cancelled: true,
+        },
         error: "previous setup cancellation",
       }),
     );
@@ -1944,7 +1984,9 @@ const findButton = (
   dom.window.document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }));
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
   const semanticTab = findButton(host, "Fact / Summary");
@@ -1954,8 +1996,11 @@ const findButton = (
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
   });
   assert.match(host.textContent || "", /Facts/);
-  const factRequest = harness.invocations.find(({ command }) => command === "memory_manager_list_facts");
-  const factPageRequest = (factRequest?.args as { request: MemoryPageRequest }).request;
+  const factRequest = harness.invocations.find(
+    ({ command }) => command === "memory_manager_list_facts",
+  );
+  const factPageRequest = (factRequest?.args as { request: MemoryPageRequest })
+    .request;
   assert.deepEqual(factPageRequest.page_size, 50);
   assert.equal(factPageRequest.sort, "newest");
   const next = findButton(host, "Next");
@@ -1964,8 +2009,14 @@ const findButton = (
     next!.click();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
-  const factRequests = harness.invocations.filter(({ command }) => command === "memory_manager_list_facts");
-  assert.equal((factRequests.at(-1)?.args as { request: MemoryPageRequest }).request.cursor, "offset:50");
+  const factRequests = harness.invocations.filter(
+    ({ command }) => command === "memory_manager_list_facts",
+  );
+  assert.equal(
+    (factRequests.at(-1)?.args as { request: MemoryPageRequest }).request
+      .cursor,
+    "offset:50",
+  );
   const requestFilters = factPageRequest.filters;
   assert.deepEqual(Object.keys(requestFilters).sort(), [
     "event_types",
@@ -1976,27 +2027,42 @@ const findButton = (
     "statuses",
     "subjects",
   ]);
-  const factRow = Array.from(host.querySelectorAll("button")).find((button) => (button.textContent || "").includes("self"));
+  const factRow = Array.from(host.querySelectorAll("button")).find((button) =>
+    (button.textContent || "").includes("self"),
+  );
   assert.ok(factRow, "normalized Fact row should render");
   const checkbox = factRow!.querySelector("span");
   assert.ok(checkbox);
   await act(async () => {
-    checkbox!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
+    checkbox!.dispatchEvent(
+      new dom.window.MouseEvent("click", { bubbles: true }),
+    );
   });
   const deleteButton = findButton(host, "Delete (1)");
   assert.ok(deleteButton, "destructive action should show selected count");
   await act(async () => deleteButton!.click());
   assert.match(host.textContent || "", /Source Raw events.*retained/);
-  assert.equal(harness.invocations.some(({ command }) => command === "memory_manager_delete_facts"), false);
+  assert.equal(
+    harness.invocations.some(
+      ({ command }) => command === "memory_manager_delete_facts",
+    ),
+    false,
+  );
   const confirmButton = findButton(host, "Delete 1");
-  assert.ok(confirmButton, "delete confirmation should require explicit action");
+  assert.ok(
+    confirmButton,
+    "delete confirmation should require explicit action",
+  );
   await act(async () => {
     confirmButton!.click();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
-  const deleteRequest = harness.invocations.find(({ command }) => command === "memory_manager_delete_facts");
+  const deleteRequest = harness.invocations.find(
+    ({ command }) => command === "memory_manager_delete_facts",
+  );
   assert.deepEqual(
-    (deleteRequest?.args as { request: { fact_ids: string[] } }).request.fact_ids,
+    (deleteRequest?.args as { request: { fact_ids: string[] } }).request
+      .fact_ids,
     ["fact-1"],
   );
   const summariesTab = findButton(host, "Summaries");
@@ -2013,17 +2079,25 @@ const findButton = (
   assert.match(host.textContent || "", /要約推論に失敗/);
   assert.doesNotMatch(host.textContent || "", /complete raw evidence/);
   const retryButton = findButton(host, "Retry summary");
-  assert.ok(retryButton, "retry affordance should be available for inference failure");
+  assert.ok(
+    retryButton,
+    "retry affordance should be available for inference failure",
+  );
   await act(async () => {
     retryButton!.click();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
   assert.equal(
-    harness.invocations.filter(({ command }) => command === "memory_manager_retry_summary").length,
+    harness.invocations.filter(
+      ({ command }) => command === "memory_manager_retry_summary",
+    ).length,
     1,
   );
   const rawEvidenceButton = findButton(host, "View raw evidence");
-  assert.ok(rawEvidenceButton, "summary detail should expose raw fallback evidence");
+  assert.ok(
+    rawEvidenceButton,
+    "summary detail should expose raw fallback evidence",
+  );
   await act(async () => {
     rawEvidenceButton!.click();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
@@ -2054,7 +2128,9 @@ for (const [reason, expectedLabel, retryable] of [
   dom.window.document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }));
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
   const semanticTab = findButton(host, "Fact / Summary");
@@ -2087,7 +2163,9 @@ for (const [reason, expectedLabel, retryable] of [
   dom.window.document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }));
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
     await new Promise<void>((resolve) => setTimeout(resolve, 20));
   });
   const semanticTab = findButton(host, "Fact / Summary");
@@ -2127,7 +2205,9 @@ for (const [reason, expectedLabel, retryable] of [
   dom.window.document.body.appendChild(host);
   const root = createRoot(host);
   await act(async () => {
-    root.render(React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }));
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
   });
   const processButton = findButton(host, "Process all memories");
@@ -2137,7 +2217,9 @@ for (const [reason, expectedLabel, retryable] of [
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   });
   assert.equal(
-    harness.invocations.filter(({ command }) => command === "memory_manager_process_all").length,
+    harness.invocations.filter(
+      ({ command }) => command === "memory_manager_process_all",
+    ).length,
     1,
   );
   harness.emit("memory-manager-backfill-progress", {
@@ -2193,6 +2275,163 @@ for (const [reason, expectedLabel, retryable] of [
   await flush();
   assert.match(host.textContent || "", /fatal/i);
   assert.match(host.textContent || "", /journal_unavailable/);
+  await act(async () => root.unmount());
+  await settleEffects();
+}
+
+// MemoryModal supports copying selected memories as JSON via Ctrl+C shortcut
+{
+  const harness = new TauriHarness();
+  harness.memoryItems = [
+    {
+      id: "mem-1",
+      document: "Memory row 1",
+      memory_type: "conversation",
+      source: "User",
+      timestamp: "2026-09-28T10:00:00Z",
+    },
+    {
+      id: "mem-2",
+      document: "Memory row 2",
+      memory_type: "observation",
+      source: "Streamer",
+      timestamp: "2026-09-28T10:01:00Z",
+    },
+  ];
+
+  let copiedText = "";
+  const mockClipboard = {
+    writeText: async (text: string) => {
+      copiedText = text;
+    },
+  };
+  const dom = domForConfirm(harness);
+  Object.defineProperty(dom.window.navigator, "clipboard", {
+    value: mockClipboard,
+    configurable: true,
+  });
+  if (typeof globalThis.navigator !== "undefined") {
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+  }
+
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  });
+  await flush();
+
+  // Select all using Ctrl+A
+  await act(async () => {
+    const event = new dom.window.KeyboardEvent("keydown", {
+      key: "a",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    dom.window.dispatchEvent(event);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  });
+  await flush();
+
+  // Trigger Ctrl+C
+  await act(async () => {
+    const event = new dom.window.KeyboardEvent("keydown", {
+      key: "c",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    dom.window.dispatchEvent(event);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  });
+  await flush();
+
+  assert.ok(copiedText, "clipboard writeText should have been called");
+  const parsed = JSON.parse(copiedText);
+  assert.equal(Array.isArray(parsed), true);
+  assert.equal(parsed.length, 2);
+  assert.equal(parsed[0].id, "mem-2");
+  assert.equal(parsed[0].content, "Memory row 2");
+  assert.equal(parsed[1].id, "mem-1");
+  assert.equal(parsed[1].content, "Memory row 1");
+
+  await act(async () => root.unmount());
+  await settleEffects();
+}
+
+// FactSummaryManager supports copying selected facts as JSON via Ctrl+C shortcut
+{
+  const harness = new TauriHarness();
+  let copiedText = "";
+  const mockClipboard = {
+    writeText: async (text: string) => {
+      copiedText = text;
+    },
+  };
+  const dom = domForConfirm(harness);
+  Object.defineProperty(dom.window.navigator, "clipboard", {
+    value: mockClipboard,
+    configurable: true,
+  });
+  if (typeof globalThis.navigator !== "undefined") {
+    Object.defineProperty(globalThis.navigator, "clipboard", {
+      value: mockClipboard,
+      configurable: true,
+    });
+  }
+
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+
+  const semanticTab = findButton(host, "Fact / Summary");
+  assert.ok(semanticTab);
+  await act(async () => {
+    semanticTab!.click();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+  await flush();
+
+  // Select all visible facts using Select all visible button
+  const selectAllBtn = findButton(host, "Select all visible");
+  assert.ok(selectAllBtn);
+  await act(async () => {
+    selectAllBtn!.click();
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  });
+  await flush();
+
+  // Trigger Ctrl+C
+  await act(async () => {
+    const event = new dom.window.KeyboardEvent("keydown", {
+      key: "c",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    dom.window.dispatchEvent(event);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  });
+  await flush();
+
+  assert.ok(copiedText, "semantic clipboard writeText should have been called");
+  const parsed = JSON.parse(copiedText);
+  assert.equal(Array.isArray(parsed), true);
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].fact_id, "fact-1");
+  assert.equal(parsed[0].predicate, "likes");
+
   await act(async () => root.unmount());
   await settleEffects();
 }

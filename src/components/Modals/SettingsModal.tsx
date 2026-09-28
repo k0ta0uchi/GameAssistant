@@ -98,6 +98,7 @@ interface SettingsModalProps {
     | "twitch"
     | "preferences"
     | "blog_skills";
+  onRefreshModelsStatus?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -112,6 +113,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onSavePrompt = async () => true,
   onResetPrompt = async () => true,
   initialTab = "engines",
+  onRefreshModelsStatus,
 }) => {
   const [activeTab, setActiveTab] = useState<
     "engines" | "models" | "prompts" | "twitch" | "preferences" | "blog_skills"
@@ -160,12 +162,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       });
       if (!mountedRef.current) return;
       setModelsList(list.filter((model) => !isHiddenModel(model)));
+      onRefreshModelsStatus?.();
     } catch (e) {
       console.error("Failed to fetch models status:", e);
     } finally {
       if (mountedRef.current) setIsRefreshingModels(false);
     }
-  }, []);
+  }, [onRefreshModelsStatus]);
 
   useEffect(
     () => () => {
@@ -1741,17 +1744,25 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
                   : "READY (Auto-connects on Session Start)"}
               </span>
             </div>
-            {Boolean(settings.twitch_bot_username) && (
-              <div className="text-[11px] text-[#8a8f98] mt-0.5">
-                Bot Username:{" "}
-                <span className="text-[#d0d6e0] font-mono">
-                  {String(settings.twitch_bot_username)}
+            <div className="text-[11px] text-[#8a8f98] mt-0.5 flex flex-wrap gap-x-3">
+              <span>
+                Target Channel:{" "}
+                <span className="text-[#e4f222] font-mono">
+                  #{String(settings.twitch_channel || settings.user_name || "Kota")}
                 </span>
-                {settings.twitch_bot_id
-                  ? ` (ID: ${String(settings.twitch_bot_id)})`
-                  : null}
-              </div>
-            )}
+              </span>
+              {Boolean(settings.twitch_bot_username) && (
+                <span>
+                  Bot:{" "}
+                  <span className="text-[#d0d6e0] font-mono">
+                    {String(settings.twitch_bot_username)}
+                  </span>
+                  {settings.twitch_bot_id
+                    ? ` (ID: ${String(settings.twitch_bot_id)})`
+                    : null}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1793,6 +1804,24 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
         </div>
 
         <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2">
+            <label className="block text-[#8a8f98] mb-1 font-medium flex items-center justify-between">
+              <span>Channel (配信チャンネル名)</span>
+              <span className="text-[#62666d] text-[10px]">
+                未入力時は User Name ({String(settings.user_name || "Kota")}) を自動使用
+              </span>
+            </label>
+            <input
+              type="text"
+              value={String(settings.twitch_channel || "")}
+              onChange={(e) =>
+                onUpdateSetting("twitch_channel", e.target.value)
+              }
+              className="w-full linear-input py-1.5 px-2 bg-[#0f1011] text-[#d0d6e0]"
+              placeholder="e.g. your_twitch_channel"
+            />
+          </div>
+
           <div>
             <label className="block text-[#8a8f98] mb-1 font-medium">
               Bot Username

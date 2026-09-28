@@ -48,6 +48,7 @@ export function App() {
     clearLogs,
     toast,
     missingRequiredModels,
+    fetchModelsStatus,
     setupStatus,
     setupProgress,
     isSetupRunning,
@@ -95,6 +96,11 @@ export function App() {
   ) => {
     setSettingsInitialTab(tab);
     setIsSettingsOpen(true);
+  };
+
+  const handleCloseSettings = () => {
+    setIsSettingsOpen(false);
+    void fetchModelsStatus();
   };
 
   return (
@@ -157,17 +163,26 @@ export function App() {
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
                   </span>
                   <span>
-                    ⚠️ 必須モデル（Kotoba-Whisper / GLuCoSE /
+                    ⚠️ 必須モデル（Kotoba-Whisper / Whisper Small / GLuCoSE /
                     Gemma）が未ダウンロードまたは検証待ちです。
                   </span>
                 </div>
-                <button
-                  onClick={() => handleOpenSettings("models")}
-                  className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-white border border-red-500/40 rounded text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
-                >
-                  <span>モデル設定を開いてダウンロード</span>
-                  <span>→</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void fetchModelsStatus()}
+                    className="px-2.5 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded text-xs font-semibold flex items-center gap-1 transition-all"
+                    title="モデルの検証状態を再取得"
+                  >
+                    <span>再チェック</span>
+                  </button>
+                  <button
+                    onClick={() => handleOpenSettings("models")}
+                    className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 hover:text-white border border-red-500/40 rounded text-xs font-semibold flex items-center gap-1.5 transition-all shadow-sm"
+                  >
+                    <span>モデル設定を開いてダウンロード</span>
+                    <span>→</span>
+                  </button>
+                </div>
               </div>
             )}
 
@@ -190,7 +205,7 @@ export function App() {
           {/* 設定モーダル */}
           <SettingsModal
             isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
+            onClose={handleCloseSettings}
             settings={settings}
             onUpdateSetting={updateSetting}
             setupStatus={setupStatus}
@@ -200,6 +215,7 @@ export function App() {
             onSavePrompt={savePrompt}
             onResetPrompt={resetPrompt}
             initialTab={settingsInitialTab}
+            onRefreshModelsStatus={fetchModelsStatus}
           />
 
           {/* 記憶管理モーダル */}

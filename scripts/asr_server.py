@@ -98,19 +98,94 @@ os.environ["SENTENCE_TRANSFORMERS_HOME"] = HF_CACHE_DIR
 local_whisper_path = os.path.join(MODELS_DIR, "kotoba-whisper-v2.0-faster")
 if os.path.exists(local_whisper_path) and (os.path.exists(os.path.join(local_whisper_path, "model.bin")) or os.path.exists(os.path.join(local_whisper_path, "model.safetensors"))):
     whisper_model_source = local_whisper_path
-    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)...")
 else:
     raise RuntimeError(
         f"Required Kotoba-Whisper model is missing at {local_whisper_path}; "
         "complete first-launch setup before starting ASR."
     )
 
-try:
-    whisper_model = WhisperModel(whisper_model_source, device="cuda", compute_type="int8")
-    logger.info("Faster-Whisper model successfully loaded on CUDA (INT8)!")
-except Exception as e:
-    logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU INT8...")
-    whisper_model = WhisperModel(whisper_model_source, device="cpu", compute_type="int8")
+forced_device = None
+if "--device" in sys.argv:
+    idx = sys.argv.index("--device")
+    if idx + 1 < len(sys.argv):
+        forced_device = sys.argv[idx + 1].lower()
+elif "--force-device" in sys.argv:
+    idx = sys.argv.index("--force-device")
+    if idx + 1 < len(sys.argv):
+        forced_device = sys.argv[idx + 1].lower()
+
+current_device = "cpu" if forced_device == "cpu" else "cuda"
+
+def create_cpu_whisper_model():
+    """ゲームとCPUリソースが共存できるようスレッド数(4)と量子化型を最適化してCPUモデルを初期化。
+    faster-whisper-small が存在すれば優先してロード（約5倍高速・RTF 0.30）、なければ kotoba-whisper をフォールバック利用。
+    """
+    threads = min(4, os.cpu_count() or 4)
+    compute_type = "int8_float32"
+    small_path = os.path.join(MODELS_DIR, "faster-whisper-small")
+    if os.path.exists(small_path) and (
+        os.path.exists(os.path.join(small_path, "model.bin"))
+        or os.path.exists(os.path.join(small_path, "model.safetensors"))
+    ):
+        model_source = small_path
+        model_desc = "faster-whisper-small (High-Speed CPU Fallback, ~5x faster)"
+    else:
+        model_source = whisper_model_source
+        model_desc = f"{os.path.basename(whisper_model_source)} (Standard ASR)"
+
+    logger.info(
+        f"Initializing CPU Faster-Whisper model from {model_desc} "
+        f"(compute_type={compute_type}, cpu_threads={threads})..."
+    )
+    try:
+        return WhisperModel(
+            model_source,
+            device="cpu",
+            compute_type=compute_type,
+            cpu_threads=threads,
+            num_workers=1,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to load CPU model with {compute_type}: {e}. Retrying with float32...")
+        return WhisperModel(
+            model_source,
+            device="cpu",
+            compute_type="float32",
+            cpu_threads=threads,
+            num_workers=1,
+        )
+
+
+if current_device == "cuda":
+    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)...")
+    try:
+        whisper_model = WhisperModel(whisper_model_source, device="cuda", compute_type="int8")
+        logger.info("Faster-Whisper model successfully loaded on CUDA (INT8)!")
+    except Exception as e:
+        logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU...")
+        whisper_model = create_cpu_whisper_model()
+        current_device = "cpu"
+else:
+    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} on CPU as requested...")
+    whisper_model = create_cpu_whisper_model()
+    current_device = "cpu"
+
+
+def fallback_to_cpu_model():
+    """VRAM枯渇やCUDA例外発生時に同一プロセス内で動的にCPUモデルへ安全に切り替える"""
+    global whisper_model, current_device
+    if current_device == "cpu":
+        return
+    logger.warning("VRAM Out of Memory or CUDA error detected during inference! Falling back to CPU...")
+    try:
+        del whisper_model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as err:
+        logger.debug(f"Error clearing CUDA cache during fallback: {err}")
+    whisper_model = create_cpu_whisper_model()
+    current_device = "cpu"
+    logger.info("Successfully switched Faster-Whisper model to CPU!")
 
 # 2. GLuCoSE-base-ja ローカル Embedding モデル
 _embedding_model = None
@@ -142,39 +217,13 @@ def get_embedding_model():
                 _embedding_model_error_logged = True
     return _embedding_model
 
-# 3. VRAM 事前確保 (Preallocation) バッファ管理
+# 3. VRAM 事前確保 (Preallocation) の無力化（不要な1GBダミー確保を廃止）
 _vram_preallocate_buffer = None
 
 def set_vram_preallocation(enable: bool) -> bool:
-    global _vram_preallocate_buffer
-    if enable:
-        if _vram_preallocate_buffer is not None:
-            return True
-        try:
-            if torch.cuda.is_available():
-                # 1024MB (1GB) の VRAM を PyTorch アロケータで確保
-                _vram_preallocate_buffer = torch.zeros((1024, 1024, 256), dtype=torch.float32, device='cuda')
-                logger.info("Preallocated 1GB VRAM buffer on CUDA to prevent fragmentation.")
-                return True
-        except Exception as e:
-            logger.warning(f"Failed to preallocate VRAM: {e}")
-            _vram_preallocate_buffer = None
-            return False
-    else:
-        _vram_preallocate_buffer = None
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        logger.info("Freed preallocated VRAM buffer.")
-        return True
-
-# 起動時の設定読み込み
-try:
-    with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-        st = json.load(f)
-        if st.get("preallocate_vram", False):
-            set_vram_preallocation(True)
-except Exception:
-    pass
+    # 廃止: PyTorch 1GB 確保は CTranslate2 で再利用できず、VRAMを圧迫するため無効化
+    logger.info("VRAM preallocation request handled (no-op: CTranslate2 manages its own workspace memory).")
+    return True
 
 
 async def asr_handler(websocket):
@@ -207,6 +256,7 @@ async def asr_handler(websocket):
             pass
 
     sender_task = asyncio.create_task(sender())
+    await send_queue.put({"type": "device_status", "device": current_device})
 
     async def transcribe_buffer(audio_buffer, allow_short=False):
         """Transcribe one VAD window and return text plus inference latency.
@@ -224,17 +274,75 @@ async def asr_handler(websocket):
         buf_copy = audio_buffer.copy()
 
         def _run_transcribe():
-            segments, _ = whisper_model.transcribe(
-                buf_copy,
-                language="ja",
-                beam_size=1,
-                vad_filter=True,
-                without_timestamps=True,
-            )
-            return "".join([s.text for s in segments]).strip()
+            nonlocal buf_copy
+            if "--simulate-hang" in sys.argv or os.environ.get("SIMULATE_ASR_HANG") == "1":
+                import time
+                logger.warning("Simulating native hang: sleeping 60s...")
+                time.sleep(60)
+            try:
+                segments, _ = whisper_model.transcribe(
+                    buf_copy,
+                    language="ja",
+                    beam_size=1,
+                    vad_filter=True,
+                    without_timestamps=True,
+                    condition_on_previous_text=False,  # 幻覚ループ（「ありがとう」連鎖）を完全遮断
+                    no_speech_threshold=0.6,           # 無音時の幻覚テキスト出力を抑止
+                    compression_ratio_threshold=2.4,   # 反復ループ幻覚を破棄
+                    hallucination_silence_threshold=0.5, # 無音区間の幻覚を除去
+                )
+                return "".join([s.text for s in segments]).strip()
+            except Exception as e:
+                err_str = str(e).lower()
+                is_oom = "out of memory" in err_str or "cuda" in err_str or isinstance(e, torch.cuda.OutOfMemoryError)
+                if is_oom and current_device != "cpu":
+                    logger.warning(f"CUDA inference error caught ({e}). Attempting dynamic fallback to CPU...")
+                    fallback_to_cpu_model()
+                    # CPU モデルで再試行
+                    segments, _ = whisper_model.transcribe(
+                        buf_copy,
+                        language="ja",
+                        beam_size=1,
+                        vad_filter=True,
+                        without_timestamps=True,
+                        condition_on_previous_text=False,
+                        no_speech_threshold=0.6,
+                        compression_ratio_threshold=2.4,
+                        hallucination_silence_threshold=0.5,
+                    )
+                    return "".join([s.text for s in segments]).strip()
+                else:
+                    raise
 
+        prev_dev = current_device
         t0 = loop.time()
-        current_text = await loop.run_in_executor(None, _run_transcribe)
+        try:
+            current_text = await asyncio.wait_for(
+                loop.run_in_executor(None, _run_transcribe),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Inference execution timed out (>2.0s)! Attempting dynamic fallback to CPU...")
+            if current_device != "cpu":
+                fallback_to_cpu_model()
+                try:
+                    current_text = await asyncio.wait_for(
+                        loop.run_in_executor(None, _run_transcribe),
+                        timeout=3.0,
+                    )
+                except Exception as retry_err:
+                    logger.error(f"CPU retry after timeout failed: {retry_err}")
+                    current_text = ""
+            else:
+                current_text = ""
+
+        if current_device != prev_dev:
+            await send_queue.put({
+                "type": "device_changed",
+                "device": current_device,
+                "reason": "oom_or_timeout",
+            })
+
         return current_text, (loop.time() - t0) * 1000.0
 
     def reset_stream_state(state):
@@ -389,7 +497,7 @@ async def asr_handler(websocket):
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in inference loop: {e}")
+                logger.error(f"Error in inference loop: {e}", exc_info=True)
                 await asyncio.sleep(0.3)
 
     inf_task = asyncio.create_task(inference_loop())
@@ -404,6 +512,10 @@ async def asr_handler(websocket):
                 if len(samples) > 0:
                     state["last_audio_at"] = loop.time()
                 state["audio_buffer"] = np.concatenate([state["audio_buffer"], samples])
+                # 有界化: 推論停止・遅延時のバッファ肥大化防止（最大5秒）
+                max_allowed_samples = int(sample_rate * 5.0)
+                if len(state["audio_buffer"]) > max_allowed_samples:
+                    state["audio_buffer"] = state["audio_buffer"][-max_allowed_samples:]
             elif isinstance(message, str):
                 try:
                     data = json.loads(message)

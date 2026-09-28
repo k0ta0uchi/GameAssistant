@@ -155,7 +155,7 @@ impl RawEvent {
         let source = source.into();
         let source = SourceKind::parse(&source)?;
         if content.as_str().trim().is_empty()
-            || Redactor::default().redact(content.as_str()).text() != content.as_str()
+            || Redactor.redact(content.as_str()).text() != content.as_str()
         {
             return Err(MemoryError::InvalidContent);
         }
@@ -374,7 +374,7 @@ impl Fact {
         operation_id: impl Into<String>,
         policy: &Policy,
     ) -> Result<Self> {
-        let value = Redactor::default().redact_text(value)?;
+        let value = Redactor.redact_text(value)?;
         Self::try_derive_redacted_with_metadata(
             subject,
             predicate,
@@ -432,7 +432,7 @@ impl Fact {
             return Err(MemoryError::EmptyValue("operation_id"));
         }
         if value.as_str().trim().is_empty()
-            || Redactor::default().redact(value.as_str()).text() != value.as_str()
+            || Redactor.redact(value.as_str()).text() != value.as_str()
         {
             return Err(MemoryError::InvalidContent);
         }

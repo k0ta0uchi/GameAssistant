@@ -28,6 +28,7 @@ import {
   ChevronRight,
   Eye,
   RotateCcw,
+  Copy,
 } from "lucide-react";
 import { LiveLogTerminal } from "../Console/LiveLogTerminal";
 import {
@@ -528,6 +529,19 @@ const SemanticBadge: React.FC<{ status: string }> = ({ status }) => (
   </span>
 );
 
+const writeClipboardText = async (text: string): Promise<void> => {
+  const clip =
+    typeof window !== "undefined" && window.navigator?.clipboard
+      ? window.navigator.clipboard
+      : typeof navigator !== "undefined" && navigator.clipboard
+        ? navigator.clipboard
+        : undefined;
+  if (!clip?.writeText) {
+    throw new Error("Clipboard API unavailable");
+  }
+  await clip.writeText(text);
+};
+
 interface FactSummaryManagerProps {
   isOpen: boolean;
 }
@@ -825,6 +839,75 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
       );
   };
 
+  const copySelectedSemanticAsJson = async (overrideIds?: string[]) => {
+    const isFacts = subtab === "facts";
+    const ids = overrideIds ?? (isFacts ? selectedFactIds : selectedSummaryIds);
+    if (ids.length === 0) return;
+
+    const idSet = new Set(ids);
+    const selectedItems = isFacts
+      ? facts.filter((f) => idSet.has(f.fact_id))
+      : summaries.filter((s) => idSet.has(s.summary_id));
+
+    if (selectedItems.length === 0) return;
+
+    try {
+      const jsonText = JSON.stringify(selectedItems, null, 2);
+      await writeClipboardText(jsonText);
+      showNotice(
+        `${selectedItems.length} 件の ${isFacts ? "Fact" : "Summary"} を JSON としてコピーしました`,
+      );
+    } catch (err) {
+      console.error("Failed to copy semantic items as JSON:", err);
+      showNotice("クリップボードへのコピーに失敗しました", true);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const isCtrl = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (isCtrl && key === "a") {
+        e.preventDefault();
+        selectAllVisible();
+        return;
+      }
+
+      if (isCtrl && key === "c") {
+        const selection = window.getSelection();
+        if (selection && selection.toString().length > 0) return;
+
+        if (selectedCount > 0) {
+          e.preventDefault();
+          void copySelectedSemanticAsJson();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    isOpen,
+    selectedCount,
+    subtab,
+    facts,
+    summaries,
+    selectedFactIds,
+    selectedSummaryIds,
+    rows,
+  ]);
+
   const mutationTargets = (): FactMutationTarget[] =>
     selectedFactIds
       .map((factId) => {
@@ -1104,6 +1187,20 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
           },
         },
         {
+          label:
+            selectedFactIds.length > 1 && selectedFactIds.includes(fact.fact_id)
+              ? `Copy selected as JSON (${selectedFactIds.length})`
+              : "Copy as JSON",
+          onSelect: () => {
+            if (!selectedFactIds.includes(fact.fact_id)) {
+              setSelectedFactIds([fact.fact_id]);
+              void copySelectedSemanticAsJson([fact.fact_id]);
+            } else {
+              void copySelectedSemanticAsJson();
+            }
+          },
+        },
+        {
           label: "Delete fact",
           danger: true,
           disabled: mutating,
@@ -1121,6 +1218,21 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
     return [
       { label: "Open details", onSelect: () => openSummary(summary) },
       {
+        label:
+          selectedSummaryIds.length > 1 &&
+          selectedSummaryIds.includes(summary.summary_id)
+            ? `Copy selected as JSON (${selectedSummaryIds.length})`
+            : "Copy as JSON",
+        onSelect: () => {
+          if (!selectedSummaryIds.includes(summary.summary_id)) {
+            setSelectedSummaryIds([summary.summary_id]);
+            void copySelectedSemanticAsJson([summary.summary_id]);
+          } else {
+            void copySelectedSemanticAsJson();
+          }
+        },
+      },
+      {
         label: "Retry summary",
         disabled: !summaryRetryAllowed(summary) || mutating,
         onSelect: () => void retrySummary(summary),
@@ -1134,6 +1246,8 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
     contextMenu,
     facts,
     summaries,
+    selectedFactIds,
+    selectedSummaryIds,
     mutating,
     confirmActiveFact,
     retrySummary,
@@ -1300,6 +1414,16 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
           {selectedCount === rows.length && rows.length > 0
             ? "Clear visible"
             : "Select all visible"}
+        </button>
+        <button
+          type="button"
+          disabled={selectedCount === 0}
+          onClick={() => void copySelectedSemanticAsJson()}
+          className="linear-btn-ghost px-2 py-1 flex items-center gap-1.5 text-xs disabled:opacity-40 hover:text-[#02b8cc]"
+          title="Ctrl+C で選択項目を JSON としてコピー"
+        >
+          <Copy className="w-3 h-3 text-[#02b8cc]" />
+          <span>Copy JSON ({selectedCount})</span>
         </button>
         {subtab === "facts" && (
           <>
@@ -2208,22 +2332,65 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
     return result;
   }, [memories, searchQuery, sortField, sortOrder]);
 
-  // Ctrl+A で全選択ショートカット
+  const copySelectedAsJson = async (overrideIds?: string[]) => {
+    const ids = overrideIds ?? selectedIds;
+    if (ids.length === 0) return;
+
+    const idSet = new Set(ids);
+    const selectedItems = filteredAndSortedMemories.filter((m) =>
+      idSet.has(m.id),
+    );
+    if (selectedItems.length === 0) return;
+
+    try {
+      const jsonText = JSON.stringify(selectedItems, null, 2);
+      await writeClipboardText(jsonText);
+      showNotice(
+        `${selectedItems.length} 件のメモリを JSON としてコピーしました`,
+        "success",
+      );
+    } catch (err) {
+      console.error("Failed to copy memories as JSON:", err);
+      showNotice("クリップボードへのコピーに失敗しました", "error");
+    }
+  };
+
+  // Ctrl+A で全選択, Ctrl+C で選択メモリを JSON コピー
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isOpen) return;
+      if (!isOpen || managerTab !== "raw") return;
       const target = e.target as HTMLElement;
-      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
 
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      const isCtrl = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (isCtrl && key === "a") {
         e.preventDefault();
         setSelectedIds(filteredAndSortedMemories.map((m) => m.id));
+        return;
+      }
+
+      if (isCtrl && key === "c") {
+        const selection = window.getSelection();
+        if (selection && selection.toString().length > 0) return;
+
+        if (selectedIds.length > 0) {
+          e.preventDefault();
+          void copySelectedAsJson();
+        }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isOpen, filteredAndSortedMemories]);
+  }, [isOpen, managerTab, filteredAndSortedMemories, selectedIds]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -2482,6 +2649,20 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
         },
       },
       {
+        label:
+          selectedIds.length > 1 && selectedIds.includes(item.id)
+            ? `Copy selected as JSON (${selectedIds.length})`
+            : "Copy as JSON",
+        onSelect: () => {
+          if (!selectedIds.includes(item.id)) {
+            setSelectedIds([item.id]);
+            void copySelectedAsJson([item.id]);
+          } else {
+            void copySelectedAsJson();
+          }
+        },
+      },
+      {
         label: "Edit selected metadata",
         disabled: selectedIds.length < 2,
         onSelect: () => setSelectedIds((current) => [...current]),
@@ -2496,7 +2677,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
         onSelect: () => void handleDeleteSelected([item.id]),
       },
     ];
-  }, [contextMenu, memories, selectedIds.length]);
+  }, [contextMenu, memories, selectedIds]);
 
   const handleBackup = async () => {
     try {
@@ -3183,6 +3364,16 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         </button>
 
                         <button
+                          type="button"
+                          onClick={() => void copySelectedAsJson()}
+                          className="w-full py-2 linear-btn-ghost flex items-center justify-center gap-1.5 text-xs font-medium hover:text-[#02b8cc] hover:border-[#02b8cc]/40"
+                          title="Ctrl+C で選択したメモリを JSON としてコピー"
+                        >
+                          <Copy className="w-3.5 h-3.5 text-[#02b8cc]" />
+                          <span>Copy {selectedIds.length} as JSON (Ctrl+C)</span>
+                        </button>
+
+                        <button
                           onClick={() => void handleDeleteSelected()}
                           className="w-full py-2 linear-btn-ghost border-[#eb5757]/30 hover:border-[#eb5757] text-[#eb5757] flex items-center justify-center gap-1.5 text-xs font-medium"
                         >
@@ -3356,6 +3547,18 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                                 <span>Generate Blog from This Memory</span>
                               </>
                             )}
+                          </button>
+                        )}
+
+                        {!isCreatingNew && activeItem && (
+                          <button
+                            type="button"
+                            onClick={() => void copySelectedAsJson([activeItem.id])}
+                            className="w-full py-2 linear-btn-ghost flex items-center justify-center gap-1.5 text-xs font-medium hover:text-[#02b8cc] hover:border-[#02b8cc]/40"
+                            title="Ctrl+C でこのメモリを JSON としてコピー"
+                          >
+                            <Copy className="w-3.5 h-3.5 text-[#02b8cc]" />
+                            <span>Copy as JSON (Ctrl+C)</span>
                           </button>
                         )}
                       </div>

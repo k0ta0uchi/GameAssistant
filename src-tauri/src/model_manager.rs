@@ -106,6 +106,26 @@ pub fn get_defined_models() -> Vec<ModelDef> {
             expected_sha256: None,
         },
         ModelDef {
+            id: "faster-whisper-small".to_string(),
+            name: "Whisper Small (CPU Fallback)".to_string(),
+            description:
+                "ゲーム起動中・VRAM枯渇時のCPU高速フォールバック用音声認識モデル (約5倍高速・約480MB)"
+                    .to_string(),
+            hf_repo: "Systran/faster-whisper-small".to_string(),
+            category: "ASR".to_string(),
+            required: true,
+            estimated_size_bytes: 488_000_000,
+            check_files: vec![
+                "model.bin".to_string(),
+                "config.json".to_string(),
+                "tokenizer.json".to_string(),
+                "vocabulary.txt".to_string(),
+            ],
+            download_url: None,
+            expected_size_bytes: None,
+            expected_sha256: None,
+        },
+        ModelDef {
             id: "GLuCoSE-base-ja".to_string(),
             name: "GLuCoSE-base-ja (Embedding)".to_string(),
             description:

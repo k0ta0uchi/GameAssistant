@@ -17,7 +17,10 @@ fn main() {
     }
 
     let default_output = host.default_output_device();
-    println!("\nDefault Output Device: {:?}", default_output.as_ref().and_then(|d| d.name().ok()));
+    println!(
+        "\nDefault Output Device: {:?}",
+        default_output.as_ref().and_then(|d| d.name().ok())
+    );
 
     for (name, dev) in &outputs {
         println!("\n--- Testing device: {} ---", name);
@@ -28,8 +31,12 @@ fn main() {
                 continue;
             }
         };
-        println!("  Config: sample_rate={}, channels={}, format={:?}",
-            default_cfg.sample_rate().0, default_cfg.channels(), default_cfg.sample_format());
+        println!(
+            "  Config: sample_rate={}, channels={}, format={:?}",
+            default_cfg.sample_rate().0,
+            default_cfg.channels(),
+            default_cfg.sample_format()
+        );
 
         let stream_cfg: cpal::StreamConfig = default_cfg.clone().into();
         let packet_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -40,23 +47,25 @@ fn main() {
         let err_fn = |err| eprintln!("  Stream error: {}", err);
 
         let stream_res = match default_cfg.sample_format() {
-            cpal::SampleFormat::F32 => {
-                dev.build_input_stream(
-                    &stream_cfg,
-                    move |data: &[f32], _| {
-                        pc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let mut m = 0.0f32;
-                        for &s in data {
-                            let a = s.abs();
-                            if a > m { m = a; }
+            cpal::SampleFormat::F32 => dev.build_input_stream(
+                &stream_cfg,
+                move |data: &[f32], _| {
+                    pc.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut m = 0.0f32;
+                    for &s in data {
+                        let a = s.abs();
+                        if a > m {
+                            m = a;
                         }
-                        let mut guard = mv.lock();
-                        if m > *guard { *guard = m; }
-                    },
-                    err_fn,
-                    None,
-                )
-            }
+                    }
+                    let mut guard = mv.lock();
+                    if m > *guard {
+                        *guard = m;
+                    }
+                },
+                err_fn,
+                None,
+            ),
             _ => {
                 println!("  Unsupported format: {:?}", default_cfg.sample_format());
                 continue;
@@ -72,7 +81,10 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(1500));
                     let count = packet_count.load(std::sync::atomic::Ordering::Relaxed);
                     let max_v = *max_val.lock();
-                    println!("  Result: {} packets received, max amplitude: {:.6}", count, max_v);
+                    println!(
+                        "  Result: {} packets received, max amplitude: {:.6}",
+                        count, max_v
+                    );
                 }
             }
             Err(e) => {

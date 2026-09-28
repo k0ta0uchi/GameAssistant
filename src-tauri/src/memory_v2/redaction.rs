@@ -48,7 +48,7 @@ impl<'de> Deserialize<'de> for RedactedText {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        if value.trim().is_empty() || Redactor::default().redact(&value).text() != value {
+        if value.trim().is_empty() || Redactor.redact(&value).text() != value {
             return Err(serde::de::Error::custom(MemoryError::InvalidContent));
         }
         Ok(Self::from_validated(value))
@@ -254,5 +254,5 @@ fn contact_regex() -> &'static Regex {
 }
 
 pub fn redact(input: &str) -> RedactionResult {
-    Redactor::default().redact(input)
+    Redactor.redact(input)
 }

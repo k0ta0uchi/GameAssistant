@@ -213,10 +213,7 @@ impl RecoveryReport {
         self.next_sequence
     }
     pub fn replayable_records(&self) -> Vec<JournalRecord> {
-        self.replayable_record_refs()
-            .into_iter()
-            .map(|record| record.clone())
-            .collect()
+        self.replayable_record_refs().into_iter().cloned().collect()
     }
 
     /// Borrow the committed operation records without cloning their JSON

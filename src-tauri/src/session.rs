@@ -57,6 +57,35 @@ fn automatic_blog_post_enabled(settings: &serde_json::Value) -> bool {
         .unwrap_or(true)
 }
 
+/// Resolve the effective Twitch IRC channel to join.
+/// Checks explicit `twitch_channel` (or legacy `twitch_bot_channel`).
+/// If unset, falls back to `user_name` only when it contains valid ASCII alphanumeric/underscore characters.
+fn resolve_effective_twitch_channel(settings: &serde_json::Value) -> String {
+    let explicit = settings
+        .get("twitch_channel")
+        .or_else(|| settings.get("twitch_bot_channel"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    if !explicit.is_empty() {
+        return explicit.trim_start_matches('#').to_string();
+    }
+
+    if let Some(u) = settings.get("user_name").and_then(|v| v.as_str()) {
+        let trimmed = u.trim().trim_start_matches('#');
+        if !trimmed.is_empty()
+            && trimmed
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return trimmed.to_string();
+        }
+    }
+
+    String::new()
+}
+
 /// Upper bound for waiting on in-flight raw-save tasks after Stop Session.
 /// Guards are RAII so the drain cannot leak; this bound only prevents a hung
 /// backend write from delaying blog generation forever.
@@ -1233,7 +1262,7 @@ impl SessionManager {
             return None;
         }
         let session_id = self.session_id.lock().clone();
-        let started_at = self.session_started_at.lock().clone()?;
+        let started_at = (*self.session_started_at.lock())?;
         if session_id.is_empty() {
             return None;
         }
@@ -3647,7 +3676,15 @@ impl SessionManager {
             .unwrap_or_else(|| {
                 std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.0-flash".to_string())
             });
-        let sys_prompt = crate::prompts::get_prompt(&self.root_dir, "system_instruction_character");
+        // {user_name} がカスタムプロンプトに含まれる場合は設定値を注入する
+        // (デフォルトのプロンプトにプレースホルダーがなければ何も変わらない)。
+        let sys_prompt = crate::prompts::apply_prompt_placeholders(
+            &crate::prompts::get_prompt(&self.root_dir, "system_instruction_character"),
+            st_file
+                .get("user_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        );
         let tts_cfg = extract_tts_settings(&st_file);
         self.log_mgr.info(
             "ASR",
@@ -3763,6 +3800,9 @@ impl SessionManager {
         let settings = crate::settings::load_settings_file(&self.root_dir);
         let (wake_word_config, wake_engine_supported) = wake_word_config_from_settings(&settings);
         self.asr_engine.configure_wake_word(wake_word_config);
+        if let Some(ref handle) = app_handle {
+            self.asr_engine.ws_client.set_app_handle(handle.clone());
+        }
         if !wake_engine_supported {
             self.log_mgr.warn(
                 "ASR",
@@ -3781,14 +3821,7 @@ impl SessionManager {
 
         // 1. Twitch サービス連携
         if let Some(twitch_svc) = twitch_service {
-            let twitch_channel = settings
-                .get("twitch_channel")
-                .or_else(|| settings.get("twitch_bot_channel"))
-                .or_else(|| settings.get("user_name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let twitch_channel = resolve_effective_twitch_channel(&settings);
 
             let twitch_bot_username = settings
                 .get("twitch_bot_username")
@@ -3811,19 +3844,40 @@ impl SessionManager {
                 let session_self = self.clone();
                 let twitch_context = session_context.clone();
 
+                let auth_desc = if twitch_bot_token.is_empty() {
+                    "anonymous reader (justinfan)".to_string()
+                } else {
+                    format!("authenticated nick='{}'", twitch_bot_username)
+                };
                 log_mgr_twitch.info(
                     "Twitch",
                     &format!(
-                        "Logging in as '{}' to channel '{}'...",
-                        twitch_bot_username, twitch_channel
+                        "Attempting Twitch IRC connection as {} to channel '#{}'...",
+                        auth_desc, twitch_channel
                     ),
                 );
+
+                let twitch_client_id = settings
+                    .get("twitch_client_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let twitch_client_secret = settings
+                    .get("twitch_client_secret")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                let twitch_refresh_token = settings
+                    .get("twitch_refresh_token")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
 
                 tauri::async_runtime::spawn(async move {
                     let bot_settings = crate::twitch::TwitchBotSettings {
                         channel: twitch_channel.clone(),
                         bot_nick: twitch_bot_username.clone(),
                         oauth_token: twitch_bot_token,
+                        client_id: twitch_client_id,
+                        client_secret: twitch_client_secret,
+                        refresh_token: twitch_refresh_token,
                     };
 
                     let session_for_msg = session_self.clone();
@@ -3833,6 +3887,13 @@ impl SessionManager {
                         let sess = session_for_msg.clone();
                         let app_m = app_for_msg.clone();
                         let context = context_for_msg.clone();
+                        sess.log_mgr.info(
+                            "Twitch",
+                            &format!(
+                                "Received Twitch chat from '{}' in session={}: {}",
+                                msg.author, context.session_id, msg.content
+                            ),
+                        );
                         if !sess.is_current_session(&context) {
                             sess.log_mgr.info(
                                 "Session",
@@ -3854,6 +3915,11 @@ impl SessionManager {
                                 timestamp: Local::now().to_rfc3339(),
                             };
                             sess.append_event_to_session(tw_event.clone(), Some(&context));
+                            if sess.is_current_session(&context) {
+                                if let Some(ref handle) = app_m {
+                                    let _ = handle.emit("session-event", &tw_event);
+                                }
+                            }
                             let persisted = sess
                                 .save_event_to_memory_with_app_context(
                                     &tw_event,
@@ -3880,9 +3946,12 @@ impl SessionManager {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("gemini-2.0-flash")
                                 .to_string();
-                            let sys_prompt = crate::prompts::get_prompt(
-                                &sess.root_dir,
-                                "system_instruction_character",
+                            let sys_prompt = crate::prompts::apply_prompt_placeholders(
+                                &crate::prompts::get_prompt(
+                                    &sess.root_dir,
+                                    "system_instruction_character",
+                                ),
+                                st.get("user_name").and_then(|v| v.as_str()).unwrap_or(""),
                             );
                             let tts_cfg = extract_tts_settings(&st);
 
@@ -3914,6 +3983,11 @@ impl SessionManager {
                         );
                     }
                 });
+            } else {
+                self.log_mgr.warn(
+                    "Twitch",
+                    "Twitch channel not configured (or user_name is not ASCII alphanumeric); skipping Twitch IRC connection. Please set 'twitch_channel' in Settings.",
+                );
             }
         }
 
@@ -4029,7 +4103,6 @@ impl SessionManager {
                             .process_asr_followup(&context, result, &text, app_cl.as_ref())
                             .await;
                     }
-                    return;
                 });
             },
         ) {
@@ -4216,11 +4289,9 @@ impl SessionManager {
         app_handle: AppHandle,
     ) {
         if !self.is_active.load(Ordering::SeqCst) {
-            let _ = self.audio_input_mgr.start_mic_stream(
-                mic_device,
-                Some(app_handle.clone()),
-                None,
-            );
+            let _ =
+                self.audio_input_mgr
+                    .start_mic_stream(mic_device, Some(app_handle.clone()), None);
 
             if enable_discord {
                 let _ = self.audio_input_mgr.start_discord_stream(
@@ -4502,7 +4573,12 @@ impl SessionManager {
         );
 
         let st = crate::settings::load_settings_file(&self.root_dir);
-        let sys_prompt = crate::prompts::get_prompt(&self.root_dir, "auto_commentary_prompt");
+        // 配信者名は設定 (user_name) で管理する。テンプレート内の
+        // {user_name} をここで動的に注入し、ハードコードされた名前に依存しない。
+        let sys_prompt = crate::prompts::apply_prompt_placeholders(
+            &crate::prompts::get_prompt(&self.root_dir, "auto_commentary_prompt"),
+            st.get("user_name").and_then(|v| v.as_str()).unwrap_or(""),
+        );
 
         if let Err(reason) = crate::ai_client::validate_gemini_api_key(gemini_api_key) {
             self.log_mgr.warn(
@@ -4624,6 +4700,20 @@ impl SessionManager {
                 app_handle,
             );
             return Err("commentary dropped: stale_after_screen_capture".to_string());
+        }
+
+        // Auto Commentary が取得した最新フレームを Target Window カードの
+        // プレビューへ即時反映する。以前は UI 側が選択時に撮った静止画のまま
+        // 古くなっていたため、実況が実際に参照した画面をフロントへ通知する。
+        if let Some(ref image) = screen_b64 {
+            if self.context_allows_ui(context) {
+                if let Some(handle) = app_handle {
+                    let _ = handle.emit(
+                        "window_preview_updated",
+                        serde_json::json!({ "image": image, "source": "auto_commentary" }),
+                    );
+                }
+            }
         }
 
         let full_system_instruction =
@@ -5529,7 +5619,7 @@ impl SessionManager {
         // Clone the boundary before entering the async call.  Holding a
         // parking_lot MutexGuard across `.await` makes the Tauri command
         // future !Send and prevents the library from compiling.
-        let session_started_at = self.session_started_at.lock().clone();
+        let session_started_at = *self.session_started_at.lock();
         let session_id = {
             let id = self.session_id.lock().clone();
             (!id.is_empty()).then_some(id)
@@ -5766,10 +5856,10 @@ mod tests {
         build_chat_messages, contains_stop_word, finalize_backfill_progress, increment_reason,
         inference_failure_reason, live_asr_summary_event, normalize_prompt_text,
         partition_backfill_rows, persisted_blog_fallback_events, prompt_is_sendable,
-        record_backfill_commit, runtime_failure_reason, set_backfill_fatal, should_backfill_row,
-        should_emit_input_drop_toast, unique_blog_path, BackfillLogSeverity,
-        MemoryBackfillProgress, SessionManager, StoredMemory, SummaryBackfillApplyResult,
-        MAX_CHAT_HISTORY_CHARS, MAX_CHAT_HISTORY_MESSAGES,
+        record_backfill_commit, resolve_effective_twitch_channel, runtime_failure_reason,
+        set_backfill_fatal, should_backfill_row, should_emit_input_drop_toast, unique_blog_path,
+        BackfillLogSeverity, MemoryBackfillProgress, SessionManager, StoredMemory,
+        SummaryBackfillApplyResult, MAX_CHAT_HISTORY_CHARS, MAX_CHAT_HISTORY_MESSAGES,
     };
     use crate::lance_memory::{self, SummaryExclusionDetail};
     use crate::logger::LogManager;
@@ -5894,7 +5984,9 @@ mod tests {
             .await
             .expect("stale final must still reach the raw persistence boundary");
 
-        let repository = MemoryRepository::open(&session.root_dir).await.unwrap();
+        let repository = MemoryRepository::open(&session.root_dir)
+            .await
+            .expect("open memory repository for stale final verification");
         assert!(repository
             .read_raw_events()
             .await
@@ -6040,7 +6132,7 @@ mod tests {
             session.root_dir.join("settings.json"),
             r#"{"create_blog_post":false}"#,
         )
-        .unwrap();
+        .expect("write settings.json for archive reclaim test");
         session.start_session();
         let context = session
             .current_session_context()
@@ -6377,11 +6469,11 @@ mod tests {
         let first = unique_blog_path(&dir, "2026-09-07_12-00-00");
         assert_eq!(first, dir.join("2026-09-07_12-00-00.md"));
 
-        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&first, "first").expect("write first blog article fixture");
         let second = unique_blog_path(&dir, "2026-09-07_12-00-00");
         assert_eq!(second, dir.join("2026-09-07_12-00-00_2.md"));
 
-        std::fs::write(&second, "second").unwrap();
+        std::fs::write(&second, "second").expect("write second blog article fixture");
         let third = unique_blog_path(&dir, "2026-09-07_12-00-00");
         assert_eq!(third, dir.join("2026-09-07_12-00-00_3.md"));
 
@@ -6457,8 +6549,9 @@ mod tests {
 
     #[test]
     fn memory_admission_is_idempotent_and_rejects_empty_text() {
-        let first = admit_redacted_memory_text("email alice@example.com").unwrap();
-        let second = admit_redacted_memory_text(&first).unwrap();
+        let first = admit_redacted_memory_text("email alice@example.com")
+            .expect("admission of non-empty text must succeed");
+        let second = admit_redacted_memory_text(&first).expect("re-admission must succeed");
 
         assert_eq!(first, second);
         assert_eq!(admit_redacted_memory_text(" \n\t "), None);
@@ -6478,7 +6571,7 @@ mod tests {
     #[test]
     fn blog_fallback_is_session_scoped_and_bounded() {
         let started_at = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:00:00Z")
-            .unwrap()
+            .expect("parse test session start timestamp")
             .with_timezone(&chrono::Utc);
         let row = |id: &str, timestamp: &str| StoredMemory {
             id: id.into(),
@@ -6913,5 +7006,45 @@ mod tests {
         assert!(message.contains("counters="));
         assert!(!message.contains("private source text"));
         assert!(!message.contains("model response"));
+    }
+
+    #[test]
+    fn test_resolve_effective_twitch_channel() {
+        // Case 1: explicit twitch_channel with '#' prefix and padding
+        let s1 = serde_json::json!({
+            "twitch_channel": " #my_channel ",
+            "user_name": "fallback_user"
+        });
+        assert_eq!(resolve_effective_twitch_channel(&s1), "my_channel");
+
+        // Case 2: explicit twitch_channel without '#'
+        let s2 = serde_json::json!({
+            "twitch_channel": "streamer123"
+        });
+        assert_eq!(resolve_effective_twitch_channel(&s2), "streamer123");
+
+        // Case 3: fallback to valid ASCII alphanumeric user_name
+        let s3 = serde_json::json!({
+            "twitch_channel": "",
+            "user_name": "valid_user_99"
+        });
+        assert_eq!(resolve_effective_twitch_channel(&s3), "valid_user_99");
+
+        // Case 4: non-ASCII user_name (e.g. Japanese) is rejected as fallback
+        let s4 = serde_json::json!({
+            "twitch_channel": "",
+            "user_name": "こうた"
+        });
+        assert_eq!(resolve_effective_twitch_channel(&s4), "");
+
+        // Case 5: legacy twitch_bot_channel fallback
+        let s5 = serde_json::json!({
+            "twitch_bot_channel": "#legacy_channel"
+        });
+        assert_eq!(resolve_effective_twitch_channel(&s5), "legacy_channel");
+
+        // Case 6: all empty
+        let s6 = serde_json::json!({});
+        assert_eq!(resolve_effective_twitch_channel(&s6), "");
     }
 }

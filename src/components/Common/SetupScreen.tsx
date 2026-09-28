@@ -54,6 +54,13 @@ const MANUAL_MODEL_GUIDANCE: Array<{
     url: 'https://huggingface.co/kotoba-tech/kotoba-whisper-v2.0-faster/tree/main',
   },
   {
+    id: 'faster-whisper-small',
+    label: 'Whisper Small (CPU Fallback ASR)',
+    path: './models/faster-whisper-small/',
+    files: ['model.bin', 'config.json', 'tokenizer.json', 'vocabulary.txt'],
+    url: 'https://huggingface.co/Systran/faster-whisper-small/tree/main',
+  },
+  {
     id: 'GLuCoSE-base-ja',
     label: 'GLuCoSE-base-ja (Embedding)',
     path: './models/GLuCoSE-base-ja/',

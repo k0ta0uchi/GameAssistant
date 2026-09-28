@@ -16,6 +16,7 @@ const MAX_PAGE_SIZE: usize = 200;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[derive(Default)]
 pub struct MemoryFilters {
     #[serde(default)]
     pub statuses: Vec<String>,
@@ -31,20 +32,6 @@ pub struct MemoryFilters {
     pub occurred_to: Option<String>,
     #[serde(default)]
     pub has_summary: Option<bool>,
-}
-
-impl Default for MemoryFilters {
-    fn default() -> Self {
-        Self {
-            statuses: vec![],
-            sources: vec![],
-            event_types: vec![],
-            subjects: vec![],
-            occurred_from: None,
-            occurred_to: None,
-            has_summary: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,7 +531,7 @@ fn summary_retry_counts(repository: &MemoryRepository) -> ApiResult<HashMap<Stri
         if record.operation_kind() != "summary_status" {
             continue;
         }
-        let payload = operation_payload(&record);
+        let payload = operation_payload(record);
         let Some(entity_id) = payload
             .get("entity_id")
             .or_else(|| payload.get("event_id"))

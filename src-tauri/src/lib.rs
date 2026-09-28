@@ -317,7 +317,9 @@ fn start_audio_preview(
     enable_discord: Option<bool>,
 ) {
     let enable_discord = enable_discord.unwrap_or(false);
-    state.session_mgr.start_audio_preview(mic_device, discord_device, enable_discord, app);
+    state
+        .session_mgr
+        .start_audio_preview(mic_device, discord_device, enable_discord, app);
 }
 
 #[tauri::command]
@@ -650,7 +652,12 @@ async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
     state
         .log_mgr
         .info("ASR", "Restarting Whisper GPU worker...");
-    state.session_mgr.asr_engine.ws_client.restart().await?;
+    state
+        .session_mgr
+        .asr_engine
+        .ws_client
+        .restart_with_device(Some("cuda".to_string()))
+        .await?;
     state.log_mgr.info(
         "ASR",
         "Whisper GPU worker restarted and warmed up successfully.",
@@ -1341,6 +1348,8 @@ pub fn run() {
 
     let tts_mgr = Arc::new(TtsManager::new());
     let twitch_service = Arc::new(TwitchService::new());
+    twitch_service.set_log_manager(log_mgr.clone());
+    twitch_service.set_root_dir(root_dir.clone());
     let web_search_client = Arc::new(WebSearchClient::new());
     let ai_client = Arc::new(AiClient::new());
     let session_mgr = Arc::new(SessionManager::new(
@@ -1451,6 +1460,10 @@ pub fn run() {
             session_mgr
                 .local_summary()
                 .set_status_emitter(app_handle.clone());
+            session_mgr
+                .asr_engine
+                .ws_client
+                .set_app_handle(app_handle.clone());
 
             // 1. Rust ネイティブエンジンの起動通知ログ
             log_mgr.info(

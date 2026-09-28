@@ -103,11 +103,11 @@ impl Policy {
                 "private memory requires consent".to_string(),
             ));
         }
-        let redacted = Redactor::default()
+        let redacted = Redactor
             .redact_text(input)
             .map_err(|_| MemoryError::InvalidContent)?;
         if redacted.as_str().trim().is_empty()
-            || Redactor::default().redact(redacted.as_str()).text() != redacted.as_str()
+            || Redactor.redact(redacted.as_str()).text() != redacted.as_str()
         {
             return Err(MemoryError::InvalidContent);
         }

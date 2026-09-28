@@ -15,6 +15,8 @@ use tokio::sync::Notify;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use tauri::{AppHandle, Emitter};
+
 use crate::logger::LogManager;
 
 const ASR_WS_URL: &str = "ws://127.0.0.1:18088/asr";
@@ -249,30 +251,20 @@ struct AudioPacket {
 /// default product mode requires one of the configured/default wake words;
 /// callers may opt into forwarding every final utterance or disabling the
 /// path entirely without relying on an implicit empty-list branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WakeWordMode {
+    #[default]
     RequireWakeWord,
     AllFinalSpeech,
     Disabled,
 }
 
-impl Default for WakeWordMode {
-    fn default() -> Self {
-        Self::RequireWakeWord
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WakeWordPhase {
+    #[default]
     Idle,
     Armed,
     AwaitingPrompt,
-}
-
-impl Default for WakeWordPhase {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -840,6 +832,59 @@ impl WakeWordStateMachine {
     }
 }
 
+fn notify_device_transition_helper(
+    app_handle: &Arc<Mutex<Option<AppHandle>>>,
+    last_notified_device: &Arc<Mutex<Option<String>>>,
+    new_device: &str,
+    reason: Option<&str>,
+) {
+    let mut last = last_notified_device.lock();
+    let prev = last.clone();
+
+    // 同一デバイスへの重複通知を抑止
+    if let Some(ref p) = prev {
+        if p == new_device {
+            return;
+        }
+    }
+
+    // 初回（prevがNone）かつ理由指定なし（正常起動時の初回接続）は
+    // 状態を初期化するのみでトースト通知は行わない（起動時の不要なポップアップを防止）
+    if prev.is_none() && reason.is_none() {
+        *last = Some(new_device.to_string());
+        return;
+    }
+
+    *last = Some(new_device.to_string());
+
+    let (message, toast_type) = if new_device == "cpu" {
+        let msg = match reason {
+            Some(r) => format!(
+                "⚠️ WhisperをCPUモード（高速モデル）に切り替えました（{}）",
+                r
+            ),
+            None => "⚠️ WhisperをCPUモード（高速モデル）に切り替えました".to_string(),
+        };
+        (msg, "warning")
+    } else {
+        let msg = match reason {
+            Some(r) => format!("✅ WhisperがGPUモード（CUDA）に切り替えました（{}）", r),
+            None => "✅ WhisperがGPUモード（CUDA）に切り替えました".to_string(),
+        };
+        (msg, "success")
+    };
+
+    if let Some(ref handle) = *app_handle.lock() {
+        let _ = handle.emit(
+            "toast_notice",
+            serde_json::json!({
+                "message": message,
+                "type": toast_type,
+            }),
+        );
+    }
+}
+
 pub struct WhisperWsClient {
     audio_tx: Mutex<Option<mpsc::UnboundedSender<AudioPacket>>>,
     cmd_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
@@ -856,6 +901,11 @@ pub struct WhisperWsClient {
     connection_active: Arc<AtomicBool>,
     readiness_notify: Arc<Notify>,
     connection_generation: Arc<AtomicU64>,
+    pub forced_device: Arc<Mutex<Option<String>>>,
+    pub current_device: Arc<Mutex<String>>,
+    pub restart_tx: Arc<Mutex<Option<mpsc::UnboundedSender<Option<String>>>>>,
+    pub app_handle: Arc<Mutex<Option<AppHandle>>>,
+    pub last_notified_device: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for WhisperWsClient {
@@ -882,7 +932,63 @@ impl WhisperWsClient {
             connection_active: Arc::new(AtomicBool::new(false)),
             readiness_notify: Arc::new(Notify::new()),
             connection_generation: Arc::new(AtomicU64::new(0)),
+            forced_device: Arc::new(Mutex::new(None)),
+            current_device: Arc::new(Mutex::new("cuda".to_string())),
+            restart_tx: Arc::new(Mutex::new(None)),
+            app_handle: Arc::new(Mutex::new(None)),
+            last_notified_device: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn set_app_handle(&self, handle: AppHandle) {
+        *self.app_handle.lock() = Some(handle);
+    }
+
+    pub fn notify_device_transition(&self, new_device: &str, reason: Option<&str>) {
+        notify_device_transition_helper(
+            &self.app_handle,
+            &self.last_notified_device,
+            new_device,
+            reason,
+        );
+    }
+
+    /// Supervisor タスクを初期化し、子プロセスハング時などの自動復旧（CPUフェイルオーバー）を待機
+    pub fn init_supervisor(self: &Arc<Self>) {
+        let client_weak = Arc::downgrade(self);
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
+        *self.restart_tx.lock() = Some(tx);
+
+        tauri::async_runtime::spawn(async move {
+            while let Some(device_override) = rx.recv().await {
+                if let Some(client) = client_weak.upgrade() {
+                    let log_mgr = client.log_mgr.lock().clone();
+                    record_child_line(
+                        &log_mgr,
+                        "stdout",
+                        &format!(
+                            "[Supervisor] Initiating automatic failover restart with device={:?}...",
+                            device_override
+                        ),
+                    );
+                    if let Err(e) = client.restart_with_device(device_override).await {
+                        record_child_line(
+                            &log_mgr,
+                            "stderr",
+                            &format!("[Supervisor] Automatic restart failed: {}", e),
+                        );
+                    } else {
+                        record_child_line(
+                            &log_mgr,
+                            "stdout",
+                            "[Supervisor] Automatic restart completed successfully.",
+                        );
+                    }
+                } else {
+                    break;
+                }
+            }
+        });
     }
 
     pub fn set_callback<F>(&self, on_result: F)
@@ -962,8 +1068,17 @@ impl WhisperWsClient {
         }
     }
 
-    /// CUDA INT8 Faster-Whisper WebSocket サーバーを起動し、ws://127.0.0.1:18088/asr に接続
+    /// Faster-Whisper WebSocket サーバーを起動し、ws://127.0.0.1:18088/asr に接続
     pub fn start<F>(&self, on_result: F) -> Result<(), String>
+    where
+        F: Fn(String, String, bool, Option<f64>) + Send + Sync + 'static,
+    {
+        let forced = self.forced_device.lock().clone();
+        self.start_with_device(on_result, forced)
+    }
+
+    /// デバイス指定（"cpu" / "cuda"）付きで Faster-Whisper WebSocket サーバーを起動
+    pub fn start_with_device<F>(&self, on_result: F, device: Option<String>) -> Result<(), String>
     where
         F: Fn(String, String, bool, Option<f64>) + Send + Sync + 'static,
     {
@@ -973,6 +1088,9 @@ impl WhisperWsClient {
         // installed and tear down the first worker.
         let _lifecycle_guard = self.lifecycle_lock.lock();
         self.set_callback(on_result);
+
+        *self.forced_device.lock() = device.clone();
+        *self.current_device.lock() = device.clone().unwrap_or_else(|| "cuda".to_string());
 
         if self.is_started.load(Ordering::SeqCst) {
             // 既に起動済みの場合はコールバックの更新のみで即時有効化。
@@ -1031,8 +1149,11 @@ impl WhisperWsClient {
         let cache_dir = root_dir.join(".hf-cache");
 
         let mut cmd = Command::new(&python_path);
-        cmd.arg(&script_path)
-            .current_dir(&root_dir)
+        cmd.arg(&script_path);
+        if let Some(ref dev) = device {
+            cmd.arg("--force-device").arg(dev);
+        }
+        cmd.current_dir(&root_dir)
             .env("RUNTIME_ROOT", root_dir.to_string_lossy().to_string())
             .env(
                 "SETTINGS_PATH",
@@ -1134,6 +1255,11 @@ impl WhisperWsClient {
         let is_started = self.is_started.clone();
         let child_store = self.child.clone();
         let process_lock = self.process_lock.clone();
+        let current_device_clone = self.current_device.clone();
+        let forced_device_clone = self.forced_device.clone();
+        let restart_tx_clone = self.restart_tx.clone();
+        let app_handle_clone = self.app_handle.clone();
+        let last_notified_device_clone = self.last_notified_device.clone();
         #[cfg(windows)]
         let job_store = self.job.clone();
         connection_active.store(true, Ordering::SeqCst);
@@ -1223,8 +1349,20 @@ impl WhisperWsClient {
             is_ready.store(true, Ordering::SeqCst);
             readiness_notify.notify_waiters();
 
+            let cur_dev = current_device_clone.lock().clone();
+            notify_device_transition_helper(
+                &app_handle_clone,
+                &last_notified_device_clone,
+                &cur_dev,
+                None,
+            );
+
             let (mut ws_write, mut ws_read) = ws_stream.split();
 
+            let last_audio_sent_ms = Arc::new(AtomicU64::new(0));
+            let last_msg_received_ms = Arc::new(AtomicU64::new(0));
+
+            let last_audio_sent_for_send = last_audio_sent_ms.clone();
             let mut sent_stream: Option<String> = None;
             let mut send_task = tokio::spawn(async move {
                 loop {
@@ -1243,6 +1381,11 @@ impl WhisperWsClient {
                             if ws_write.send(Message::Binary(audio_packet.data)).await.is_err() {
                                 break;
                             }
+                            let now_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            last_audio_sent_for_send.store(now_ms, Ordering::SeqCst);
                         }
                         Some(cmd_str) = cmd_rx.recv() => {
                             let resets_stream_state = serde_json::from_str::<serde_json::Value>(&cmd_str)
@@ -1253,10 +1396,6 @@ impl WhisperWsClient {
                                 break;
                             }
                             if resets_stream_state {
-                                // The server resets its implicit stream to
-                                // mic. Force the next packet to carry a fresh
-                                // tag even if it uses the same stream as the
-                                // previous packet before reset.
                                 sent_stream = None;
                             }
                         }
@@ -1264,6 +1403,32 @@ impl WhisperWsClient {
                     }
                 }
             });
+
+            let sent_for_wd = last_audio_sent_ms.clone();
+            let recv_for_wd = last_msg_received_ms.clone();
+            let cur_dev_wd = current_device_clone.clone();
+            let mut watchdog_task = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+                loop {
+                    interval.tick().await;
+                    let cur = cur_dev_wd.lock().clone();
+                    if cur == "cuda" {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let sent = sent_for_wd.load(Ordering::SeqCst);
+                        let recv = recv_for_wd.load(Ordering::SeqCst);
+                        // 音声が送られてから2500ms以上経過し、かつその間に応答メッセージが届いていない
+                        if sent > 0 && sent > recv && now_ms.saturating_sub(sent) >= 2500 {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            let last_msg_received_for_read = last_msg_received_ms.clone();
+            let mut is_watchdog_timeout = false;
 
             tokio::select! {
                 _ = &mut send_task => {
@@ -1273,8 +1438,30 @@ impl WhisperWsClient {
                         "ASR WebSocket send task stopped; terminating the server process",
                     );
                 }
+                _ = &mut watchdog_task => {
+                    is_watchdog_timeout = true;
+                    record_child_line(
+                        &ws_log_mgr,
+                        "stderr",
+                        "ASR native hang detected (no response for >2500ms after sending audio)! Terminating child and failing over to CPU...",
+                    );
+                    *forced_device_clone.lock() = Some("cpu".to_string());
+                    *current_device_clone.lock() = "cpu".to_string();
+                    notify_device_transition_helper(
+                        &app_handle_clone,
+                        &last_notified_device_clone,
+                        "cpu",
+                        Some("応答停止を検知"),
+                    );
+                }
                 _ = async {
                     while let Some(msg) = ws_read.next().await {
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        last_msg_received_for_read.store(now_ms, Ordering::SeqCst);
+
                         match msg {
                             Ok(Message::Text(txt)) => {
                                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
@@ -1306,6 +1493,23 @@ impl WhisperWsClient {
                                         }
                                     }
 
+                                    if let Some(dev) = val.get("device").and_then(|v| v.as_str()) {
+                                        let old_dev = current_device_clone.lock().clone();
+                                        *current_device_clone.lock() = dev.to_string();
+                                        if old_dev != dev {
+                                            let reason = val.get("reason").and_then(|v| v.as_str()).map(|r| match r {
+                                                "oom_or_timeout" => "VRAM不足を検知",
+                                                other => other,
+                                            });
+                                            notify_device_transition_helper(
+                                                &app_handle_clone,
+                                                &last_notified_device_clone,
+                                                dev,
+                                                reason,
+                                            );
+                                        }
+                                    }
+
                                     if let Some(text) = val.get("text").and_then(|v| v.as_str()) {
                                         let stream_name = val
                                             .get("stream")
@@ -1317,6 +1521,32 @@ impl WhisperWsClient {
                                             .and_then(|v| v.as_bool())
                                             .unwrap_or(false);
                                         let latency_ms = val.get("latency_ms").and_then(|v| v.as_f64());
+
+                                        if let Some(lat) = latency_ms {
+                                            let cur = current_device_clone.lock().clone();
+                                            if lat > 2500.0 && cur == "cuda" {
+                                                record_child_line(
+                                                    &ws_log_mgr,
+                                                    "stderr",
+                                                    &format!(
+                                                        "ASR latency exceeded threshold: {:.1}ms > 2500ms under CUDA! VRAM exhaustion suspected. Auto switching target to CPU INT8.",
+                                                        lat
+                                                    ),
+                                                );
+                                                *forced_device_clone.lock() = Some("cpu".to_string());
+                                                *current_device_clone.lock() = "cpu".to_string();
+                                                notify_device_transition_helper(
+                                                    &app_handle_clone,
+                                                    &last_notified_device_clone,
+                                                    "cpu",
+                                                    Some("推論遅延が増大"),
+                                                );
+                                                if let Some(ref tx) = *restart_tx_clone.lock() {
+                                                    let _ = tx.send(Some("cpu".to_string()));
+                                                }
+                                            }
+                                        }
+
                                         if let Some(ref cb) = *callback_arc.lock() {
                                             cb(stream_name, text.to_string(), is_final, latency_ms);
                                         }
@@ -1335,6 +1565,7 @@ impl WhisperWsClient {
             }
 
             send_task.abort();
+            watchdog_task.abort();
             if cleanup_failed_worker(
                 &is_started,
                 &is_ready,
@@ -1352,6 +1583,18 @@ impl WhisperWsClient {
                     "stderr",
                     "ASR server process cleanup completed after WebSocket failure",
                 );
+            }
+
+            // 自動フェイルオーバー: Watchdogタイムアウト検知時、直ちにCPUモードで自律再起動
+            if is_watchdog_timeout {
+                if let Some(ref tx) = *restart_tx_clone.lock() {
+                    record_child_line(
+                        &ws_log_mgr,
+                        "stdout",
+                        "[Supervisor] Triggering auto-restart failover to CPU mode after watchdog timeout...",
+                    );
+                    let _ = tx.send(Some("cpu".to_string()));
+                }
             }
         });
 
@@ -1424,19 +1667,25 @@ impl WhisperWsClient {
         }
     }
 
-    /// Whisper GPU ワーカーを完全に停止して再起動
-    pub async fn restart(&self) -> Result<(), String> {
+    /// Whisper ワーカーを指定デバイス（"cpu" / "cuda"）で再起動
+    pub async fn restart_with_device(&self, device: Option<String>) -> Result<(), String> {
         let cb_opt = self.callback.lock().clone();
         self.stop();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         if let Some(cb) = cb_opt {
-            self.start(move |s, t, f, lat| cb(s, t, f, lat))?;
+            self.start_with_device(move |s, t, f, lat| cb(s, t, f, lat), device)?;
         } else {
-            self.start(|_, _, _, _| {})?;
+            self.start_with_device(|_, _, _, _| {}, device)?;
         }
 
         self.warmup().await
+    }
+
+    /// Whisper ワーカーを完全に停止して再起動（現在の設定デバイスを維持）
+    pub async fn restart(&self) -> Result<(), String> {
+        let current = self.forced_device.lock().clone();
+        self.restart_with_device(current).await
     }
 
     /// f32 PCM サンプルをバイナリ（リトルエンディアン）に変換して WebSocket サーバーへ送信
@@ -1578,9 +1827,11 @@ impl Default for AsrEngine {
 
 impl AsrEngine {
     pub fn new() -> Self {
+        let ws_client = Arc::new(WhisperWsClient::new());
+        ws_client.init_supervisor();
         Self {
             cached_model: Arc::new(Mutex::new(None)),
-            ws_client: Arc::new(WhisperWsClient::new()),
+            ws_client,
             wake_word_state: Arc::new(Mutex::new(WakeWordStateMachine::new())),
         }
     }
@@ -2763,5 +3014,40 @@ mod tests {
         );
         assert!(client.child.lock().is_none());
         assert!(client.job.lock().is_none());
+    }
+
+    #[test]
+    fn test_device_transition_notification_dedup() {
+        let client = WhisperWsClient::new();
+        assert_eq!(*client.last_notified_device.lock(), None);
+
+        // 理由なしの初回呼び出し（正常起動時接続）は状態更新のみで通知抑止
+        client.notify_device_transition("cuda", None);
+        assert_eq!(
+            *client.last_notified_device.lock(),
+            Some("cuda".to_string())
+        );
+
+        // 同一デバイスへの連続呼び出しは重複抑止
+        client.notify_device_transition("cuda", None);
+        assert_eq!(
+            *client.last_notified_device.lock(),
+            Some("cuda".to_string())
+        );
+
+        // デバイスが CPU に切り替わった場合、状態更新
+        client.notify_device_transition("cpu", Some("推論遅延が増大"));
+        assert_eq!(*client.last_notified_device.lock(), Some("cpu".to_string()));
+
+        // CPU への連続呼び出しは重複抑止
+        client.notify_device_transition("cpu", None);
+        assert_eq!(*client.last_notified_device.lock(), Some("cpu".to_string()));
+
+        // GPU に復帰した場合、状態更新
+        client.notify_device_transition("cuda", None);
+        assert_eq!(
+            *client.last_notified_device.lock(),
+            Some("cuda".to_string())
+        );
     }
 }
