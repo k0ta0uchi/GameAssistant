@@ -3259,6 +3259,79 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
     Ok(existing.len())
 }
 
+/// 一括メタデータ更新 (issue: 「delete→import」の2段階を1つの復旧可能な操作に)。
+///
+/// メモリーマネージャーの編集は互換テーブル (表示プロジェクション) レベルの
+/// 操作。ジャーナル上の生イベントは削除時に redaction 済みのため再 append は
+/// 競合する (raw イベントは不変) ので、ここではテーブル行の削除+再挿入を
+/// 1つの復旧可能なフローで行う: import 失敗時は元データを復旧して Err を返す。
+/// ベクトルは内容更新に伴い解放し、バックグラウンドの再埋め込みで更新される。
+pub async fn update_memories_bulk(
+    root_dir: &Path,
+    items: &[MemoryItem],
+    vectors: Option<Vec<Vec<f32>>>,
+) -> Result<usize, String> {
+    if items.is_empty() {
+        return Err("更新対象のメモリーがありません".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let id = item.id.trim();
+        if id.is_empty() {
+            return Err("空のIDが含まれています".to_string());
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(format!("重複したIDが含まれています: {id}"));
+        }
+    }
+
+    // 更新前に元データを全件確保する。欠落があれば何も壊さずに中止する。
+    let mut originals: Vec<MemoryItem> = Vec::new();
+    for item in items {
+        let Some(original) = get_memory_by_id(root_dir, &item.id).await? else {
+            return Err(format!("更新対象のメモリーが見つかりません: {}", item.id));
+        };
+        originals.push(MemoryItem {
+            id: original.id,
+            document: original.document,
+            memory_type: original.memory_type,
+            source: original.source,
+            timestamp: original.timestamp,
+            user_id: original.user_id,
+        });
+    }
+
+    let db = get_or_create_db(root_dir).await?;
+    let table = get_or_create_memories_table(&db, root_dir).await?;
+
+    // 削除 (journal への redaction 記録を含む = 旧フローと同一)。
+    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+    delete_memories_bulk(root_dir, &ids).await?;
+
+    // 更新済み行を互換テーブルへ再挿入する (journal には書かない: 当該イベン
+    // トは redaction済みのため再 append は競合する)。
+    let reinsert_vectors = vectors
+        .map(|vectors| vectors.into_iter().map(Some).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![None; items.len()]);
+    if let Err(insert_err) =
+        insert_on_table(&table, items.to_vec(), reinsert_vectors, false, false).await
+    {
+        // import 失敗: 元データを互換テーブルへ復旧して Err を返す。
+        let restore_len = originals.len();
+        let restore =
+            insert_on_table(&table, originals, vec![None; restore_len], false, false).await;
+        let restore_note = match restore {
+            Ok(count) => format!("originals restored ({count} rows)"),
+            Err(restore_err) => format!(
+                "ORIGINAL RESTORE FAILED ({restore_err}) — LanceDB backup からの復旧が必要です"
+            ),
+        };
+        return Err(format!(
+            "bulk update failed at import stage ({insert_err}); {restore_note}"
+        ));
+    }
+    Ok(items.len())
+}
 /// 再帰的ディレクトリコピー
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     let src_metadata = std::fs::symlink_metadata(src)?;
@@ -3592,6 +3665,134 @@ mod tests {
             timestamp: "2026-09-02T12:00:00+09:00".to_string(),
             user_id: Some("tester".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn bulk_update_replaces_document_and_metadata() {
+        let root = unique_test_root("bulk-update-ok");
+        insert_memory_batch(
+            &root,
+            vec![
+                item("upd-a", "memory", "old a"),
+                item("upd-b", "memory", "old b"),
+            ],
+            None,
+        )
+        .await
+        .expect("seed rows for bulk update");
+
+        let mut updated = vec![
+            item("upd-a", "user_speech", "new a"),
+            item("upd-b", "observation", "new b"),
+        ];
+        updated[0].user_id = Some("Streamer".to_string());
+        let vectors = Some(vec![sample_vector(1.0), sample_vector(2.0)]);
+        let count = update_memories_bulk(&root, &updated, vectors)
+            .await
+            .expect("bulk update with valid vectors must succeed");
+        assert_eq!(count, 2);
+
+        let row = get_memory_by_id(&root, "upd-a")
+            .await
+            .expect("query row a")
+            .expect("row a must exist after update");
+        assert_eq!(row.document, "new a");
+        assert_eq!(row.memory_type, "user_speech");
+        assert_eq!(row.user_id.as_deref(), Some("Streamer"));
+        // 呼び出し側が明示したベクトルは保存される (None の場合は解放され、
+        // バックグラウンドの再埋め込みで更新される)
+        assert_eq!(
+            row.vector_source.as_deref(),
+            Some(VECTOR_SOURCE_DOCUMENT),
+            "caller-provided vectors are stored with the updated row"
+        );
+        let row_b = get_memory_by_id(&root, "upd-b")
+            .await
+            .expect("query row b")
+            .expect("row b must exist after update");
+        assert_eq!(row_b.document, "new b");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_failure_restores_original_rows() {
+        let root = unique_test_root("bulk-update-restore");
+        insert_memory_batch(&root, vec![item("res-a", "memory", "original a")], None)
+            .await
+            .expect("seed row for restore test");
+
+        // 不正な次元のベクトルで import 段階を確実に失敗させる
+        let updated = vec![item("res-a", "memory", "updated a")];
+        let bad_vectors = Some(vec![vec![0.0; 5]]);
+        let err = update_memories_bulk(&root, &updated, bad_vectors)
+            .await
+            .expect_err("import failure must surface to the caller");
+        assert!(err.contains("import stage"), "{err}");
+        assert!(err.contains("originals restored"), "{err}");
+
+        // 元データが失われていないこと (復旧済み)
+        let row = get_memory_by_id(&root, "res-a")
+            .await
+            .expect("query res-a")
+            .expect("original row must survive a failed update");
+        assert_eq!(row.document, "original a");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_without_vectors_clears_vector_for_background_reembed() {
+        let root = unique_test_root("bulk-update-no-vectors");
+        insert_memory_batch(
+            &root,
+            vec![item("nov-1", "user_speech", "元の本文")],
+            Some(vec![sample_vector(1.0)]),
+        )
+        .await
+        .expect("seed row with document vector");
+
+        // vectors=None (プロダクション経路): 内容更新のためベクトルは解放され、
+        // バックグラウンドの再埋め込みで更新される。
+        let updated = vec![item("nov-1", "memory", "更新後の本文")];
+        let count = update_memories_bulk(&root, &updated, None)
+            .await
+            .expect("metadata-only update with no vectors must succeed");
+        assert_eq!(count, 1);
+
+        let row = get_memory_by_id(&root, "nov-1")
+            .await
+            .expect("query nov-1")
+            .expect("row must exist after update");
+        assert_eq!(row.document, "更新後の本文");
+        assert_eq!(
+            row.vector_source.as_deref(),
+            Some(VECTOR_SOURCE_NONE),
+            "vector must be cleared (none) for background re-embedding"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_rejects_missing_and_duplicate_ids_before_mutation() {
+        let root = unique_test_root("bulk-update-validate");
+        insert_memory_batch(&root, vec![item("keep-1", "memory", "kept")], None)
+            .await
+            .expect("seed row for validation test");
+
+        assert!(update_memories_bulk(&root, &[], None).await.is_err());
+        let missing = update_memories_bulk(&root, &[item("missing", "memory", "x")], None)
+            .await
+            .expect_err("missing id must abort before mutation");
+        assert!(missing.contains("見つかりません"), "{missing}");
+        let duplicate = vec![item("keep-1", "memory", "x"), item("keep-1", "memory", "y")];
+        assert!(update_memories_bulk(&root, &duplicate, None).await.is_err());
+
+        // 検証失敗は変異前に中止されるため元データが無傷であること
+        let row = get_memory_by_id(&root, "keep-1")
+            .await
+            .expect("query keep-1")
+            .expect("row must be untouched by aborted updates");
+        assert_eq!(row.document, "kept");
+        cleanup(&root);
     }
 
     #[tokio::test]

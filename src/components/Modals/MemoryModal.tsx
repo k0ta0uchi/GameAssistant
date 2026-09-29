@@ -2089,10 +2089,10 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
 }) => {
   const [managerTab, setManagerTab] = useState<"raw" | "semantic">("raw");
   const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [loading, setLoading] = useState<boolean>(false);
+  const [loading, setLoading] = useState(false);
   const [migrationStatus, setMigrationStatus] =
     useState<MemoryMigrationStatus | null>(null);
-  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchQuery, setSearchQuery] = useState("");
 
   // 選択状態 (複数選択 & Shift/Ctrl)
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -2113,15 +2113,15 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
 
   // 編集フォーム状態 (単一)
-  const [editKey, setEditKey] = useState<string>("");
-  const [editType, setEditType] = useState<string>("memory");
-  const [editUser, setEditUser] = useState<string>("User");
-  const [editContent, setEditContent] = useState<string>("");
-  const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
+  const [editKey, setEditKey] = useState("");
+  const [editType, setEditType] = useState("memory");
+  const [editUser, setEditUser] = useState("User");
+  const [editContent, setEditContent] = useState("");
+  const [isCreatingNew, setIsCreatingNew] = useState(false);
 
   // 一括編集状態 (複数)
-  const [bulkType, setBulkType] = useState<string>("");
-  const [bulkUser, setBulkUser] = useState<string>("");
+  const [bulkType, setBulkType] = useState("");
+  const [bulkUser, setBulkUser] = useState("");
 
   // アクション通知・生成中状態
   const [actionMessage, setActionMessage] = useState<{
@@ -2131,7 +2131,7 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   const [backfillProgress, setBackfillProgress] =
     useState<MemoryBackfillProgress | null>(null);
   const isGeneratingBlogRef = useRef(false);
-  const [isGeneratingBlog, setIsGeneratingBlog] = useState<boolean>(false);
+  const [isGeneratingBlog, setIsGeneratingBlog] = useState(false);
   // B08: state 更新前の同一 tick 連打でも二重送信されないよう ref で抑止する。
   const [blogResult, setBlogResult] = useState<{
     filename: string;
@@ -2560,11 +2560,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
         user_id: bulkUser.trim() || m.user || "User",
       }));
 
-      await invoke("delete_lance_memories_bulk", { ids: selectedIds });
-      await invoke("import_memories_to_lance", {
-        items: updatedItems,
-        vectors: null,
-      });
+      // 旧 delete→import の2段階 (import 失敗時に元データが消失) を廃止し、
+      // Rust 側の復旧可能な一括更新コマンドへ置き換えた (issue #3)。
+      await invoke("update_lance_memories_bulk", { items: updatedItems });
       showNotice(`${selectedIds.length} 件のメモリーを一括更新しました！`);
       setBulkType("");
       setBulkUser("");
