@@ -953,21 +953,43 @@ impl WhisperWsClient {
         );
     }
 
-    /// Supervisor タスクを初期化し、子プロセスハング時などの自動復旧（CPUフェイルオーバー）を待機
+    /// Supervisor タスクを初期化し、子プロセスのスタール/異常終了からの
+    /// 自動復旧 (デバイスを維持したままの再起動) を待機する。
     pub fn init_supervisor(self: &Arc<Self>) {
         let client_weak = Arc::downgrade(self);
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<String>>();
         *self.restart_tx.lock() = Some(tx);
 
         tauri::async_runtime::spawn(async move {
+            // クラッシュループの上限: 120秒以内に3回連続で失敗する子は
+            // 自動復旧を諦め、明示的な手動操作 (Restart Whisper 等) に委ねる。
+            const MAX_AUTO_RESTARTS: usize = 3;
+            const AUTO_RESTART_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+            let mut restart_times: Vec<std::time::Instant> = Vec::new();
+
             while let Some(device_override) = rx.recv().await {
                 if let Some(client) = client_weak.upgrade() {
                     let log_mgr = client.log_mgr.lock().clone();
+                    restart_times.retain(|t| t.elapsed() < AUTO_RESTART_WINDOW);
+                    if restart_times.len() >= MAX_AUTO_RESTARTS {
+                        record_child_line(
+                            &log_mgr,
+                            "stderr",
+                            &format!(
+                                "[Supervisor] Auto-restart limit reached ({}/{} within {:?}); skipping. Use 'Restart Whisper' to recover.",
+                                restart_times.len(),
+                                MAX_AUTO_RESTARTS,
+                                AUTO_RESTART_WINDOW
+                            ),
+                        );
+                        continue;
+                    }
+                    restart_times.push(std::time::Instant::now());
                     record_child_line(
                         &log_mgr,
                         "stdout",
                         &format!(
-                            "[Supervisor] Initiating automatic failover restart with device={:?}...",
+                            "[Supervisor] Initiating supervised restart with device={:?}...",
                             device_override
                         ),
                     );
@@ -1256,7 +1278,6 @@ impl WhisperWsClient {
         let child_store = self.child.clone();
         let process_lock = self.process_lock.clone();
         let current_device_clone = self.current_device.clone();
-        let forced_device_clone = self.forced_device.clone();
         let restart_tx_clone = self.restart_tx.clone();
         let app_handle_clone = self.app_handle.clone();
         let last_notified_device_clone = self.last_notified_device.clone();
@@ -1419,8 +1440,11 @@ impl WhisperWsClient {
                             .as_millis() as u64;
                         let sent = sent_for_wd.load(Ordering::SeqCst);
                         let recv = recv_for_wd.load(Ordering::SeqCst);
-                        // 音声が送られてから2500ms以上経過し、かつその間に応答メッセージが届いていない
-                        if sent > 0 && sent > recv && now_ms.saturating_sub(sent) >= 2500 {
+                        // 8秒無応答は実スタール。ASRサーバ側のスタール方針
+                        // (2秒窓スキップ × 3回 → 自己終了) より長い猶予で、
+                        // 遅い推論 (3〜5秒) を誤殺しない閾値。発火時はCPUへ
+                        // ダウングレードせず、プロセス再生成で復旧する。
+                        if sent > 0 && sent > recv && now_ms.saturating_sub(sent) >= 8000 {
                             break;
                         }
                     }
@@ -1440,18 +1464,14 @@ impl WhisperWsClient {
                 }
                 _ = &mut watchdog_task => {
                     is_watchdog_timeout = true;
+                    // 遅延だけでデバイスを下げてはならない: フォールバック方針
+                    // (gpu_oom / inference_timeout / cuda_error) の所有者は ASR
+                    // サーバ。無応答はプロセスレベルのスタールなので、監視側は
+                    // 子プロセスを終了し、同じデバイスのまま再生成する。
                     record_child_line(
                         &ws_log_mgr,
                         "stderr",
-                        "ASR native hang detected (no response for >2500ms after sending audio)! Terminating child and failing over to CPU...",
-                    );
-                    *forced_device_clone.lock() = Some("cpu".to_string());
-                    *current_device_clone.lock() = "cpu".to_string();
-                    notify_device_transition_helper(
-                        &app_handle_clone,
-                        &last_notified_device_clone,
-                        "cpu",
-                        Some("応答停止を検知"),
+                        "ASR inference stall detected (no response for >8000ms after sending audio, reason=inference_stall). Terminating child; the supervisor will restart the process without downgrading the device...",
                     );
                 }
                 _ = async {
@@ -1498,7 +1518,9 @@ impl WhisperWsClient {
                                         *current_device_clone.lock() = dev.to_string();
                                         if old_dev != dev {
                                             let reason = val.get("reason").and_then(|v| v.as_str()).map(|r| match r {
-                                                "oom_or_timeout" => "VRAM不足を検知",
+                                                "gpu_oom" => "VRAM不足を検知",
+                                                "cuda_error" => "CUDAエラーを検知",
+                                                "inference_timeout" => "推論遅延を検知",
                                                 other => other,
                                             });
                                             notify_device_transition_helper(
@@ -1525,25 +1547,18 @@ impl WhisperWsClient {
                                         if let Some(lat) = latency_ms {
                                             let cur = current_device_clone.lock().clone();
                                             if lat > 2500.0 && cur == "cuda" {
+                                                // 遅延だけではVRAM枯渇と確定できない (旧実装は
+                                                // "VRAM exhaustion suspected" としてCPUへ切替えて
+                                                // いた)。デバイス方針はASRサーバ側が所有するため、
+                                                // ここでは記録のみ行う。
                                                 record_child_line(
                                                     &ws_log_mgr,
                                                     "stderr",
                                                     &format!(
-                                                        "ASR latency exceeded threshold: {:.1}ms > 2500ms under CUDA! VRAM exhaustion suspected. Auto switching target to CPU INT8.",
+                                                        "Slow CUDA inference reported: {:.1}ms (>2500ms). Device policy is owned by the ASR server; keeping the GPU.",
                                                         lat
                                                     ),
                                                 );
-                                                *forced_device_clone.lock() = Some("cpu".to_string());
-                                                *current_device_clone.lock() = "cpu".to_string();
-                                                notify_device_transition_helper(
-                                                    &app_handle_clone,
-                                                    &last_notified_device_clone,
-                                                    "cpu",
-                                                    Some("推論遅延が増大"),
-                                                );
-                                                if let Some(ref tx) = *restart_tx_clone.lock() {
-                                                    let _ = tx.send(Some("cpu".to_string()));
-                                                }
                                             }
                                         }
 
@@ -1563,6 +1578,31 @@ impl WhisperWsClient {
                     }
                 } => {}
             }
+
+            // 片付けの前に子プロセスの生存状態を確定させる (cleanupがkillした
+            // 後では自発終了と区別できない)。Python側の os._exit(87) (連続
+            // スタール/致命的CUDA障害) やクラッシュは、WS切断の時点で子が
+            // 先に死んでいるため、ここで検出できる。
+            // ユーザー/シャットダウンによる意図的な停止 (stop()) は is_started を
+            // 先に false にするため、ここでの再起動は行われない。予期しない
+            // ティアダウン (子の自発終了・スタール・クラッシュ) は理由に関わらず
+            // 監視再起動する (レート制限は supervisor 側 3回/120秒)。
+            let deliberate_stop = !is_started.load(Ordering::SeqCst);
+            let child_exit_detected = {
+                let mut child_guard = child_store.lock();
+                match child_guard.as_mut() {
+                    Some(child) => matches!(child.try_wait(), Ok(Some(_))),
+                    None => false,
+                }
+            };
+            record_child_line(
+                &ws_log_mgr,
+                "stdout",
+                &format!(
+                    "[Supervisor] worker teardown: watchdog_timeout={} child_exit={} deliberate_stop={}",
+                    is_watchdog_timeout, child_exit_detected, deliberate_stop
+                ),
+            );
 
             send_task.abort();
             watchdog_task.abort();
@@ -1585,15 +1625,29 @@ impl WhisperWsClient {
                 );
             }
 
-            // 自動フェイルオーバー: Watchdogタイムアウト検知時、直ちにCPUモードで自律再起動
-            if is_watchdog_timeout {
+            // 監視付き自動再起動: 意図的な停止でない限り、WS が予期せず切れた
+            // 時点 (子の自発終了・クラッシュ・スタール含む) で同じデバイスで
+            // 子プロセスを再生成する。CPU へのダウングレードは ASR サーバの
+            // OOM 方針が管理する。検知結果の不一致 (try_wait のレース等) が
+            // あってもティアダウン自体が異常の証拠なので再起動する。
+            if !deliberate_stop {
+                let restart_reason = if is_watchdog_timeout {
+                    "inference_stall"
+                } else if child_exit_detected {
+                    "child_exit"
+                } else {
+                    "worker_teardown"
+                };
                 if let Some(ref tx) = *restart_tx_clone.lock() {
                     record_child_line(
                         &ws_log_mgr,
                         "stdout",
-                        "[Supervisor] Triggering auto-restart failover to CPU mode after watchdog timeout...",
+                        &format!(
+                            "[Supervisor] Triggering supervised auto-restart (reason={}) keeping the current device policy...",
+                            restart_reason
+                        ),
                     );
-                    let _ = tx.send(Some("cpu".to_string()));
+                    let _ = tx.send(None);
                 }
             }
         });
@@ -2174,20 +2228,7 @@ impl AsrEngine {
 
         // Keep aliases in one list so callers using the legacy matcher and
         // the state machine share the exact same built-in vocabulary.
-        let default_wake_words = [
-            "ねえぐり",
-            "ねぐり",
-            "ネグリ",
-            "ねーぐり",
-            "ねぇぐり",
-            "ね〜ぐり",
-            "ね～ぐり",
-            "ね~ぐり",
-            "neguri",
-            "アシスタント",
-            "ヘイぐり",
-        ];
-        for wake_word in default_wake_words {
+        for wake_word in DEFAULT_WAKE_WORDS {
             if let Some(clean_prompt) = remove_wake_word_source(text, wake_word) {
                 return (true, clean_prompt);
             }
@@ -2461,6 +2502,36 @@ fn remove_wake_word_source(text: &str, wake_word: &str) -> Option<String> {
     clean_prompt.push_str(&text[..start]);
     clean_prompt.push_str(&text[end..]);
     Some(clean_prompt.trim().to_string())
+}
+
+/// Built-in wake words shown in the UI. This constant is the single source of
+/// truth for the default vocabulary: the ASR state machine and the Twitch
+/// comment admission path must always agree on it.
+pub const DEFAULT_WAKE_WORDS: [&str; 11] = [
+    "ねえぐり",
+    "ねぐり",
+    "ネグリ",
+    "ねーぐり",
+    "ねぇぐり",
+    "ね〜ぐり",
+    "ね～ぐり",
+    "ね~ぐり",
+    "neguri",
+    "アシスタント",
+    "ヘイぐり",
+];
+
+/// Match `text` against the caller-resolved wake word list only (no implicit
+/// defaults are appended) and return the source text with the first matched
+/// phrase removed. Twitch comment admission uses this so a custom list is
+/// authoritative and fixed defaults never fire behind the user's back.
+pub fn match_wake_word_in_source(text: &str, wake_words: &[String]) -> Option<String> {
+    for wake_word in wake_words {
+        if let Some(clean_prompt) = remove_wake_word_source(text, wake_word) {
+            return Some(clean_prompt);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -322,6 +322,11 @@ assert.equal(normalizeMemoryBackfillProgress(null), null);
 
 type EventCallback = (event: { id: number; payload: unknown }) => void;
 
+const TRACE = process.env.CONTRACT_TRACE === "1";
+const trace = (message: string) => {
+  if (TRACE) console.error(`[trace] ${new Date().toISOString()} ${message}`);
+};
+
 class TauriHarness {
   readonly callbacks = new Map<number, EventCallback>();
   readonly registrations: string[] = [];
@@ -482,6 +487,13 @@ class TauriHarness {
     if (command === "list_windows") return ["Test window"];
     if (command === "capture_window_preview")
       return "data:image/png;base64,test";
+    if (command === "generate_blog_from_memories")
+      return {
+        filename: "2026-09-29_blog-test.md",
+        content: "生成されたブログ記事の本文",
+      };
+    if (command === "gemini_list_models")
+      return ["gemini-3.8-flash", "gemini-2.5-flash"];
     if (command === "get_prompts") return [];
     if (command === "read_logs") return [];
     if (command === "twitch_get_status") return { connected: false };
@@ -2279,6 +2291,131 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// 「Generate Blog from Selected」は旧 18080 番 HTTP fetch ではなく Tauri IPC
+// コマンド (generate_blog_from_memories) を選択 ID とともに呼び出し、保存後の
+// ファイル名と本文を表示する。
+{
+  const harness = new TauriHarness();
+  harness.memoryItems = [
+    {
+      id: "mem-blog-1",
+      document: "ユーザーは猫を飼っている",
+      memory_type: "user_speech",
+      source: "User",
+      timestamp: "2026-09-28T10:00:00Z",
+    },
+    {
+      id: "mem-blog-2",
+      document: "ユーザーは犬も飼っている",
+      memory_type: "observation",
+      source: "User",
+      timestamp: "2026-09-28T10:01:00Z",
+    },
+  ];
+  const dom = domForConfirm(harness);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  });
+  await flush();
+  trace("blog-test: rendered");
+  await flush();
+  trace("blog-test: flushed");
+  await act(async () => {
+    const event = new dom.window.KeyboardEvent("keydown", {
+      key: "a",
+      ctrlKey: true,
+      bubbles: true,
+    });
+    dom.window.dispatchEvent(event);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  });
+  trace("blog-test: selected");
+  const generateButton = findButton(host, "Generate Blog from Selected");
+  assert.ok(generateButton, "selected blog generate button should render");
+  await act(async () => {
+    generateButton!.click();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+  trace("blog-test: clicked");
+  const request = harness.invocations.find(
+    ({ command }) => command === "generate_blog_from_memories",
+  );
+  assert.ok(request, "blog generation must use the Tauri IPC command");
+  // 選択 ID 群がそのまま渡ること (順序は UI の選択順に従う)。
+  const sentIds = [...(request!.args as { ids: string[] }).ids].sort();
+  assert.deepEqual(sentIds, ["mem-blog-1", "mem-blog-2"]);
+  assert.match(host.textContent || "", /2026-09-29_blog-test\.md/);
+  assert.match(host.textContent || "", /生成されたブログ記事の本文/);
+}
+
+// The models tab lists available Gemini models via ListModels and defaults to
+// the "latest" auto-select option; changing it saves gemini_model.
+{
+  const harness = new TauriHarness();
+  const updates: string[] = [];
+  const settings: Record<string, unknown> = {};
+  const dom = domForConfirm(harness);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      React.createElement(SettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        settings,
+        onUpdateSetting: async (key: string, value: unknown) => {
+          updates.push(key);
+          settings[key] = value;
+        },
+        discordDevices: [],
+        initialTab: "models" as const,
+      }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+  const modelSelect = Array.from(host.querySelectorAll("select")).find(
+    (select) =>
+      Array.from(select.options).some((option) => option.value === "latest"),
+  );
+  assert.ok(
+    modelSelect,
+    "Gemini model select should render with a latest option",
+  );
+  assert.equal(modelSelect!.value, "latest");
+  const modelRequests = harness.invocations.filter(
+    ({ command }) => command === "gemini_list_models",
+  );
+  assert.ok(
+    modelRequests.length >= 1,
+    "available models should be fetched via ListModels",
+  );
+  const has38 = Array.from(modelSelect!.options).some(
+    (option) => option.value === "gemini-3.8-flash",
+  );
+  assert.ok(has38, "fetched models should appear as selectable options");
+
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(
+      dom.window.HTMLSelectElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(modelSelect!, "gemini-2.5-flash");
+    modelSelect!.dispatchEvent(
+      new dom.window.Event("change", { bubbles: true }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  });
+  assert.ok(updates.includes("gemini_model"), "selection must be saved");
+  assert.equal(settings.gemini_model, "gemini-2.5-flash");
+}
+
 // MemoryModal supports copying selected memories as JSON via Ctrl+C shortcut
 {
   const harness = new TauriHarness();
@@ -2442,3 +2579,6 @@ makeHarness();
 await new Promise<void>((resolve) => setTimeout(resolve, 550));
 
 console.log("frontend behavioral contract checks passed");
+// jsdom 上の MemoryModal が残すタイマ/ハンドルでイベントループが空に
+// ならず、全アサーション完了後にプロセスがハングすることがあるため明示終了する。
+process.exit(0);

@@ -268,6 +268,67 @@ fn live_asr_summary_event(event_type: &str) -> bool {
     matches!(event_type, "user_speech" | "discord_speech")
 }
 
+/// 自動実況の有効設定。UI と同じく、キー未設定は OFF、明示 true のみ ON
+/// (旧実装は unwrap_or(true) で未設定が ON 扱いだった)。
+fn auto_commentary_enabled(settings: &serde_json::Value) -> bool {
+    settings
+        .get("enable_auto_commentary")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// Twitch コメント受付に使う有効ウェイクワード一覧。
+/// - カスタム設定 (カンマ/読点区切り文字列 or 配列) がある場合はその語だけを
+///   有効にし、固定の既定語を裏で追加しない。
+/// - キー未設定は UI 表示と同じ既定語一覧に一致させる (管理元は
+///   asr::DEFAULT_WAKE_WORDS に一本化)。
+/// - 明示的な空文字/空配列は有効語ゼロ (空の部分一致で全許可しない)。
+/// - 前後空白を除去し、空要素と重複を除外する。
+fn effective_wake_words(settings: &serde_json::Value) -> Vec<String> {
+    let mut words: Vec<String> = match settings.get("custom_wake_words") {
+        None => crate::asr::DEFAULT_WAKE_WORDS
+            .iter()
+            .map(|word| word.to_string())
+            .collect(),
+        Some(value) => value
+            .as_str()
+            .map(|text| {
+                text.split([',', '、'])
+                    .map(str::trim)
+                    .filter(|word| !word.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .or_else(|| {
+                value.as_array().map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|word| word.as_str())
+                        .map(|word| word.trim().to_string())
+                        .filter(|word| !word.is_empty())
+                        .collect()
+                })
+            })
+            .unwrap_or_default(),
+    };
+    let mut seen = std::collections::HashSet::new();
+    words.retain(|word| seen.insert(word.clone()));
+    words
+}
+
+/// Twitch コメント本文を有効ウェイクワードで照合し、呼びかけを除去した本文を
+/// 返す。一致なし・ウェイクワードのみ (空プロンプト) の場合は None を返す。
+/// 本文だけを対象とし、表示名・チャンネル名は呼び出し側で渡さない。
+fn admit_twitch_comment(wake_words: &[String], body: &str) -> Option<String> {
+    let clean = crate::asr::match_wake_word_in_source(body, wake_words)?;
+    let clean = clean.trim();
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean.to_string())
+    }
+}
+
 fn wake_word_config_from_settings(settings: &serde_json::Value) -> (WakeWordConfig, bool) {
     let requested_engine = settings
         .get("wake_word_engine")
@@ -2510,6 +2571,18 @@ impl SessionManager {
         key.trim().to_string()
     }
 
+    /// 設定/環境から解決した有効キーで利用可能な Gemini モデル一覧を返す
+    /// (trigger=selected_memories_blog や設定UIのモデル選択用)。
+    pub async fn list_gemini_models(&self) -> Result<Vec<String>, String> {
+        let key = self.get_effective_gemini_key();
+        if key.trim().is_empty() {
+            return Err(
+                "Gemini API キーが未設定です。設定画面でAPIキーを保存してください。".to_string(),
+            );
+        }
+        self.ai_client.list_models(&key).await
+    }
+
     /// Persist a session event and, when an application handle is supplied,
     /// surface a newly accepted Fact to the live dashboard. The handle is
     /// optional so manual retry/backfill paths can reuse the same storage path
@@ -3674,7 +3747,7 @@ impl SessionManager {
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| {
-                std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.0-flash".to_string())
+                std::env::var("GEMINI_MODEL").unwrap_or_else(|_| "latest".to_string())
             });
         // {user_name} がカスタムプロンプトに含まれる場合は設定値を注入する
         // (デフォルトのプロンプトにプレースホルダーがなければ何も変わらない)。
@@ -3935,6 +4008,27 @@ impl SessionManager {
                             }
 
                             let st = crate::settings::load_settings_file(&sess.root_dir);
+                            // 会話応答の受付判定 (trigger=twitch_wake_word): 最新設定の
+                            // 有効ウェイクワードで「コメント本文だけ」を照合する (表示名・
+                            // チャンネル名は対象外)。一致しないコメントは保存・表示のみで
+                            // Gemini/TTS には渡さない (正常な抑止なのでトーストも出さない)。
+                            let wake_words = effective_wake_words(&st);
+                            let comment_prompt = match admit_twitch_comment(
+                                &wake_words,
+                                &msg.content,
+                            ) {
+                                Some(prompt) => prompt,
+                                None => {
+                                    sess.log_mgr.info(
+                                        "Session",
+                                        &format!(
+                                            "session_id={} generation={} trigger=twitch_wake_word source_event_id={} status=skipped reason=wake_word_missing",
+                                            context.session_id, context.generation, tw_event.id
+                                        ),
+                                    );
+                                    return;
+                                }
+                            };
                             let gemini_key = sess.get_effective_gemini_key();
                             let brave_key = st
                                 .get("brave_api_key")
@@ -3944,7 +4038,7 @@ impl SessionManager {
                             let model = st
                                 .get("gemini_model")
                                 .and_then(|v| v.as_str())
-                                .unwrap_or("gemini-2.0-flash")
+                                .unwrap_or("latest")
                                 .to_string();
                             let sys_prompt = crate::prompts::apply_prompt_placeholders(
                                 &crate::prompts::get_prompt(
@@ -3959,7 +4053,7 @@ impl SessionManager {
                                 .process_user_input_for_session(
                                     &context,
                                     &tw_event,
-                                    &msg.content,
+                                    &comment_prompt,
                                     &gemini_key,
                                     &brave_key,
                                     &model,
@@ -4163,11 +4257,7 @@ impl SessionManager {
                     .load(Ordering::SeqCst)
             {
                 let st = crate::settings::load_settings_file(&session_for_comm.root_dir);
-                let enable_auto = st
-                    .get("enable_auto_commentary")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if !enable_auto {
+                if !auto_commentary_enabled(&st) {
                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                     continue;
                 }
@@ -4253,11 +4343,23 @@ impl SessionManager {
                     tokio::time::sleep(tokio::time::Duration::from_secs(avoid_dur)).await;
                 }
 
+                // 生成開始直前にも有効設定を再確認する (待機中にOFFへ変更された
+                // 場合は生成せず、理由を記録する)。
+                if !auto_commentary_enabled(&crate::settings::load_settings_file(
+                    &session_for_comm.root_dir,
+                )) {
+                    log_mgr_comm.info(
+                        "Commentary",
+                        "status=skipped reason=auto_commentary_disabled (disabled during wait)",
+                    );
+                    continue;
+                }
+
                 let gemini_key = session_for_comm.get_effective_gemini_key();
                 let model = st
                     .get("gemini_model")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("gemini-2.0-flash")
+                    .unwrap_or("latest")
                     .to_string();
                 let tts_cfg = extract_tts_settings(&st);
 
@@ -4388,7 +4490,7 @@ impl SessionManager {
                 let model = st_file
                     .get("gemini_model")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("gemini-2.0-flash")
+                    .unwrap_or("latest")
                     .to_string();
                 let blog_prompt = crate::prompts::get_prompt(
                     &session_clone.root_dir,
@@ -4815,6 +4917,30 @@ impl SessionManager {
         if !prompt_is_sendable(&clean_ai_res) {
             self.record_input_drop(context, "-", InputDropReason::EmptyResponse, app_handle);
             return Err("commentary dropped: empty_response".to_string());
+        }
+
+        // Gemini要求は取り消せない: 待機中に実況がOFFへ変更された、または
+        // セッションが切り替わった場合は、返却済みの結果の表示・TTSを抑止し、
+        // キャンセル相当として記録する (正規の auto_commentary 識別は維持)。
+        let enable_now =
+            auto_commentary_enabled(&crate::settings::load_settings_file(&self.root_dir));
+        let session_live = context
+            .map(|session| self.is_current_session(session))
+            .unwrap_or(true);
+        if !enable_now || !session_live {
+            self.log_mgr.info(
+                "Commentary",
+                &format!(
+                    "session_id={} status=cancelled reason={} (result discarded before display/tts)",
+                    context.map(|session| session.session_id.as_str()).unwrap_or("-"),
+                    if !enable_now {
+                        "auto_commentary_disabled"
+                    } else {
+                        "stale_session"
+                    }
+                ),
+            );
+            return Err("commentary cancelled: result suppressed".to_string());
         }
 
         let ai_event = SessionEvent {
@@ -5700,6 +5826,26 @@ impl SessionManager {
             logs.push_str(&line);
         }
 
+        // 記事生成は収集済みの材料から共通経路で行う (選択メモリー経路と共有)。
+        self.generate_blog_article_from_history(
+            gemini_api_key,
+            gemini_model,
+            blog_system_prompt,
+            logs,
+        )
+        .await
+    }
+
+    /// 収集済みのブログ材料 (logs) から記事本文を生成する共有経路。
+    /// 入力収集 (セッション履歴/選択メモリー) と保存・通知は呼び出し側の責務。
+    /// blog_system_prompt が空の場合は既定の blog_writer_system_prompt を使う。
+    async fn generate_blog_article_from_history(
+        &self,
+        gemini_api_key: &str,
+        gemini_model: &str,
+        blog_system_prompt: &str,
+        logs: String,
+    ) -> Result<String, String> {
         let st = crate::settings::load_settings_file(&self.root_dir);
 
         // 1. スキル適用の判定と読み込み (enable_blog_skills & enabled_blog_skills)
@@ -5790,6 +5936,125 @@ impl SessionManager {
         );
         Ok(blog_article)
     }
+
+    /// 選択メモリーからブログ記事を生成・保存する (trigger=selected_memories_blog)。
+    /// 会話応答のセッション境界条件は適用しない: 非稼働中でも、自動実況と
+    /// 終了時ブログの両設定がOFFでも、明示操作なら生成できる。
+    pub async fn generate_blog_from_memories(
+        &self,
+        ids: &[String],
+    ) -> Result<(String, String), String> {
+        let sources = self.collect_selected_blog_sources(ids).await?;
+        let logs = build_blog_source_text(&sources)?;
+
+        let gemini_key = self.get_effective_gemini_key();
+        if gemini_key.trim().is_empty() {
+            return Err(
+                "Gemini API キーが未設定のため選択メモリーのブログを生成できません。設定画面でAPIキーを保存してください。"
+                    .to_string(),
+            );
+        }
+        let st = crate::settings::load_settings_file(&self.root_dir);
+        let model = st
+            .get("gemini_model")
+            .and_then(|value| value.as_str())
+            .unwrap_or("latest")
+            .to_string();
+
+        self.log_mgr.info(
+            "Blog",
+            &format!(
+                "trigger=selected_memories_blog status=generation_started requested={} resolved={}",
+                ids.len(),
+                sources.len()
+            ),
+        );
+        let article = self
+            .generate_blog_article_from_history(&gemini_key, &model, "", logs)
+            .await
+            .map_err(|err| format!("generation_failed: {err}"))?;
+
+        // 保存は既存方針 (blogs/ + unique_blog_path) に従い、終了時生成と
+        // 同時に走っても上書きしない。成功応答は保存成功後に返す。
+        let blogs_dir = self.root_dir.join("blogs");
+        let _ = std::fs::create_dir_all(&blogs_dir);
+        let stamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+        let filepath = unique_blog_path(&blogs_dir, &stamp);
+        let filename = filepath
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{stamp}.md"));
+        std::fs::write(&filepath, &article).map_err(|err| {
+            // 生成成功・保存失敗: 保存済みと誤認させないため理由を区別する。
+            format!("save_failed: {err}")
+        })?;
+        self.log_mgr.info(
+            "Blog",
+            &format!(
+                "trigger=selected_memories_blog status=completed file={filename} chars={}",
+                article.chars().count()
+            ),
+        );
+        Ok((filename, article))
+    }
+
+    /// 選択IDを既存のID解決経路 (canonical・旧ID・投影遅延フォールバック) で
+    /// 解決し、重複を排除して時系列に整列する。欠落があれば生成前に中止する。
+    async fn collect_selected_blog_sources(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<StoredMemory>, String> {
+        if ids.is_empty() {
+            return Err("ブログ生成対象のメモリーが選択されていません。".to_string());
+        }
+        let mut resolved: Vec<StoredMemory> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut missing: Vec<String> = Vec::new();
+        for id in ids {
+            let id_trim = id.trim();
+            if id_trim.is_empty() {
+                return Err("空のメモリーIDが含まれています。".to_string());
+            }
+            let Some(row) = lance_memory::get_memory_by_event_id(&self.root_dir, id_trim).await?
+            else {
+                missing.push(id_trim.to_string());
+                continue;
+            };
+            // canonical ID と旧 ID の両方で同じデータを指した場合は 1 件にまとめる
+            // (解決結果の ID 表記ゆれは canonical 正規化して比較する)。
+            let canonical =
+                crate::memory_v2::repository::MemoryRepository::canonical_event_id(&row.id);
+            if seen.insert(canonical) {
+                resolved.push(row);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(format!(
+                "選択されたメモリーのうち {}件が取得できませんでした ({})。選択を確認して再実行してください。",
+                missing.len(),
+                missing.join(", ")
+            ));
+        }
+        // 時系列で安定ソート (同時刻は ID 順)。
+        resolved.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)));
+        Ok(resolved)
+    }
+}
+
+/// 収集済みの選択メモリーからブログ材料テキストを組み立てる。
+/// 上限超過は黙って切り捨てず、件数を減らすようエラーで通知する。
+fn build_blog_source_text(rows: &[StoredMemory]) -> Result<String, String> {
+    let mut logs = String::new();
+    for row in rows {
+        let line = format!("[{}] {}: {}\n", row.timestamp, row.source, row.document);
+        if logs.len().saturating_add(line.len()) > BLOG_MAX_SOURCE_BYTES {
+            return Err(format!(
+                "選択されたメモリーの合計が入力上限 ({BLOG_MAX_SOURCE_BYTES}バイト) を超えています。選択件数を減らして再実行してください。"
+            ));
+        }
+        logs.push_str(&line);
+    }
+    Ok(logs)
 }
 
 /// settings.json から最新の TTS 設定を抽出
@@ -5851,15 +6116,17 @@ pub fn normalize_kana(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_redacted_memory_text, asr_prompt_is_sendable, automatic_blog_post_enabled,
-        backfill_log_message, backfill_log_message_with_counters, backfill_log_severity,
-        build_chat_messages, contains_stop_word, finalize_backfill_progress, increment_reason,
-        inference_failure_reason, live_asr_summary_event, normalize_prompt_text,
+        admit_redacted_memory_text, admit_twitch_comment, asr_prompt_is_sendable,
+        auto_commentary_enabled, automatic_blog_post_enabled, backfill_log_message,
+        backfill_log_message_with_counters, backfill_log_severity, build_blog_source_text,
+        build_chat_messages, contains_stop_word, effective_wake_words, finalize_backfill_progress,
+        increment_reason, inference_failure_reason, live_asr_summary_event, normalize_prompt_text,
         partition_backfill_rows, persisted_blog_fallback_events, prompt_is_sendable,
         record_backfill_commit, resolve_effective_twitch_channel, runtime_failure_reason,
         set_backfill_fatal, should_backfill_row, should_emit_input_drop_toast, unique_blog_path,
-        BackfillLogSeverity, MemoryBackfillProgress, SessionManager, StoredMemory,
-        SummaryBackfillApplyResult, MAX_CHAT_HISTORY_CHARS, MAX_CHAT_HISTORY_MESSAGES,
+        BackfillLogSeverity, MemoryBackfillProgress, MemoryItem, SessionManager, StoredMemory,
+        SummaryBackfillApplyResult, BLOG_MAX_SOURCE_BYTES, MAX_CHAT_HISTORY_CHARS,
+        MAX_CHAT_HISTORY_MESSAGES,
     };
     use crate::lance_memory::{self, SummaryExclusionDetail};
     use crate::logger::LogManager;
@@ -6154,6 +6421,138 @@ mod tests {
                 .contains_key(&context.session_id),
             "disabled blog generation must not retain an unbounded session archive"
         );
+    }
+
+    #[test]
+    fn effective_wake_words_prefers_custom_list_and_dedupes() {
+        let settings =
+            serde_json::json!({ "custom_wake_words": "こっちむいて、 こっちむいて ,テスト" });
+        assert_eq!(
+            effective_wake_words(&settings),
+            vec!["こっちむいて".to_string(), "テスト".to_string()]
+        );
+    }
+
+    #[test]
+    fn effective_wake_words_missing_key_uses_default_vocabulary() {
+        let words = effective_wake_words(&serde_json::json!({}));
+        assert_eq!(words.len(), crate::asr::DEFAULT_WAKE_WORDS.len());
+        assert!(words.iter().any(|word| word == "ねえぐり"));
+    }
+
+    #[test]
+    fn effective_wake_words_explicit_empty_admits_nothing() {
+        for empty in [
+            serde_json::json!({ "custom_wake_words": "" }),
+            serde_json::json!({ "custom_wake_words": [] }),
+            serde_json::json!({ "custom_wake_words": "、 ," }),
+        ] {
+            assert!(
+                effective_wake_words(&empty).is_empty(),
+                "explicit empty wake words must admit nothing: {empty}"
+            );
+        }
+    }
+
+    #[test]
+    fn twitch_admission_matches_body_and_strips_wake_word() {
+        let words = vec!["こっちむいて".to_string()];
+        // 本文の途中に語が含まれても一致し、呼びかけを除いた本文を返す。
+        assert_eq!(
+            admit_twitch_comment(&words, "こっちむいて今日の天気は？"),
+            Some("今日の天気は？".to_string())
+        );
+        // 一致なしは抑止 (C10)。
+        assert_eq!(admit_twitch_comment(&words, "普通のコメント"), None);
+        // ウェイクワードのみは空プロンプト扱いで起動しない (C14)。
+        assert_eq!(admit_twitch_comment(&words, "こっちむいて"), None);
+        // カスタム設定があれば既定語でも反応しない (C13)。
+        assert_eq!(admit_twitch_comment(&words, "ねえぐりゲーム見せて"), None);
+    }
+
+    #[test]
+    fn auto_commentary_is_off_unless_explicitly_enabled() {
+        assert!(!auto_commentary_enabled(&serde_json::json!({})));
+        assert!(!auto_commentary_enabled(
+            &serde_json::json!({ "enable_auto_commentary": false })
+        ));
+        // 型が不正な場合は既定 (OFF) と同じ解釈にする。
+        assert!(!auto_commentary_enabled(
+            &serde_json::json!({ "enable_auto_commentary": "yes" })
+        ));
+        assert!(auto_commentary_enabled(
+            &serde_json::json!({ "enable_auto_commentary": true })
+        ));
+    }
+
+    #[tokio::test]
+    async fn selected_blog_sources_resolve_dedupe_and_sort_chronologically() {
+        let session = test_session_manager("selected-blog");
+        let row = |id: &str, timestamp: &str, doc: &str| MemoryItem {
+            id: id.to_string(),
+            document: doc.to_string(),
+            memory_type: "user_speech".to_string(),
+            source: "User".to_string(),
+            timestamp: timestamp.to_string(),
+            user_id: Some("User".to_string()),
+        };
+        lance_memory::insert_memory_batch_nullable_authoritative(
+            &session.root_dir,
+            vec![
+                row("raw-newer", "2026-01-02T10:00:00Z", "newer"),
+                row("raw-older", "2026-01-01T10:00:00Z", "older"),
+            ],
+            Some(vec![None, None]),
+        )
+        .await
+        .expect("insert selected blog sources");
+
+        let canonical = MemoryRepository::canonical_event_id("raw-newer");
+        let aborted = session
+            .collect_selected_blog_sources(&["raw-newer".to_string(), "missing-id".to_string()])
+            .await
+            .expect_err("missing selection must abort before generation");
+        assert!(aborted.contains("1件が取得できません"), "{aborted}");
+        assert!(aborted.contains("missing-id"), "{aborted}");
+
+        let sources = session
+            .collect_selected_blog_sources(&[
+                "raw-newer".to_string(),
+                canonical,
+                "raw-older".to_string(),
+            ])
+            .await
+            .expect("canonical/legacy duplicates must resolve to one source");
+        let docs: Vec<&str> = sources.iter().map(|row| row.document.as_str()).collect();
+        assert_eq!(docs, vec!["older", "newer"]);
+    }
+
+    #[test]
+    fn selected_blog_source_text_rejects_oversize_selection() {
+        let row = |id: &str, doc: String| StoredMemory {
+            id: id.to_string(),
+            document: doc,
+            memory_type: "user_speech".into(),
+            source: "User".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            user_id: None,
+            summary: None,
+            summary_status: None,
+            summary_model: None,
+            summary_prompt_version: None,
+            vector_source: None,
+        };
+        let rows = vec![
+            // 1件目はプレフィックス (タイムスタンプ/発話者) を含めて上限内、
+            // 2件目を足すと上限超過するサイズ。
+            row("big", "x".repeat(BLOG_MAX_SOURCE_BYTES - 64)),
+            row("small", "small".to_string()),
+        ];
+        let err = build_blog_source_text(&rows)
+            .expect_err("oversize selection must be reported, not truncated");
+        assert!(err.contains("入力上限"), "{err}");
+        let ok = build_blog_source_text(&rows[..1]).expect("single row within limit");
+        assert!(ok.contains("xxx"));
     }
 
     #[test]

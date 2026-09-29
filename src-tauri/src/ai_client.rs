@@ -1,10 +1,15 @@
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const GEMINI_DEFAULT_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta";
 const GEMINI_MAX_ATTEMPTS: usize = 3;
 const GEMINI_RETRY_DELAY: Duration = Duration::from_millis(100);
 const GEMINI_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const MODEL_CACHE_TTL: Duration = Duration::from_secs(600);
+/// 「最新」の解決に失敗した場合の既知実績モデル (実機ログで 2.5-flash の
+/// 生成成功を確認済み)。
+const GEMINI_FALLBACK_LATEST: &str = "gemini-2.5-flash";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiKeyError {
@@ -158,9 +163,67 @@ fn sanitize_transport_error(message: &str) -> String {
     sanitized
 }
 
+/// ListModels レスポンスから generateContent 対応の gemini モデル名を抽出し、
+/// 新しいバージョン順 (降順) に並べる。
+fn parse_model_list(payload: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Vec::new();
+    };
+    let mut models: Vec<String> = value
+        .get("models")
+        .and_then(|models| models.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    let name = model.get("name")?.as_str()?.strip_prefix("models/")?;
+                    if !name.contains("gemini") {
+                        return None;
+                    }
+                    let methods: Vec<String> = model
+                        .get("supportedGenerationMethods")
+                        .or_else(|| model.get("supported_actions"))
+                        .and_then(|methods| methods.as_array())
+                        .map(|actions| {
+                            actions
+                                .iter()
+                                .filter_map(|action| action.as_str().map(ToOwned::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    // メソッド情報がない応答も受け入れる (厳密すぎると実機で
+                    // 選択肢が空になる)。
+                    let supports_generate = methods.is_empty()
+                        || methods.iter().any(|method| method == "generateContent");
+                    supports_generate.then(|| name.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    models.sort_by(|a, b| model_rank(b).cmp(&model_rank(a)).then_with(|| a.cmp(b)));
+    models.dedup();
+    models
+}
+
+/// gemini-<major>.<minor>... を (major, minor) に解釈する (解釈不能は (0, 0))。
+fn model_rank(name: &str) -> (u64, u64) {
+    let version: String = name
+        .strip_prefix("gemini-")
+        .unwrap_or(name)
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    let mut parts = version.split('.');
+    let major = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|part| part.parse().ok()).unwrap_or(0);
+    (major, minor)
+}
+
 pub struct AiClient {
     client: reqwest::Client,
     endpoint_base: String,
+    /// ListModels の結果キャッシュ (取得時刻, モデル一覧)。TTL 10分。
+    model_cache: Mutex<Option<(Instant, Vec<String>)>>,
 }
 
 impl Default for AiClient {
@@ -178,6 +241,7 @@ impl AiClient {
         Self {
             client,
             endpoint_base: GEMINI_DEFAULT_ENDPOINT.to_string(),
+            model_cache: Mutex::new(None),
         }
     }
 
@@ -190,7 +254,77 @@ impl AiClient {
         Self {
             client,
             endpoint_base,
+            model_cache: Mutex::new(None),
         }
+    }
+
+    /// 利用可能な Gemini モデル一覧 (generateContent 対応、新しいう順) を返す。
+    /// 結果は 10 分間キャッシュする。
+    pub async fn list_models(&self, api_key: &str) -> Result<Vec<String>, String> {
+        {
+            // poisoning は他スレッドの一時的パニック由文字のみ。キャッシュ読取は
+            // 破損しないため、 poison guard から中身を取り出して継続する。
+            let cache = self
+                .model_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some((fetched_at, models)) = cache.as_ref() {
+                if fetched_at.elapsed() < MODEL_CACHE_TTL {
+                    return Ok(models.clone());
+                }
+            }
+        }
+
+        let url = format!("{}/models", self.endpoint_base.trim_end_matches('/'));
+        let response = self
+            .client
+            .get(&url)
+            .header("x-goog-api-key", api_key.trim())
+            .send()
+            .await
+            .map_err(|error| {
+                format!(
+                    "model list request failed: {}",
+                    sanitize_transport_error(&error.to_string())
+                )
+            })?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("model list read failed: {error}"))?;
+        if !status.is_success() {
+            return Err(format!("model list failed ({status})"));
+        }
+        let models = parse_model_list(&body);
+        if models.is_empty() {
+            return Err("model list is empty".to_string());
+        }
+        {
+            let mut cache = self
+                .model_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *cache = Some((std::time::Instant::now(), models.clone()));
+        }
+        Ok(models)
+    }
+
+    /// 「最新」の解決: ListModels から最も新しい generateContent 対応モデルを
+    /// 選ぶ。取得に失敗した場合は実績のある既知モデルへフォールバックする。
+    pub async fn resolve_latest_model(&self, api_key: &str) -> String {
+        if let Ok(models) = self.list_models(api_key).await {
+            if let Some(latest) = models.first() {
+                return latest.clone();
+            }
+        }
+        crate::logger::global_warn(
+            "Gemini",
+            &format!(
+                "Failed to resolve the latest model; falling back to {GEMINI_FALLBACK_LATEST}."
+            ),
+        );
+        GEMINI_FALLBACK_LATEST.to_string()
     }
 
     /// Gemini API 呼び出し (REST & 複数キーローテーション & thought除外)
@@ -206,11 +340,15 @@ impl AiClient {
             GeminiKeyError::Invalid => "Gemini API key configuration is invalid".to_string(),
         })?;
 
-        let model_name = if model.trim().is_empty() {
-            "gemini-3.7-flash"
-        } else {
-            model.trim()
-        };
+        let requested_model = model.trim();
+        let model_name =
+            if requested_model.is_empty() || requested_model.eq_ignore_ascii_case("latest") {
+                // 「latest」(または未指定): ListModels から現行の最新モデルを解決する。
+                self.resolve_latest_model(raw_keys.first().map(String::as_str).unwrap_or(""))
+                    .await
+            } else {
+                requested_model.to_string()
+            };
 
         // Contents 構築
         let mut contents = Vec::new();
@@ -295,16 +433,16 @@ impl AiClient {
             body["generationConfig"] = serde_json::Value::Object(gen_config);
         }
 
-        // モデルフォールバックリスト（指定モデルを最優先、次に2.0-flash、1.5-flash、2.5-flash）
-        let mut model_candidates = vec![model_name];
-        if !model_candidates.contains(&"gemini-2.0-flash") {
-            model_candidates.push("gemini-2.0-flash");
-        }
-        if !model_candidates.contains(&"gemini-2.5-flash") {
-            model_candidates.push("gemini-2.5-flash");
-        }
-        if !model_candidates.contains(&"gemini-1.5-flash") {
-            model_candidates.push("gemini-1.5-flash");
+        // モデルフォールバックリスト (指定モデル → 現行 3.8 → 実績のある 2.5)。
+        // 現行 API で提供終了の 2.0/1.5 は 404 を拾うだけなので候補から外す。
+        let mut model_candidates = vec![model_name.clone()];
+        for fallback in ["gemini-3.8-flash", "gemini-2.5-flash"] {
+            if !model_candidates
+                .iter()
+                .any(|candidate| candidate == fallback)
+            {
+                model_candidates.push(fallback.to_string());
+            }
         }
 
         let mut last_error = String::new();
@@ -523,8 +661,8 @@ impl AiClient {
 #[cfg(test)]
 mod tests {
     use super::{
-        sanitize_transport_error, validate_gemini_api_key, AiClient, AiGenerateOptions,
-        ChatMessage, GeminiKeyError,
+        model_rank, parse_model_list, sanitize_transport_error, validate_gemini_api_key, AiClient,
+        AiGenerateOptions, ChatMessage, GeminiKeyError,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -664,5 +802,39 @@ mod tests {
         assert_eq!(result.unwrap(), "recovered");
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         server.abort();
+    }
+
+    #[test]
+    fn parse_model_list_keeps_gemini_generate_content_models_newest_first() {
+        let payload = r#"{"models":[
+            {"name":"models/gemini-2.0-flash","supportedGenerationMethods":["generateContent","countTokens"]},
+            {"name":"models/gemini-3.8-flash","supportedGenerationMethods":["generateContent"]},
+            {"name":"models/gemini-3.8-flash-lite","supportedGenerationMethods":["generateContent"]},
+            {"name":"models/text-embedding-004","supportedGenerationMethods":["embedContent"]},
+            {"name":"models/gemini-2.5-pro","supportedActions":["generateContent"]}
+        ]}"#;
+        let models = parse_model_list(payload);
+        assert_eq!(
+            models,
+            vec![
+                "gemini-3.8-flash".to_string(),
+                "gemini-3.8-flash-lite".to_string(),
+                "gemini-2.5-pro".to_string(),
+                "gemini-2.0-flash".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_model_list_rejects_malformed_payload() {
+        assert!(parse_model_list("not json").is_empty());
+        assert!(parse_model_list("{}").is_empty());
+    }
+
+    #[test]
+    fn model_rank_parses_major_minor() {
+        assert_eq!(model_rank("gemini-3.8-flash"), (3, 8));
+        assert_eq!(model_rank("gemini-2.0-flash"), (2, 0));
+        assert_eq!(model_rank("unknown"), (0, 0));
     }
 }

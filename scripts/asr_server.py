@@ -1,13 +1,17 @@
-# -*- coding: utf-8 -*-
 """
 Faster-Whisper CUDA INT8 WebSocket Streaming ASR Server
 Listens on ws://127.0.0.1:18088/asr
 """
+
 import asyncio
 import json
 import logging
 import os
 import sys
+import threading
+import time
+import traceback
+from datetime import datetime
 
 # Keep a dependency-free executable contract check for the portable launcher.
 # It is intentionally handled before optional ML packages are imported so setup
@@ -15,24 +19,25 @@ import sys
 if "--validate-runtime-contract" in sys.argv:
     _contract_keys = ("RUNTIME_ROOT", "SETTINGS_PATH", "MODELS_DIR", "CACHE_DIR")
     try:
-        _contract = {
-            key: os.path.abspath(os.environ[key]) for key in _contract_keys
-        }
+        _contract = {key: os.path.abspath(os.environ[key]) for key in _contract_keys}
     except KeyError as error:
-        print(f"missing required runtime environment variable: {error}", file=sys.stderr)
+        print(
+            f"missing required runtime environment variable: {error}", file=sys.stderr
+        )
         raise SystemExit(2)
     print(json.dumps(_contract, sort_keys=True))
     raise SystemExit(0)
 
 import numpy as np
+import torch
 import websockets
 from faster_whisper import WhisperModel
-
-import torch
 from sentence_transformers import SentenceTransformer
 
 # 不要な内部詳細ログを抑制
-logging.basicConfig(level=logging.WARNING, format="[%(asctime)s] [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.WARNING, format="[%(asctime)s] [%(levelname)s] %(message)s"
+)
 logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
@@ -87,7 +92,10 @@ def remember_transcript(previous: str, candidate: str) -> str:
 # Keep any library-managed cache beside the portable EXE as well.  Required
 # models are downloaded by GameAssistant's Models Manager before this server
 # starts; there is deliberately no user-profile/HF-cache fallback.
-os.makedirs(HF_CACHE_DIR, exist_ok=True)
+try:
+    os.makedirs(HF_CACHE_DIR, exist_ok=True)
+except OSError as cache_dir_err:
+    logger.warning(f"Failed to create HF cache dir {HF_CACHE_DIR}: {cache_dir_err}")
 os.environ["HF_HOME"] = HF_CACHE_DIR
 os.environ["TRANSFORMERS_CACHE"] = HF_CACHE_DIR
 os.environ["HF_HUB_CACHE"] = HF_CACHE_DIR
@@ -96,7 +104,10 @@ os.environ["SENTENCE_TRANSFORMERS_HOME"] = HF_CACHE_DIR
 
 # 1. Faster-Whisper ASR モデルロード
 local_whisper_path = os.path.join(MODELS_DIR, "kotoba-whisper-v2.0-faster")
-if os.path.exists(local_whisper_path) and (os.path.exists(os.path.join(local_whisper_path, "model.bin")) or os.path.exists(os.path.join(local_whisper_path, "model.safetensors"))):
+if os.path.exists(local_whisper_path) and (
+    os.path.exists(os.path.join(local_whisper_path, "model.bin"))
+    or os.path.exists(os.path.join(local_whisper_path, "model.safetensors"))
+):
     whisper_model_source = local_whisper_path
 else:
     raise RuntimeError(
@@ -115,6 +126,7 @@ elif "--force-device" in sys.argv:
         forced_device = sys.argv[idx + 1].lower()
 
 current_device = "cpu" if forced_device == "cpu" else "cuda"
+
 
 def create_cpu_whisper_model():
     """ゲームとCPUリソースが共存できるようスレッド数(4)と量子化型を最適化してCPUモデルを初期化。
@@ -146,7 +158,9 @@ def create_cpu_whisper_model():
             num_workers=1,
         )
     except Exception as e:
-        logger.warning(f"Failed to load CPU model with {compute_type}: {e}. Retrying with float32...")
+        logger.warning(
+            f"Failed to load CPU model with {compute_type}: {e}. Retrying with float32..."
+        )
         return WhisperModel(
             model_source,
             device="cpu",
@@ -157,49 +171,271 @@ def create_cpu_whisper_model():
 
 
 if current_device == "cuda":
-    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)...")
+    logger.info(
+        f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)..."
+    )
     try:
-        whisper_model = WhisperModel(whisper_model_source, device="cuda", compute_type="int8")
+        whisper_model = WhisperModel(
+            whisper_model_source, device="cuda", compute_type="int8"
+        )
         logger.info("Faster-Whisper model successfully loaded on CUDA (INT8)!")
     except Exception as e:
         logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU...")
         whisper_model = create_cpu_whisper_model()
         current_device = "cpu"
 else:
-    logger.info(f"Loading local Faster-Whisper model from: {whisper_model_source} on CPU as requested...")
+    logger.info(
+        f"Loading local Faster-Whisper model from: {whisper_model_source} on CPU as requested..."
+    )
     whisper_model = create_cpu_whisper_model()
     current_device = "cpu"
 
 
-def fallback_to_cpu_model():
-    """VRAM枯渇やCUDA例外発生時に同一プロセス内で動的にCPUモデルへ安全に切り替える"""
-    global whisper_model, current_device
-    if current_device == "cpu":
-        return
-    logger.warning("VRAM Out of Memory or CUDA error detected during inference! Falling back to CPU...")
+REASON_GPU_OOM = "gpu_oom"
+REASON_INFERENCE_TIMEOUT = "inference_timeout"
+REASON_CUDA_ERROR = "cuda_error"
+
+# 連続推論タイムアウトがこの回数に達したら、プロセス内でのモデル切替ではなく
+# 自身を終了し、外側の監督処理 (Rust ASR エンジンの watchdog / child-exit 検知)
+# に子プロセスの終了・再生成を委ねる。
+INFERENCE_STALL_EXIT_THRESHOLD = 3
+
+FATAL_CUDA_PATTERNS = (
+    "device-side assert",
+    "illegal memory access",
+    "an illegal instruction was encountered",
+)
+
+_switch_diagnostics: list = []
+MAX_SWITCH_DIAGNOSTICS = 20
+last_switch_reason = None
+inference_stall_streak = 0
+
+# The admission lock below covers queued/native inference AND model replacement.
+# A timed-out caller must not release it while the executor still owns the job.
+INFERENCE_IN_FLIGHT_EXIT_SECONDS = 30.0
+in_flight_since = None
+_in_flight_skip_log_armed = True
+
+
+def is_cuda_oom_error(exc: BaseException) -> bool:
+    """真のVRAM枯渇のみを検出する。
+
+    文字列判定は確認済みのメモリ不足メッセージに限定する。API名
+    ('cudamalloc' など) や 'cuda' という語の部分一致では原因を確定できない
+    (VRAM空きがある一時的エラーまで恒久CPU切替していた過去事故の教訓)。
+    CTranslate2 は torch.cuda.OutOfMemoryError を送出しないためメッセージで判定する
+    (依存なしで単体テスト可能)。
+    """
+    text = str(exc).lower()
+    return (
+        "out of memory" in text
+        or "out_of_memory" in text
+        or "cuda memory allocation failed" in text
+    )
+
+
+def vram_snapshot() -> dict:
+    """取得時刻付きの空き/合計VRAM (取得不可なら available=False)。"""
+    try:
+        if torch.cuda.is_available():
+            free_b, total_b = torch.cuda.mem_get_info()
+            return {
+                "available": True,
+                "free_mib": round(free_b / (1024**2)),
+                "total_mib": round(total_b / (1024**2)),
+                "captured_at": datetime.now().isoformat(timespec="milliseconds"),
+            }
+    except Exception as snapshot_err:
+        logger.debug(f"VRAM snapshot unavailable: {snapshot_err}")
+    return {"available": False}
+
+
+def vram_status_text() -> str:
+    """診断用: 現在の空き/合計VRAMを短い文字列で返す (CUDA不可なら 'n/a')。"""
+    snap = vram_snapshot()
+    if snap.get("available"):
+        return f"{snap['free_mib']}MiB free / {snap['total_mib']}MiB total"
+    return "n/a"
+
+
+def is_fatal_cuda_error(exc: BaseException) -> bool:
+    """CUDAコンテキスト自体の破壊 (回復不能) を検出する。プロセス再起動対象。"""
+    text = str(exc).lower()
+    return any(pattern in text for pattern in FATAL_CUDA_PATTERNS)
+
+
+def classify_inference_error(exc: BaseException) -> str:
+    """推論例外を gpu_oom / cuda_error / input_error に分類する。"""
+    if is_cuda_oom_error(exc) or isinstance(exc, torch.cuda.OutOfMemoryError):
+        return REASON_GPU_OOM
+    text = str(exc).lower()
+    if "cuda" in text or "cudnn" in text or "cublas" in text:
+        return REASON_CUDA_ERROR
+    return "input_error"
+
+
+def record_switch_diagnostic(reason, exc=None, elapsed_ms=None, extra=None):
+    """デバイス切替/スタールの確定証跡を記録する (リングバッファ + ERROR ログ)。
+
+    例外の型・全文・スタック、処理時間、取得時刻付きVRAM空き容量、切替を
+    決めた条件を 1 レコードにまとめる。「4GB空いていた」という観測だけでは
+    確定できなかった誤判定/実確保失敗の切り分け (例外経路 vs タイムアウト経路
+    の判別を含む) を可能にする。
+    """
+    entry = {
+        "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+        "reason": reason,
+        "device_before": current_device,
+        "exception_type": type(exc).__name__ if exc is not None else None,
+        "exception": str(exc) if exc is not None else None,
+        "traceback": traceback.format_exc(limit=10) if exc is not None else None,
+        "elapsed_ms": round(elapsed_ms, 1) if elapsed_ms is not None else None,
+        "vram": vram_snapshot(),
+    }
+    if extra:
+        entry.update(extra)
+    _switch_diagnostics.append(entry)
+    del _switch_diagnostics[:-MAX_SWITCH_DIAGNOSTICS]
+    logger.error(
+        "device_switch_diagnostic %s",
+        json.dumps(entry, ensure_ascii=False, default=str),
+    )
+    return entry
+
+
+def record_inference_stall(elapsed_ms: float) -> int:
+    """推論タイムアウトを記録する。モデルは切替えない (実行中スレッド保護)。
+
+    連続スタールが閾値に達したらプロセスを終了し、復旧は外側の監督処理が
+    行う子プロセスの再生成に委ねる。
+    """
+    global inference_stall_streak
+    inference_stall_streak += 1
+    record_switch_diagnostic(
+        REASON_INFERENCE_TIMEOUT,
+        elapsed_ms=elapsed_ms,
+        extra={"streak": inference_stall_streak},
+    )
+    if inference_stall_streak >= INFERENCE_STALL_EXIT_THRESHOLD:
+        logger.critical(
+            f"GPU inference stalled {inference_stall_streak} consecutive times "
+            f"(reason={REASON_INFERENCE_TIMEOUT}). Exiting so the supervisor can "
+            "restart the ASR server process."
+        )
+        os._exit(87)
+    return inference_stall_streak
+
+
+def reset_inference_stall_streak() -> None:
+    global inference_stall_streak
+    inference_stall_streak = 0
+
+
+def note_in_flight_gate() -> bool:
+    """in-flight 状態が許容時間を超えたかを判定する (超過時はプロセス終了対象)。"""
+    global in_flight_since
+    now = time.monotonic()
+    if in_flight_since is None:
+        in_flight_since = now
+        return False
+    return (now - in_flight_since) >= INFERENCE_IN_FLIGHT_EXIT_SECONDS
+
+
+def clear_in_flight_gate() -> None:
+    global in_flight_since, _in_flight_skip_log_armed
+    in_flight_since = None
+    _in_flight_skip_log_armed = True
+
+
+def note_in_flight_skip_log() -> bool:
+    """スタール期間で最初にブロックされたポーリングのみ True (ログのレート制限)。"""
+    global _in_flight_skip_log_armed
+    if _in_flight_skip_log_armed:
+        _in_flight_skip_log_armed = False
+        return True
+    return False
+
+
+class _CpuFallbackRequest(Exception):
+    """真のOOM等でCPUモデルへの切替を要求する内部シグナル。
+
+    Native inference has unwound before the wrapper handles this signal.
+    The wrapper retains exclusive admission through model replacement and retry.
+    """
+
+    def __init__(self, reason: str, exc: BaseException, elapsed_ms: float):
+        super().__init__(reason)
+        self.reason = reason
+        self.exc = exc
+        self.elapsed_ms = elapsed_ms
+
+
+# Acquired before executor submission; released by that worker after all native
+# work, including CPU fallback, finishes. Admission uses nonblocking acquisition
+# so the WebSocket event loop never waits synchronously for a model load.
+_device_switch_lock = threading.Lock()
+
+
+def _perform_cpu_switch(reason: str, exc=None, elapsed_ms=None) -> None:
+    """GPUモデルを破棄してCPUモデルへ切替える (_device_switch_lock 下で呼ぶ)。
+
+    The failed native inference must have returned; admission remains locked.
+    """
+    global whisper_model, current_device, last_switch_reason
+    record_switch_diagnostic(reason, exc=exc, elapsed_ms=elapsed_ms)
+    last_switch_reason = reason
+    logger.warning(
+        f"Switching ASR from GPU to CPU (reason={reason}) "
+        f"[VRAM: {vram_status_text()}]..."
+    )
     try:
         del whisper_model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception as err:
         logger.debug(f"Error clearing CUDA cache during fallback: {err}")
-    whisper_model = create_cpu_whisper_model()
+    try:
+        loaded_cpu_model = create_cpu_whisper_model()
+        whisper_model = loaded_cpu_model
+    except Exception as load_err:
+        # CPU モデルのロードに失敗: whisper_model が未束納のまま残り、以降の
+        # 推論が全て失敗する。プロセス内での自己修復は不可能なため、監視側の
+        # 子プロセス再生成に委ねて終了する。
+        record_switch_diagnostic(
+            f"{reason}_load_failed",
+            exc=load_err,
+            elapsed_ms=elapsed_ms,
+            extra={"fatal": True},
+        )
+        logger.critical(
+            f"CPU model load failed after fallback ({load_err}); exiting for "
+            "supervised process restart."
+        )
+        os._exit(87)
     current_device = "cpu"
     logger.info("Successfully switched Faster-Whisper model to CPU!")
+
 
 # 2. GLuCoSE-base-ja ローカル Embedding モデル
 _embedding_model = None
 _embedding_model_error_logged = False
+
 
 def get_embedding_model():
     global _embedding_model
     global _embedding_model_error_logged
     if _embedding_model is None:
         local_path = os.path.join(MODELS_DIR, "GLuCoSE-base-ja")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # GLuCoSE を CPU に固定: whisper (CTranslate2) と同じ CUDA で並走すると
+        # 推論が 2 秒超えでスタールすることがある (GPU 競合)。埋め込み対象は
+        # 短文が主で CPU でも十分な速度。
+        device = "cpu"
         if os.path.exists(local_path):
             model_name = local_path
-            logger.info(f"Loading local embedding model from: {model_name} ({device})...")
+            logger.info(
+                f"Loading local embedding model from: {model_name} ({device})..."
+            )
         else:
             if not _embedding_model_error_logged:
                 logger.error(
@@ -210,19 +446,25 @@ def get_embedding_model():
             return None
         try:
             _embedding_model = SentenceTransformer(model_name, device=device)
-            logger.info(f"GLuCoSE-base-ja embedding model successfully loaded on {device}!")
+            logger.info(
+                f"GLuCoSE-base-ja embedding model successfully loaded on {device}!"
+            )
         except Exception as err:
             if not _embedding_model_error_logged:
                 logger.error(f"Failed to load embedding model: {err}")
                 _embedding_model_error_logged = True
     return _embedding_model
 
+
 # 3. VRAM 事前確保 (Preallocation) の無力化（不要な1GBダミー確保を廃止）
 _vram_preallocate_buffer = None
 
+
 def set_vram_preallocation(enable: bool) -> bool:
     # 廃止: PyTorch 1GB 確保は CTranslate2 で再利用できず、VRAMを圧迫するため無効化
-    logger.info("VRAM preallocation request handled (no-op: CTranslate2 manages its own workspace memory).")
+    logger.info(
+        "VRAM preallocation request handled (no-op: CTranslate2 manages its own workspace memory)."
+    )
     return True
 
 
@@ -252,8 +494,8 @@ async def asr_handler(websocket):
             while True:
                 msg = await send_queue.get()
                 await websocket.send(json.dumps(msg, ensure_ascii=False))
-        except Exception:
-            pass
+        except Exception as sender_err:
+            logger.debug(f"Sender task terminated: {sender_err}")
 
     sender_task = asyncio.create_task(sender())
     await send_queue.put({"type": "device_status", "device": current_device})
@@ -273,13 +515,57 @@ async def asr_handler(websocket):
 
         buf_copy = audio_buffer.copy()
 
+        if not _device_switch_lock.acquire(blocking=False):
+            # 前回タイムアウトした推論がまだ実行中: 旧モデルを使うスレッドが残って
+            # いるため新規推論を投入しない (並行競合防止)。窓はスキップし、in-flight
+            # が許容時間を超えて滞留する場合はプロセス終了して監視側の再生成に委ねる。
+            # 80ms ポーリング毎のログはスパムになるため、スタール期間の最初の
+            # 1回だけ記録する。
+            if note_in_flight_gate():
+                record_switch_diagnostic(
+                    REASON_INFERENCE_TIMEOUT,
+                    extra={"stall": "in_flight_timeout"},
+                )
+                logger.critical(
+                    "GPU inference stayed in flight for over "
+                    f"{INFERENCE_IN_FLIGHT_EXIT_SECONDS:.0f}s; exiting so the "
+                    "supervisor can restart the ASR server process."
+                )
+                os._exit(87)
+            if note_in_flight_skip_log():
+                logger.warning(
+                    "Skipping inference window: previous inference still in flight "
+                    "(further skip logs suppressed until it finishes)."
+                )
+            return "", 0.0
+
+        clear_in_flight_gate()
+
         def _run_transcribe():
-            nonlocal buf_copy
-            if "--simulate-hang" in sys.argv or os.environ.get("SIMULATE_ASR_HANG") == "1":
-                import time
-                logger.warning("Simulating native hang: sleeping 60s...")
-                time.sleep(60)
+            # This worker owns the reservation made before submission, even if
+            # its caller times out or disconnects. No other inference or switch
+            # can enter until the native call, model load and retry have ended.
             try:
+                try:
+                    return _run_transcribe_inner()
+                except _CpuFallbackRequest as request:
+                    _perform_cpu_switch(
+                        request.reason, exc=request.exc, elapsed_ms=request.elapsed_ms
+                    )
+                    return _run_transcribe_inner()
+            finally:
+                _device_switch_lock.release()
+
+        def _run_transcribe_inner():
+            nonlocal buf_copy
+            if (
+                "--simulate-hang" in sys.argv
+                or os.environ.get("SIMULATE_ASR_HANG") == "1"
+            ):
+                # 故障注入 (診断用フラグ): ネイティブ推論のハングを再現する。
+                _fault_injection_hang(60)
+
+            def _transcribe_text():
                 segments, _ = whisper_model.transcribe(
                     buf_copy,
                     language="ja",
@@ -287,61 +573,123 @@ async def asr_handler(websocket):
                     vad_filter=True,
                     without_timestamps=True,
                     condition_on_previous_text=False,  # 幻覚ループ（「ありがとう」連鎖）を完全遮断
-                    no_speech_threshold=0.6,           # 無音時の幻覚テキスト出力を抑止
-                    compression_ratio_threshold=2.4,   # 反復ループ幻覚を破棄
-                    hallucination_silence_threshold=0.5, # 無音区間の幻覚を除去
+                    no_speech_threshold=0.6,  # 無音時の幻覚テキスト出力を抑止
+                    compression_ratio_threshold=2.4,  # 反復ループ幻覚を破棄
+                    hallucination_silence_threshold=0.5,  # 無音区間の幻覚を除去
                 )
                 return "".join([s.text for s in segments]).strip()
+
+            call_started = time.monotonic()
+            try:
+                return _transcribe_text()
             except Exception as e:
-                err_str = str(e).lower()
-                is_oom = "out of memory" in err_str or "cuda" in err_str or isinstance(e, torch.cuda.OutOfMemoryError)
-                if is_oom and current_device != "cpu":
-                    logger.warning(f"CUDA inference error caught ({e}). Attempting dynamic fallback to CPU...")
-                    fallback_to_cpu_model()
-                    # CPU モデルで再試行
-                    segments, _ = whisper_model.transcribe(
-                        buf_copy,
-                        language="ja",
-                        beam_size=1,
-                        vad_filter=True,
-                        without_timestamps=True,
-                        condition_on_previous_text=False,
-                        no_speech_threshold=0.6,
-                        compression_ratio_threshold=2.4,
-                        hallucination_silence_threshold=0.5,
-                    )
-                    return "".join([s.text for s in segments]).strip()
-                else:
+                if current_device != "cuda":
                     raise
+                elapsed_ms = (time.monotonic() - call_started) * 1000.0
+                kind = classify_inference_error(e)
+
+                if kind == REASON_GPU_OOM:
+                    # Unwind native inference before switching under admission.
+                    raise _CpuFallbackRequest(REASON_GPU_OOM, e, elapsed_ms) from e
+
+                if is_fatal_cuda_error(e):
+                    # CUDAコンテキスト破壊系 (device-side assert 等):
+                    # プロセス内復旧は不可能。外側の監督処理に子プロセスの
+                    # 再生成を委ねるため終了する。
+                    record_switch_diagnostic(
+                        REASON_CUDA_ERROR,
+                        exc=e,
+                        elapsed_ms=elapsed_ms,
+                        extra={"fatal": True},
+                    )
+                    logger.critical(
+                        f"Fatal CUDA fault during inference ({e}); exiting for "
+                        "supervised process restart."
+                    )
+                    os._exit(87)
+
+                if kind == REASON_CUDA_ERROR:
+                    # 回復可能な一時的CUDA障害のみ再試行する (入力不正などは
+                    # そのまま報告)。キャッシュ解放後にGPUで1回だけ再試行し、
+                    # 再失敗時のみCPUへ切替。
+                    logger.warning(
+                        f"Transient CUDA error during inference ({e}) "
+                        f"[VRAM: {vram_status_text()}]. Clearing CUDA cache and "
+                        "retrying once on GPU..."
+                    )
+                    try:
+                        torch.cuda.empty_cache()
+                    except Exception as cache_err:
+                        logger.debug(f"Failed to clear CUDA cache: {cache_err}")
+                    try:
+                        return _transcribe_text()
+                    except Exception as retry_err:
+                        logger.warning(
+                            f"GPU retry after transient CUDA error failed "
+                            f"({retry_err}). Falling back to CPU..."
+                        )
+                        # Unwind native inference before switching under admission.
+                        raise _CpuFallbackRequest(
+                            REASON_CUDA_ERROR, retry_err, elapsed_ms
+                        ) from retry_err
+
+                # 入力不正などCUDA以外の例外: 切替も再試行もせずそのまま報告する
+                raise
 
         prev_dev = current_device
         t0 = loop.time()
+        current_text = ""
+        try:
+            inference = loop.run_in_executor(None, _run_transcribe)
+        except BaseException:
+            # No worker accepted ownership, so the submitting caller releases it.
+            _device_switch_lock.release()
+            raise
+
+        def observe_completion(future):
+            # Retrieve late failures even when the caller has timed out/disconnected.
+            if not future.cancelled():
+                error = future.exception()
+                if error is not None:
+                    logger.error(
+                        "ASR inference worker failed: %s",
+                        error,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+
+        inference.add_done_callback(observe_completion)
         try:
             current_text = await asyncio.wait_for(
-                loop.run_in_executor(None, _run_transcribe),
-                timeout=2.0,
+                # Cancellation must not cancel a queued job: its finally owns
+                # releasing admission, and it must run even without a waiter.
+                asyncio.shield(inference),
+                timeout=3.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("Inference execution timed out (>2.0s)! Attempting dynamic fallback to CPU...")
-            if current_device != "cpu":
-                fallback_to_cpu_model()
-                try:
-                    current_text = await asyncio.wait_for(
-                        loop.run_in_executor(None, _run_transcribe),
-                        timeout=3.0,
-                    )
-                except Exception as retry_err:
-                    logger.error(f"CPU retry after timeout failed: {retry_err}")
-                    current_text = ""
-            else:
-                current_text = ""
+            # タイムアウトはVRAM枯渇 (OOM) とは無関係。wait_for 打切後も実行中の
+            # 推論スレッドが旧モデルを使い続けるため、ここでモデルを切替えては
+            # いけない。窓を1つスキップして継続し、連続スタールが閾値に達したら
+            # record_inference_stall がプロセスを終了し、外側の監督処理 (Rust
+            # ASR エンジン) が子プロセスを再生成する。
+            streak = record_inference_stall((loop.time() - t0) * 1000.0)
+            logger.warning(
+                f"Inference exceeded 3.0s (reason={REASON_INFERENCE_TIMEOUT}, "
+                f"streak={streak}/{INFERENCE_STALL_EXIT_THRESHOLD}, "
+                f"VRAM: {vram_status_text()}). Skipping this window; "
+                "the GPU model is kept in place."
+            )
+            current_text = ""
+        else:
+            reset_inference_stall_streak()
 
         if current_device != prev_dev:
-            await send_queue.put({
-                "type": "device_changed",
-                "device": current_device,
-                "reason": "oom_or_timeout",
-            })
+            await send_queue.put(
+                {
+                    "type": "device_changed",
+                    "device": current_device,
+                    "reason": last_switch_reason or REASON_GPU_OOM,
+                }
+            )
 
         return current_text, (loop.time() - t0) * 1000.0
 
@@ -379,12 +727,14 @@ async def asr_handler(websocket):
                             audio_buffer, allow_short=True
                         )
                         if final_text:
-                            await send_queue.put({
-                                "text": final_text,
-                                "is_final": True,
-                                "stream": stream_name,
-                                "latency_ms": round(final_latency_ms, 1),
-                            })
+                            await send_queue.put(
+                                {
+                                    "text": final_text,
+                                    "is_final": True,
+                                    "stream": stream_name,
+                                    "latency_ms": round(final_latency_ms, 1),
+                                }
+                            )
                         else:
                             logger.info(
                                 "VAD reset[%s]: partial=false final=false "
@@ -413,12 +763,14 @@ async def asr_handler(websocket):
                             last_partial_text, current_text
                         )
                         if stable_text != last_partial_text:
-                            await send_queue.put({
-                                "text": stable_text,
-                                "is_final": False,
-                                "stream": stream_name,
-                                "latency_ms": round(latency_ms, 1),
-                            })
+                            await send_queue.put(
+                                {
+                                    "text": stable_text,
+                                    "is_final": False,
+                                    "stream": stream_name,
+                                    "latency_ms": round(latency_ms, 1),
+                                }
+                            )
                             state["last_partial_text"] = stable_text
                             state["silence_start_time"] = now
                         elif silence_start_time is None:
@@ -448,12 +800,14 @@ async def asr_handler(websocket):
                                 f"Finalize[{stream_name}]: '{final_text}' "
                                 f"(latency: {latency_ms:.1f}ms)"
                             )
-                            await send_queue.put({
-                                "text": final_text,
-                                "is_final": True,
-                                "stream": stream_name,
-                                "latency_ms": round(latency_ms, 1),
-                            })
+                            await send_queue.put(
+                                {
+                                    "text": final_text,
+                                    "is_final": True,
+                                    "stream": stream_name,
+                                    "latency_ms": round(latency_ms, 1),
+                                }
+                            )
                             state["last_partial_text"] = ""
                             reset_stream_state(state)
                     elif (
@@ -461,18 +815,20 @@ async def asr_handler(websocket):
                         and not state["last_partial_text"]
                         and state["last_audio_at"] is not None
                         and now - state["last_audio_at"]
-                            >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
+                        >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
                     ):
                         final_text, final_latency_ms = await transcribe_buffer(
                             state["audio_buffer"], allow_short=True
                         )
                         if final_text:
-                            await send_queue.put({
-                                "text": final_text,
-                                "is_final": True,
-                                "stream": stream_name,
-                                "latency_ms": round(final_latency_ms, 1),
-                            })
+                            await send_queue.put(
+                                {
+                                    "text": final_text,
+                                    "is_final": True,
+                                    "stream": stream_name,
+                                    "latency_ms": round(final_latency_ms, 1),
+                                }
+                            )
                         else:
                             logger.info(
                                 "VAD reset[%s]: partial=false final=false "
@@ -542,8 +898,7 @@ async def asr_handler(websocket):
                             stream_name = stream_name.strip()
                         state = stream_states.get(stream_name)
                         if state and (
-                            state["last_partial_text"]
-                            or len(state["audio_buffer"]) > 0
+                            state["last_partial_text"] or len(state["audio_buffer"]) > 0
                         ):
                             final_text = state["last_partial_text"]
                             final_latency_ms = 0.0
@@ -552,12 +907,14 @@ async def asr_handler(websocket):
                                     state["audio_buffer"], allow_short=True
                                 )
                             if final_text:
-                                await send_queue.put({
-                                    "text": final_text,
-                                    "is_final": True,
-                                    "stream": stream_name,
-                                    "latency_ms": round(final_latency_ms, 1),
-                                })
+                                await send_queue.put(
+                                    {
+                                        "text": final_text,
+                                        "is_final": True,
+                                        "stream": stream_name,
+                                        "latency_ms": round(final_latency_ms, 1),
+                                    }
+                                )
                             else:
                                 logger.info(
                                     "VAD flush[%s]: partial=false final=false "
@@ -574,10 +931,12 @@ async def asr_handler(websocket):
                         if isinstance(texts, str):
                             texts = [texts]
 
-                        def _do_embed():
+                        def _do_embed(texts=texts):
                             emb_model = get_embedding_model()
                             if emb_model is not None:
-                                return emb_model.encode(texts, show_progress_bar=False).tolist()
+                                return emb_model.encode(
+                                    texts, show_progress_bar=False
+                                ).tolist()
                             # Do not manufacture zero vectors when the
                             # tokenizer/model is unavailable. An empty
                             # response lets the native client preserve the
@@ -586,55 +945,78 @@ async def asr_handler(websocket):
                             return []
 
                         vectors = await loop.run_in_executor(None, _do_embed)
-                        await send_queue.put({
-                            "type": "embed_res",
-                            "id": req_id,
-                            "vectors": vectors,
-                        })
+                        await send_queue.put(
+                            {
+                                "type": "embed_res",
+                                "id": req_id,
+                                "vectors": vectors,
+                            }
+                        )
                     elif cmd == "preallocate_vram":
                         enable = data.get("enable", True)
                         success = set_vram_preallocation(enable)
-                        await send_queue.put({
-                            "type": "preallocate_res",
-                            "success": success,
-                            "enabled": enable,
-                        })
+                        await send_queue.put(
+                            {
+                                "type": "preallocate_res",
+                                "success": success,
+                                "enabled": enable,
+                            }
+                        )
                 except Exception as err:
                     logger.error(f"Error handling json message: {err}")
     except websockets.exceptions.ConnectionClosed:
-        pass
+        logger.debug("WebSocket connection closed by client")
     finally:
         sender_task.cancel()
         inf_task.cancel()
+
+
+def _fault_injection_hang(seconds: float) -> None:
+    """診断用の故障注入: ネイティブ推論のハングを再現する
+    (--simulate-hang / SIMULATE_ASR_HANG で有効化)。
+    """
+    time.sleep(seconds)
 
 
 def kill_port_owner(port):
     if sys.platform == "win32":
         try:
             import subprocess
-            out = subprocess.check_output(f"netstat -ano -p tcp | findstr :{port}", shell=True).decode()
+
+            # shell=True の文字列補間はコマンド注入シンクになるため、引数はリスト
+            # で渡しポートフィルタリングは Python 側で行う。
+            out = subprocess.check_output(["netstat", "-ano", "-p", "tcp"], text=True)
             my_pid = os.getpid()
-            for line in out.strip().split("\n"):
+            for line in out.splitlines():
                 parts = line.split()
                 if len(parts) >= 5 and parts[1].endswith(f":{port}"):
                     pid = int(parts[-1])
                     if pid != my_pid and pid > 0:
-                        logger.info(f"Terminating lingering process (PID {pid}) on port {port}...")
-                        subprocess.run(f"taskkill /F /T /PID {pid}", shell=True, capture_output=True)
-        except Exception:
-            pass
+                        logger.info(
+                            f"Terminating lingering process (PID {pid}) on port {port}..."
+                        )
+                        subprocess.run(
+                            ["taskkill", "/F", "/T", "/PID", str(pid)],
+                            capture_output=True,
+                        )
+        except Exception as port_cleanup_err:
+            logger.debug(f"Port cleanup skipped: {port_cleanup_err}")
 
 
 async def main():
     for attempt in range(5):
         try:
             async with websockets.serve(asr_handler, "127.0.0.1", PORT):
-                logger.info(f"ASR WebSocket Server running at ws://127.0.0.1:{PORT}/asr")
+                logger.info(
+                    f"ASR WebSocket Server running at ws://127.0.0.1:{PORT}/asr"
+                )
                 await asyncio.Future()
             break
         except OSError as e:
             if attempt < 4:
-                logger.warning(f"Port {PORT} in use, terminating lingering process and retrying in 1s (attempt {attempt+1}/5)...")
+                logger.warning(
+                    f"Port {PORT} in use, terminating lingering process and retrying in 1s (attempt {attempt+1}/5)..."
+                )
                 kill_port_owner(PORT)
                 await asyncio.sleep(1)
             else:

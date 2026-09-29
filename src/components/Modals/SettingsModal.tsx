@@ -129,6 +129,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     Record<string, DownloadProgressEvent>
   >({});
   const [isRefreshingModels, setIsRefreshingModels] = useState<boolean>(false);
+  const [geminiModelOptions, setGeminiModelOptions] = useState<string[]>([]);
+  const [loadingGeminiModels, setLoadingGeminiModels] =
+    useState<boolean>(false);
+  const [geminiModelsError, setGeminiModelsError] = useState<string | null>(
+    null,
+  );
+
+  const refreshGeminiModels = async () => {
+    setLoadingGeminiModels(true);
+    setGeminiModelsError(null);
+    try {
+      const models = await invoke<string[]>("gemini_list_models");
+      setGeminiModelOptions(models);
+    } catch (e) {
+      setGeminiModelsError(
+        typeof e === "string" ? e : e instanceof Error ? e.message : String(e),
+      );
+    } finally {
+      setLoadingGeminiModels(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen && initialTab === "models") {
+      void refreshGeminiModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialTab]);
+
+  const geminiModelValue = String(settings.gemini_model || "latest");
+  const needsManualGeminiModel =
+    geminiModelValue !== "latest" &&
+    !geminiModelOptions.includes(geminiModelValue);
 
   // ローカル記憶要約 (Gemma) state
   const [localSummaryStatus, setLocalSummaryStatus] =
@@ -702,6 +735,64 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* 2. Models タブ */}
           {activeTab === "models" && (
             <div className="flex flex-col gap-4">
+              {/* Gemini 応答モデル (ListModels から取得して選択) */}
+              <div className="p-3 rounded-[8px] bg-[#08090a] border border-[#23252a] flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-white font-semibold">
+                    Gemini 応答モデル
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshGeminiModels()}
+                    disabled={loadingGeminiModels}
+                    className="px-2 py-1 rounded text-[10px] font-medium bg-[#16181b] border border-[#2a2e36] text-[#8a8f98] hover:text-white disabled:opacity-50"
+                  >
+                    {loadingGeminiModels ? "取得中..." : "モデル一覧を再取得"}
+                  </button>
+                </div>
+                <select
+                  value={geminiModelValue}
+                  onChange={(e) =>
+                    onUpdateSetting("gemini_model", e.target.value)
+                  }
+                  disabled={loadingGeminiModels}
+                  className="w-full px-2.5 py-2 rounded-[6px] bg-[#0f1011] border border-[#2a2e36] text-xs text-white"
+                >
+                  <option value="latest">最新モデルを自動選択 (推奨)</option>
+                  {needsManualGeminiModel && (
+                    <option value={geminiModelValue}>
+                      {geminiModelValue} (手動設定)
+                    </option>
+                  )}
+                  {geminiModelOptions.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))}
+                </select>
+                {geminiModelsError && (
+                  <div className="text-[10px] text-[#eb5757] leading-relaxed">
+                    モデル一覧の取得に失敗しました: {geminiModelsError}
+                    <div className="mt-1.5 text-[#8a8f98]">
+                      手動でモデル名を入力してください:
+                      <input
+                        value={
+                          geminiModelValue === "latest" ? "" : geminiModelValue
+                        }
+                        onChange={(e) =>
+                          onUpdateSetting("gemini_model", e.target.value)
+                        }
+                        placeholder="gemini-2.5-flash"
+                        className="mt-1 w-full px-2 py-1 rounded bg-[#0f1011] border border-[#2a2e36] text-xs text-white font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+                <div className="text-[11px] text-[#62666d] leading-relaxed">
+                  「最新モデルを自動選択」は Gemini API
+                  のモデル一覧から常に最新のモデルを使用します。会話応答・自動実況・ブログ生成のすべてに適用されます。
+                </div>
+              </div>
               {/* モデル保存先（バックエンド契約に合わせて読み取り専用） */}
               <div className="p-3 rounded-[8px] bg-[#08090a] border border-[#23252a] flex flex-col gap-2.5">
                 <div className="flex items-center justify-between">
@@ -1748,7 +1839,10 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
               <span>
                 Target Channel:{" "}
                 <span className="text-[#e4f222] font-mono">
-                  #{String(settings.twitch_channel || settings.user_name || "Kota")}
+                  #
+                  {String(
+                    settings.twitch_channel || settings.user_name || "Kota",
+                  )}
                 </span>
               </span>
               {Boolean(settings.twitch_bot_username) && (
@@ -1808,7 +1902,8 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
             <label className="block text-[#8a8f98] mb-1 font-medium flex items-center justify-between">
               <span>Channel (配信チャンネル名)</span>
               <span className="text-[#62666d] text-[10px]">
-                未入力時は User Name ({String(settings.user_name || "Kota")}) を自動使用
+                未入力時は User Name ({String(settings.user_name || "Kota")})
+                を自動使用
               </span>
             </label>
             <input

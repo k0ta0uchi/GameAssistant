@@ -1192,11 +1192,11 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
               ? `Copy selected as JSON (${selectedFactIds.length})`
               : "Copy as JSON",
           onSelect: () => {
-            if (!selectedFactIds.includes(fact.fact_id)) {
+            if (selectedFactIds.includes(fact.fact_id)) {
+              void copySelectedSemanticAsJson();
+            } else {
               setSelectedFactIds([fact.fact_id]);
               void copySelectedSemanticAsJson([fact.fact_id]);
-            } else {
-              void copySelectedSemanticAsJson();
             }
           },
         },
@@ -1224,11 +1224,11 @@ const FactSummaryManager: React.FC<FactSummaryManagerProps> = ({ isOpen }) => {
             ? `Copy selected as JSON (${selectedSummaryIds.length})`
             : "Copy as JSON",
         onSelect: () => {
-          if (!selectedSummaryIds.includes(summary.summary_id)) {
+          if (selectedSummaryIds.includes(summary.summary_id)) {
+            void copySelectedSemanticAsJson();
+          } else {
             setSelectedSummaryIds([summary.summary_id]);
             void copySelectedSemanticAsJson([summary.summary_id]);
-          } else {
-            void copySelectedSemanticAsJson();
           }
         },
       },
@@ -2130,7 +2130,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   } | null>(null);
   const [backfillProgress, setBackfillProgress] =
     useState<MemoryBackfillProgress | null>(null);
+  const isGeneratingBlogRef = useRef(false);
   const [isGeneratingBlog, setIsGeneratingBlog] = useState<boolean>(false);
+  // B08: state 更新前の同一 tick 連打でも二重送信されないよう ref で抑止する。
   const [blogResult, setBlogResult] = useState<{
     filename: string;
     content: string;
@@ -2580,29 +2582,36 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
       return;
     }
 
+    if (isGeneratingBlogRef.current) return;
+    isGeneratingBlogRef.current = true;
     setIsGeneratingBlog(true);
+    // 失敗時に以前の成功記事を今回の結果と誤認させないため、先に結果を消す。
+    setBlogResult(null);
     try {
-      const res = await fetch(
-        "http://127.0.0.1:18080/api/memories/generate-blog",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ids: idsToGenerate }),
-        },
+      // 旧 18080 番 HTTP エンドポイントは現行 Tauri 実装に存在しないため
+      // Tauri IPC を使用する。バックエンドの Result::Err は理由の文字列で
+      // reject される。
+      const result = await invoke<{ filename: string; content: string }>(
+        "generate_blog_from_memories",
+        { ids: idsToGenerate },
       );
-      const data = await res.json();
-      if (data.success) {
-        setBlogResult({
-          filename: data.filename,
-          content: data.content,
-        });
-        showNotice("note プレイ日誌記事の生成が完了しました！");
-      } else {
-        showNotice(`ブログ生成エラー: ${data.error}`, "error");
-      }
+      setBlogResult({ filename: result.filename, content: result.content });
+      showNotice("note プレイ日誌記事の生成・保存が完了しました！");
     } catch (e) {
-      showNotice(`通信エラー: ${e}`, "error");
+      const reason =
+        typeof e === "string"
+          ? e
+          : e instanceof Error
+            ? e.message
+            : JSON.stringify(e);
+      showNotice(
+        /__TAURI_INTERNALS__/.test(reason)
+          ? "ブログ生成はTauriアプリ内で実行してください (ブラウザー単体では利用できません)"
+          : `ブログ生成エラー: ${reason}`,
+        "error",
+      );
     } finally {
+      isGeneratingBlogRef.current = false;
       setIsGeneratingBlog(false);
     }
   };
@@ -2654,11 +2663,11 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
             ? `Copy selected as JSON (${selectedIds.length})`
             : "Copy as JSON",
         onSelect: () => {
-          if (!selectedIds.includes(item.id)) {
+          if (selectedIds.includes(item.id)) {
+            void copySelectedAsJson();
+          } else {
             setSelectedIds([item.id]);
             void copySelectedAsJson([item.id]);
-          } else {
-            void copySelectedAsJson();
           }
         },
       },
@@ -2778,10 +2787,10 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
         Boolean(backfillProgress.reason)),
   );
   const backfillWarningText = backfillProgress
-      ? backfillWarningReasons.length > 0
-        ? backfillWarningReasons
-            .map(([reason, count]) => `${reason} (${count})`)
-            .join(", ")
+    ? backfillWarningReasons.length > 0
+      ? backfillWarningReasons
+          .map(([reason, count]) => `${reason} (${count})`)
+          .join(", ")
       : backfillProgress.reason ||
         backfillProgress.lastErrorReason ||
         "row failures"
@@ -3370,7 +3379,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                           title="Ctrl+C で選択したメモリを JSON としてコピー"
                         >
                           <Copy className="w-3.5 h-3.5 text-[#02b8cc]" />
-                          <span>Copy {selectedIds.length} as JSON (Ctrl+C)</span>
+                          <span>
+                            Copy {selectedIds.length} as JSON (Ctrl+C)
+                          </span>
                         </button>
 
                         <button
@@ -3532,7 +3543,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         {/* 1件選択時でもブログ生成が可能 */}
                         {!isCreatingNew && activeItem && (
                           <button
-                            onClick={() => void handleGenerateBlog()}
+                            onClick={() =>
+                              void handleGenerateBlog([activeItem.id])
+                            }
                             disabled={isGeneratingBlog}
                             className="w-full py-2 linear-btn-ghost border-[#e4f222]/30 hover:border-[#e4f222] text-[#e4f222] flex items-center justify-center gap-1.5 text-xs font-medium"
                           >
@@ -3553,7 +3566,9 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
                         {!isCreatingNew && activeItem && (
                           <button
                             type="button"
-                            onClick={() => void copySelectedAsJson([activeItem.id])}
+                            onClick={() =>
+                              void copySelectedAsJson([activeItem.id])
+                            }
                             className="w-full py-2 linear-btn-ghost flex items-center justify-center gap-1.5 text-xs font-medium hover:text-[#02b8cc] hover:border-[#02b8cc]/40"
                             title="Ctrl+C でこのメモリを JSON としてコピー"
                           >

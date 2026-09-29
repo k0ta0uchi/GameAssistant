@@ -526,7 +526,7 @@ async fn ai_generate(
     system_prompt: Option<String>,
     image_base64: Option<String>,
 ) -> Result<String, String> {
-    let model_name = model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
+    let model_name = model.unwrap_or_else(|| "latest".to_string());
     let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: prompt,
@@ -1183,7 +1183,7 @@ async fn session_process_input(
     tts_settings: Option<TtsSettings>,
 ) -> Result<String, String> {
     let brave_key = brave_api_key.unwrap_or_default();
-    let model = gemini_model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
+    let model = gemini_model.unwrap_or_else(|| "latest".to_string());
     let sys_prompt = system_prompt.unwrap_or_default();
     let tts_cfg = tts_settings.unwrap_or_default();
 
@@ -1210,12 +1210,35 @@ async fn session_generate_blog(
     gemini_model: Option<String>,
     blog_system_prompt: Option<String>,
 ) -> Result<String, String> {
-    let model = gemini_model.unwrap_or_else(|| "gemini-2.0-flash".to_string());
+    let model = gemini_model.unwrap_or_else(|| "latest".to_string());
     let prompt = blog_system_prompt.unwrap_or_default();
     state
         .session_mgr
         .generate_blog_article(&gemini_api_key, &model, &prompt)
         .await
+}
+
+/// 選択メモリーからのブログ生成 (trigger=selected_memories_blog)。
+/// 成功時は保存後のファイル名と記事本文を返す (旧 18080 HTTP経路の代替 IPC)。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GeneratedBlog {
+    pub filename: String,
+    pub content: String,
+}
+
+#[tauri::command]
+async fn generate_blog_from_memories(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<GeneratedBlog, String> {
+    let (filename, content) = state.session_mgr.generate_blog_from_memories(&ids).await?;
+    Ok(GeneratedBlog { filename, content })
+}
+
+/// 設定/環境の有効キーで利用可能な Gemini モデル一覧を返す (設定UIのモデル選択用)。
+#[tauri::command]
+async fn gemini_list_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state.session_mgr.list_gemini_models().await
 }
 
 #[tauri::command]
@@ -1434,6 +1457,8 @@ pub fn run() {
             session_get_events,
             session_process_input,
             session_generate_blog,
+            generate_blog_from_memories,
+            gemini_list_models,
             warmup_asr,
             restart_whisper,
             get_models_status,
