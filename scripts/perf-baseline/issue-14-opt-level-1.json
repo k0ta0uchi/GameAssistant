@@ -1,0 +1,133 @@
+{
+  "issue": 14,
+  "baseline_of": "perf/issue-14-dev-test-profile ([profile.dev.package.\"*\"] / [profile.test.package.\"*\"] opt-level = 1)",
+  "environment": {
+    "os": "Windows_NT",
+    "cargo": "cargo 1.94.0-nightly (6d1bd93c4 2026-01-10)",
+    "rustc": "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+    "cargo_build_jobs": "2",
+    "logical_cpus": "28",
+    "dependency_profile": "[profile.dev.package.\"*\"] / [profile.test.package.\"*\"] opt-level = 1",
+    "notes": "MSVC environment; measured on identical machine and CARGO_BUILD_JOBS=2 as main-395fd8e.json baseline"
+  },
+  "phases_seconds": {
+    "clean_build": 2551.7,
+    "test_compile_cold": 90.2,
+    "test_run_cold": 82.1,
+    "warm_build_steady_state": 0.87,
+    "test_compile_warm": 0.75,
+    "test_run_warm": 32.28,
+    "test_run_warm_initial": 32.28,
+    "test_run_warm_samples": [
+      35.76,
+      26.09,
+      29.33
+    ],
+    "test_run_warm_mean": 30.39
+  },
+  "phase_notes": {
+    "clean_build": "cargo clean -> cargo build --timings (full rebuild with opt-level=1 dependencies)",
+    "warm_build_steady_state": "steady-state no-op build on a fully warm target",
+    "test_run": "cargo test --lib total wall time (harness start + all 323 tests passed)"
+  },
+  "top_crates_clean_build": [
+    {
+      "seconds": 694.9,
+      "mode": "todo",
+      "unit": "lance 10.0.0"
+    },
+    {
+      "seconds": 254.3,
+      "mode": "todo",
+      "unit": "lance-index 10.0.0"
+    },
+    {
+      "seconds": 135.2,
+      "mode": "todo",
+      "unit": "datafusion 54.1.0"
+    },
+    {
+      "seconds": 127.2,
+      "mode": "todo",
+      "unit": "sqlparser 0.62.0"
+    },
+    {
+      "seconds": 125.6,
+      "mode": "todo",
+      "unit": "datafusion-functions-aggregate 54.1.0"
+    },
+    {
+      "seconds": 120.8,
+      "mode": "todo",
+      "unit": "lance-namespace-impls 10.0.0"
+    },
+    {
+      "seconds": 119.3,
+      "mode": "todo",
+      "unit": "lance-bitpacking 10.0.0"
+    },
+    {
+      "seconds": 117.7,
+      "mode": "todo",
+      "unit": "datafusion-expr 54.1.0"
+    },
+    {
+      "seconds": 115.2,
+      "mode": "todo",
+      "unit": "lancedb 0.37.1"
+    },
+    {
+      "seconds": 113.6,
+      "mode": "todo",
+      "unit": "datafusion-physical-plan 54.1.0"
+    },
+    {
+      "seconds": 104.8,
+      "mode": "todo",
+      "unit": "datafusion-functions-nested 54.1.0"
+    },
+    {
+      "seconds": 86.3,
+      "mode": "todo",
+      "unit": "datafusion-optimizer 54.1.0"
+    },
+    {
+      "seconds": 81.6,
+      "mode": "todo",
+      "unit": "arrow-ord 58.4.0"
+    },
+    {
+      "seconds": 81.5,
+      "mode": "todo",
+      "unit": "gameassistant 0.3.2"
+    },
+    {
+      "seconds": 75.6,
+      "mode": "todo",
+      "unit": "candle-core 0.8.4"
+    }
+  ],
+  "top_crates_test_compile_cold": [
+    {
+      "seconds": 82.6,
+      "mode": "todo",
+      "unit": "gameassistant 0.3.2"
+    }
+  ],
+  "provenance": {
+    "script": "scripts/measure-cargo-baseline.ps1",
+    "commands": [
+      "cargo clean --manifest-path src-tauri/Cargo.toml  (-Clean only)",
+      "cargo build --manifest-path src-tauri/Cargo.toml --timings",
+      "cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run --timings",
+      "cargo test --manifest-path src-tauri/Cargo.toml --lib"
+    ],
+    "execution": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\measure-cargo-baseline.ps1 (run from repo root; CARGO_BUILD_JOBS=2)",
+    "curated_from": [
+      "cold phases: scripts/perf-baseline/opt-level-1-20260930-084148/ (clean-build 2551.7s / test-compile-cold 90.2s / test-run-cold 82.1s)",
+      "warm phases: scripts/perf-baseline/opt-level-1-warm-20260930-093240/results.json (warm-build 0.87s / test-compile-warm 0.75s / test-run-warm 32.28s)"
+    ],
+    "warm_definition": "warm = rebuild using the existing target directory (no-op to partial). NOT a controlled-source-edit incremental rebuild benchmark.",
+    "comparability": "Measured under identical environment (CARGO_BUILD_JOBS=2, identical CPU/OS/Rust version) as scripts/perf-baseline/main-395fd8e.json"
+  }
+}

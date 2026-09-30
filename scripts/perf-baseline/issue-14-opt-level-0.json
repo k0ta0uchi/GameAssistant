@@ -1,0 +1,102 @@
+{
+  "issue": 14,
+  "baseline_of": "perf/issue-14-dev-test-profile (Cargo default / package overrides removed: opt-level = 0)",
+  "environment": {
+    "os": "Windows_NT",
+    "cargo": "cargo 1.94.0-nightly (6d1bd93c4 2026-01-10)",
+    "rustc": "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+    "cargo_build_jobs": "2",
+    "logical_cpus": "28",
+    "dependency_profile": "Cargo default (no package overrides; dev/test dependencies opt-level = 0)",
+    "notes": "MSVC environment; measured on identical machine and CARGO_BUILD_JOBS=2 as main-395fd8e.json baseline"
+  },
+  "phases_seconds": {
+    "clean_build": 798.91,
+    "test_compile_cold": 83.84,
+    "test_run_cold": 383.09,
+    "warm_build_steady_state": 462.48,
+    "test_compile_warm": 7.89,
+    "test_run_warm": 379.19
+  },
+  "phase_notes": {
+    "clean_build": "cargo clean -> cargo build --timings (full rebuild with opt-level=0 dependencies)",
+    "warm_build_steady_state": "rebuild on warm target; unoptimized dependency artifacts cause substantial link/analysis overhead (462.5s)",
+    "test_run": "cargo test --lib total wall time (harness start + all 323 tests passed; unoptimized LanceDB/Arrow queries run significantly slower ~6m20s)"
+  },
+  "top_crates_clean_build": [
+    {
+      "seconds": 161.8,
+      "mode": "todo",
+      "unit": "lance 10.0.0"
+    },
+    {
+      "seconds": 64.2,
+      "mode": "todo",
+      "unit": "gameassistant 0.3.2"
+    },
+    {
+      "seconds": 60.7,
+      "mode": "todo",
+      "unit": "datafusion 54.1.0"
+    },
+    {
+      "seconds": 59.8,
+      "mode": "todo",
+      "unit": "lance-index 10.0.0"
+    },
+    {
+      "seconds": 53.9,
+      "mode": "todo",
+      "unit": "lancedb 0.37.1"
+    },
+    {
+      "seconds": 46.2,
+      "mode": "todo",
+      "unit": "datafusion-catalog 54.1.0"
+    },
+    {
+      "seconds": 40.5,
+      "mode": "todo",
+      "unit": "lance-namespace-impls 10.0.0"
+    },
+    {
+      "seconds": 34.6,
+      "mode": "todo",
+      "unit": "lance-bitpacking 10.0.0"
+    },
+    {
+      "seconds": 23.4,
+      "mode": "todo",
+      "unit": "windows 0.61.3"
+    },
+    {
+      "seconds": 23.3,
+      "mode": "todo",
+      "unit": "windows 0.57.0"
+    },
+    {
+      "seconds": 23.0,
+      "mode": "todo",
+      "unit": "datafusion-physical-plan 54.1.0"
+    },
+    {
+      "seconds": 21.9,
+      "mode": "todo",
+      "unit": "datafusion-functions-aggregate 54.1.0"
+    }
+  ],
+  "provenance": {
+    "script": "scripts/measure-cargo-baseline.ps1",
+    "commands": [
+      "cargo clean --manifest-path src-tauri/Cargo.toml  (-Clean only)",
+      "cargo build --manifest-path src-tauri/Cargo.toml --timings",
+      "cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run --timings",
+      "cargo test --manifest-path src-tauri/Cargo.toml --lib"
+    ],
+    "execution": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\measure-cargo-baseline.ps1 -Label opt-level-0 -Clean (run from repo root; CARGO_BUILD_JOBS=2)",
+    "curated_from": [
+      "scripts/perf-baseline/opt-level-0-20260930-095700/results.json"
+    ],
+    "comparability": "Measured under identical environment (CARGO_BUILD_JOBS=2, identical CPU/OS/Rust version) as scripts/perf-baseline/main-395fd8e.json and issue-14-opt-level-1.json"
+  }
+}
