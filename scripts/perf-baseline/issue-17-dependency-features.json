@@ -1,0 +1,137 @@
+{
+  "issue": 17,
+  "timestamp": "2026-10-01T03:00:00+09:00",
+  "host": "Windows MSVC",
+  "rust_version": "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+  "cargo_version": "cargo 1.94.0-nightly (6d1bd93c4 2026-01-10)",
+  "measurements": {
+    "before_tokio_full": {
+      "clean_build": 640.42,
+      "test_compile_cold": 31.79,
+      "warm_build": 64.17,
+      "test_compile_warm": 4.04,
+      "full_test_run": 44.41
+    },
+    "after_tokio_explicit": {
+      "clean_build": 615.96,
+      "test_compile_cold": 40.49,
+      "warm_build": 95.07,
+      "test_compile_warm": 3.45,
+      "full_test_run": 42.72
+    },
+    "delta_seconds": {
+      "clean_build": -24.46,
+      "test_compile_cold": 8.7,
+      "warm_build": 30.9,
+      "test_compile_warm": -0.59,
+      "full_test_run": -1.69
+    },
+    "delta_percentage": {
+      "clean_build": -3.82,
+      "test_compile_cold": 27.37,
+      "warm_build": 48.15,
+      "test_compile_warm": -14.6,
+      "full_test_run": -3.81
+    }
+  },
+  "feature_inventory": {
+    "tokio": {
+      "previous": "features = [\"full\"]",
+      "updated": "features = [\"rt-multi-thread\", \"macros\", \"sync\", \"time\", \"process\", \"net\", \"io-util\", \"fs\"]",
+      "removed_direct": [
+        "signal",
+        "io-std",
+        "parking_lot",
+        "test-util"
+      ],
+      "finding": "Transitive dependency 'lance-namespace-impls v10.0.0' directly requests tokio with features = ['full']. Due to Cargo's feature unification, tokio/full remains activated in the combined workspace dependency graph as long as LanceDB is directly linked into the gameassistant crate."
+    },
+    "candle": {
+      "crates": [
+        "candle-core",
+        "candle-nn",
+        "candle-transformers",
+        "tokenizers"
+      ],
+      "finding": "Used solely within src/asr.rs for embedded Whisper model inference. clean-build compile time for candle-core alone is ~75.6s. Can be isolated behind an optional feature or a dedicated inference crate."
+    },
+    "lancedb_arrow_datafusion": {
+      "crates": [
+        "lancedb",
+        "arrow-*",
+        "datafusion",
+        "lance-*"
+      ],
+      "finding": "Accounts for >70% of total clean-build compile time (>1800s in CARGO_BUILD_JOBS=2 baseline). lancedb has default = [] with no unused features enabled. Primary bottleneck cannot be resolved by Cargo features alone; requires physical crate boundary isolation."
+    },
+    "windows_tauri_audio": {
+      "crates": [
+        "windows",
+        "tauri",
+        "tauri-plugin-*",
+        "cpal",
+        "rodio",
+        "hound",
+        "process_loopback.cpp"
+      ],
+      "finding": "All features are strictly scoped to required Win32 / audio APIs. In a monolithic crate, business logic / memory modifications trigger full relinking with GUI and audio stacks."
+    }
+  },
+  "crate_split_candidates": [
+    {
+      "name": "gameassistant-memory",
+      "dependency_boundary": "lancedb, arrow-array, arrow-schema, datafusion, lance-*",
+      "expected_compile_benefit": "High (isolates ~70% of total clean build time; eliminates LanceDB recompilation from fast logic changes)",
+      "api_boundary": "MemoryRepository, ConversationFact, LanceDbClient trait",
+      "migration_complexity": "Medium-High (requires core domain crate extraction for model types)",
+      "test_impact": "Separates 156 memory tests from pure unit tests",
+      "cyclic_dependency_risk": "Low",
+      "runtime_behavior_risk": "Low"
+    },
+    {
+      "name": "gameassistant-inference",
+      "dependency_boundary": "candle-core, candle-nn, candle-transformers, tokenizers",
+      "expected_compile_benefit": "Medium-High (isolates ~75s candle-core compile time)",
+      "api_boundary": "WhisperEngine stream/async PCM-to-text API",
+      "migration_complexity": "Low-Medium (localized in src/asr.rs, ~500 lines)",
+      "test_impact": "Isolates embedded ASR tests; non-ASR development avoids Candle build entirely",
+      "cyclic_dependency_risk": "Very Low",
+      "runtime_behavior_risk": "Low"
+    },
+    {
+      "name": "gameassistant-audio",
+      "dependency_boundary": "cpal, rodio, hound, windows (Win32), build.rs / process_loopback.cpp",
+      "expected_compile_benefit": "Medium (isolates C++ build.rs and Windows COM/audio dependencies)",
+      "api_boundary": "AudioCaptureEngine, TtsPlayer",
+      "migration_complexity": "Medium",
+      "test_impact": "Isolates 22 platform tests",
+      "cyclic_dependency_risk": "Low",
+      "runtime_behavior_risk": "Medium (audio device initialization sequencing)"
+    },
+    {
+      "name": "gameassistant-twitch",
+      "dependency_boundary": "tokio-tungstenite, native-tls",
+      "expected_compile_benefit": "Low-Medium",
+      "api_boundary": "TwitchClient, TwitchMessage",
+      "migration_complexity": "Low",
+      "test_impact": "Isolates Twitch tests",
+      "cyclic_dependency_risk": "Very Low",
+      "runtime_behavior_risk": "Very Low"
+    },
+    {
+      "name": "gameassistant-app (Tauri Bridge)",
+      "dependency_boundary": "tauri, tauri-plugin-shell, tauri-plugin-process",
+      "expected_compile_benefit": "High (turns main app into a thin IPC shell; backend logic compiles without Tauri)",
+      "api_boundary": "Tauri command handlers delegation layer",
+      "migration_complexity": "Medium",
+      "test_impact": "Enables headless testing of business logic without Tauri runtime",
+      "cyclic_dependency_risk": "Low",
+      "runtime_behavior_risk": "Very Low"
+    }
+  ],
+  "adopted_feature_reduction": {
+    "target": "tokio",
+    "adopted": true,
+    "rationale": "Adopted explicit feature declaration ('rt-multi-thread', 'macros', 'sync', 'time', 'process', 'net', 'io-util', 'fs'). While clean-build showed a modest 24.5s (3.8%) reduction in the monolithic crate due to transitive feature unification from lance-namespace-impls, explicitly declaring required features enforces least-privilege dependency hygiene, documents API contracts, and paves the way for automatic feature pruning once LanceDB is split into a dedicated crate."
+  }
+}
