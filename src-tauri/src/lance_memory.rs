@@ -3963,6 +3963,76 @@ mod tests {
         cleanup(&root);
     }
 
+    #[tokio::test]
+    async fn metadata_patch_aba_edits_are_distinct_journal_operations() {
+        let root = unique_test_root("metadata-patch-aba");
+        insert_memory_batch(&root, vec![item("aba-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // A → B → A: 同じ状態へ戻す編集も独立した journal 操作として記録される
+        let repository = MemoryRepository::open(&root)
+            .await
+            .expect("open repository");
+        let patch_a = serde_json::json!({
+            "entity_id": "aba-1",
+            "memory_type": "A",
+            "source": "User",
+            "user_id": "tester",
+        });
+        let patch_b = serde_json::json!({
+            "entity_id": "aba-1",
+            "memory_type": "B",
+            "source": "User",
+            "user_id": "tester",
+        });
+        repository
+            .append_metadata_patch("aba-1", patch_a.clone())
+            .await
+            .expect("patch A must commit");
+        repository
+            .append_metadata_patch("aba-1", patch_b)
+            .await
+            .expect("patch B must commit");
+        repository
+            .append_metadata_patch("aba-1", patch_a)
+            .await
+            .expect("second A patch must commit as a new operation");
+        drop(repository);
+
+        // projection はシード状態のまま (クラッシュ直後と同等)。repair は
+        // journal の最後の patch (A) を適用するため B への巻き戻りは起きない。
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert!(repaired >= 1, "repair must apply the last patch");
+        let row = get_memory_by_id(&root, "aba-1")
+            .await
+            .expect("query after repair")
+            .expect("row must exist");
+        assert_eq!(row.memory_type, "A", "the last A patch must win");
+
+        // 3 つの metadata_patch 操作が journal に記録されていること
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let raw = std::fs::read_to_string(paths.journal()).expect("read journal");
+        let journaled = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| {
+                record
+                    .get("operation_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("metadata_patch")
+            })
+            .count();
+        assert_eq!(
+            journaled, 3,
+            "A→B→A must produce three distinct journal operations"
+        );
+        cleanup(&root);
+    }
+
     async fn read_row_vector(root: &std::path::Path, id: &str) -> Option<Vec<f32>> {
         let db = get_or_create_db(root).await.ok()?;
         let table = get_or_create_memories_table(&db, root).await.ok()?;

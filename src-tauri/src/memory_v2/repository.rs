@@ -1295,12 +1295,25 @@ impl MemoryRepository {
         patch: serde_json::Value,
     ) -> StoreResult<()> {
         let canonical_id = Self::canonical_event_id(entity_id);
+        // MetadataPatch は「状態」ではなく「編集操作」である。operation_id は
+        // payload を含む決定的ハッシュのため、同じ状態へ戻す編集 (A→B→A) を
+        // そのまま journal に書くと過去操作と同じ operation_id になり、
+        // commit_operation 側で retry 判定されて最後の操作が journal に残らず、
+        // repair/replay 時に直前の状態へ巻き戻る。各編集呼び出しに一意な
+        // attempt_id (UUID) を注入し、編集ごとに独立した操作として識別する。
+        let mut attempt = patch;
+        if let Some(object) = attempt.as_object_mut() {
+            object.insert(
+                "attempt_id".to_string(),
+                serde_json::Value::String(Uuid::new_v4().to_string()),
+            );
+        }
         let envelope = OperationEnvelope::new(
             OperationKind::MetadataPatch,
             canonical_id,
             "1970-01-01T00:00:00Z",
             None,
-            patch,
+            attempt,
         )
         .map_err(memory_error)?;
         self.commit_operation(envelope).await?;
