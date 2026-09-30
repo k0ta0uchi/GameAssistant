@@ -3349,6 +3349,14 @@ async fn repair_metadata_projection_with(
     Ok(applied)
 }
 
+/// Serializes the whole metadata-update logical transaction (repair →
+/// journal batch commit → compatibility projection UPDATE) per process.
+/// The journal write lock alone only covers the commit; without this lock a
+/// concurrent bulk update could interleave the projection UPDATEs out of
+/// journal order and leave the projection older than the journal (frontend
+/// の二重送信ガードでは複数 window / 別経路を含む backend 整合性は保証できない)。
+static METADATA_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
     if items.is_empty() {
         return Err("更新対象のメモリーがありません".to_string());
@@ -3363,6 +3371,11 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
             return Err(format!("重複したIDが含まれています: {id}"));
         }
     }
+
+    // 並行 bulk update の直列化: repair → journal batch commit → projection
+    // UPDATE の論理トランザクション全体を排他し、journal の順序と projection
+    // の最終状態の逆転を防ぐ。
+    let _update_guard = METADATA_UPDATE_LOCK.lock().await;
 
     let db = get_or_create_db(root_dir).await?;
     let table = get_or_create_memories_table(&db, root_dir).await?;
@@ -4139,6 +4152,50 @@ mod tests {
             batch_commits,
             before_commits + 1,
             "bulk patches must share ONE journal batch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_bulk_updates_keep_projection_matching_journal() {
+        let root = unique_test_root("metadata-patch-concurrent");
+        insert_memory_batch(&root, vec![item("cc-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // 2 つの bulk update を並行実行 (current-thread runtime 上で await 点で
+        // interleave する)。論理トランザクション全体の直列化により、完了後の
+        // projection は journal 上の最後の committed patch と一致しなければ
+        // ならない。
+        let root_a = root.clone();
+        let task_a = tokio::spawn(async move {
+            update_memories_bulk(&root_a, &[item("cc-1", "A", "本文")]).await
+        });
+        let root_b = root.clone();
+        let task_b = tokio::spawn(async move {
+            update_memories_bulk(&root_b, &[item("cc-1", "B", "本文")]).await
+        });
+        task_a.await.expect("task a").expect("bulk a");
+        task_b.await.expect("task b").expect("bulk b");
+
+        let repository = MemoryRepository::open(&root).await.expect("reopen");
+        let patches = repository
+            .read_committed_metadata_patches()
+            .await
+            .expect("read committed patches");
+        let last_memory_type = patches
+            .last()
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(|patch| patch.get("memory_type"))
+            .and_then(serde_json::Value::as_str)
+            .expect("last committed patch memory_type");
+        let row = get_memory_by_id(&root, "cc-1")
+            .await
+            .expect("query row")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, last_memory_type,
+            "projection must match the last committed journal patch"
         );
         cleanup(&root);
     }
