@@ -1286,6 +1286,27 @@ impl MemoryRepository {
     /// Journal and apply a redaction.  Redaction is append-only in the
     /// journal, while the three materialized stores remove the entity on
     /// replay; this keeps a deletion durable without mutating the journal.
+    /// Display metadata update (metadata_patch) operation to the journal.
+    /// The authoritative raw event content is unchanged; only the
+    /// compatibility projection's display metadata is patched by the caller.
+    pub async fn append_metadata_patch(
+        &self,
+        entity_id: &str,
+        patch: serde_json::Value,
+    ) -> StoreResult<()> {
+        let canonical_id = Self::canonical_event_id(entity_id);
+        let envelope = OperationEnvelope::new(
+            OperationKind::MetadataPatch,
+            canonical_id,
+            "1970-01-01T00:00:00Z",
+            None,
+            patch,
+        )
+        .map_err(memory_error)?;
+        self.commit_operation(envelope).await?;
+        Ok(())
+    }
+
     pub async fn append_redaction(&self, entity_id: &str) -> StoreResult<bool> {
         let entity_id = stable_uuid(entity_id).to_string();
         let envelope = OperationEnvelope::new(
@@ -2022,6 +2043,36 @@ impl MemoryRepository {
                         .execute()
                         .await
                         .map_err(|error| error.to_string())?;
+                }
+            }
+            OperationKind::MetadataPatch => {
+                // The display metadata patch updates the raw event's content
+                // column in the materialized table.
+                let entity_id = envelope
+                    .payload()
+                    .get("entity_id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| "metadata patch entity_id missing".to_string())?;
+                let content = envelope
+                    .payload()
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|value| value.replace(char::from_u32(39).expect("valid char"), "''"));
+                let table = open_table(self.paths.raw_events(), RAW_TABLE).await?;
+                let predicate = format!("event_id = '{}'", entity_id);
+                let mut builder = table.update().only_if(predicate);
+                if let Some(escaped) = &content {
+                    builder = builder.column("content", format!("'{}'", escaped));
+                }
+                let result = builder
+                    .execute()
+                    .await
+                    .map_err(|error| format!("Apply metadata patch error: {}", error))?;
+                if result.rows_updated == 0 {
+                    return Err(format!(
+                        "metadata patch target not found: {}",
+                        envelope.entity_id()
+                    ));
                 }
             }
             OperationKind::Fact => {

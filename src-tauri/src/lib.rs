@@ -377,7 +377,7 @@ async fn update_lance_memories_bulk(
     state: State<'_, AppState>,
     items: Vec<MemoryItem>,
 ) -> Result<usize, String> {
-    lance_memory::update_memories_bulk(&state.root_dir, &items, None).await
+    lance_memory::update_memories_bulk(&state.root_dir, &items).await
 }
 
 #[tauri::command]

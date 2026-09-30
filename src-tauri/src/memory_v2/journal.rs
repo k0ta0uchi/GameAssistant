@@ -1887,6 +1887,7 @@ fn validate_record_frame(
                 "redaction" => OperationKind::Redaction,
                 "embedding" => OperationKind::Embedding,
                 "summary_status" => OperationKind::SummaryStatus,
+                "metadata_patch" => OperationKind::MetadataPatch,
                 _ => return Err(malformed("unknown operation kind")),
             };
             verify_operation_payload(operation_id, operation_kind, payload)?;
@@ -2107,6 +2108,7 @@ fn parse_record(line: &str, line_number: usize) -> Result<JournalRecord, Journal
             "redaction" => OperationKind::Redaction,
             "embedding" => OperationKind::Embedding,
             "summary_status" => OperationKind::SummaryStatus,
+            "metadata_patch" => OperationKind::MetadataPatch,
             _ => {
                 return Err(JournalError::MalformedCompleteLine {
                     line: line_number,

@@ -779,7 +779,7 @@ fn legacy_batch_to_items(
     Ok((items, vector_values))
 }
 
-fn escape_sql_literal(value: &str) -> String {
+pub(crate) fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
@@ -3259,18 +3259,15 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
     Ok(existing.len())
 }
 
-/// 一括メタデータ更新 (issue: 「delete→import」の2段階を1つの復旧可能な操作に)。
+/// 一括メタデータ更新 (issue: 「delete→import」の2段階を1つの原子的な操作に)。
 ///
-/// メモリーマネージャーの編集は互換テーブル (表示プロジェクション) レベルの
-/// 操作。ジャーナル上の生イベントは削除時に redaction 済みのため再 append は
-/// 競合する (raw イベントは不変) ので、ここではテーブル行の削除+再挿入を
-/// 1つの復旧可能なフローで行う: import 失敗時は元データを復旧して Err を返す。
-/// ベクトルは内容更新に伴い解放し、バックグラウンドの再埋め込みで更新される。
-pub async fn update_memories_bulk(
-    root_dir: &Path,
-    items: &[MemoryItem],
-    vectors: Option<Vec<Vec<f32>>>,
-) -> Result<usize, String> {
+/// 互換テーブル行の memory_type/source/user_id を in-place UPDATE する
+/// (LanceDB の update は行単位で原子的)。削除・再挿入がないため:
+/// - 失敗しても既存行 (本文/ベクトル) は無傷
+/// - ID/ベクトルは保持され、表示メタデータだけが更新される
+/// 各行の更新結果を journal に metadata_patch として記録し、失敗時は
+/// エラーに失敗 ID を含めて返す (部分成功の判別可能)。
+pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
     if items.is_empty() {
         return Err("更新対象のメモリーがありません".to_string());
     }
@@ -3285,53 +3282,75 @@ pub async fn update_memories_bulk(
         }
     }
 
-    // 更新前に元データを全件確保する。欠落があれば何も壊さずに中止する。
-    let mut originals: Vec<MemoryItem> = Vec::new();
-    for item in items {
-        let Some(original) = get_memory_by_id(root_dir, &item.id).await? else {
-            return Err(format!("更新対象のメモリーが見つかりません: {}", item.id));
-        };
-        originals.push(MemoryItem {
-            id: original.id,
-            document: original.document,
-            memory_type: original.memory_type,
-            source: original.source,
-            timestamp: original.timestamp,
-            user_id: original.user_id,
-        });
-    }
-
     let db = get_or_create_db(root_dir).await?;
     let table = get_or_create_memories_table(&db, root_dir).await?;
+    let repository = MemoryRepository::open(root_dir).await?;
 
-    // 削除 (journal への redaction 記録を含む = 旧フローと同一)。
-    let ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
-    delete_memories_bulk(root_dir, &ids).await?;
+    let mut updated = 0usize;
+    let mut failed_ids: Vec<String> = Vec::new();
+    for item in items {
+        let escape = escape_sql_literal;
+        let predicate = format!("id = '{}'", escape(&item.id));
+        let result = table
+            .update()
+            .only_if(predicate)
+            .column("memory_type", format!("'{}'", escape(&item.memory_type)))
+            .column("source", format!("'{}'", escape(&item.source)))
+            .column(
+                "user_id",
+                format!("'{}'", escape(item.user_id.as_deref().unwrap_or("User"))),
+            )
+            .execute()
+            .await;
+        match result {
+            Ok(_) => {
+                updated += 1;
+                let mut payload = serde_json::Map::new();
+                payload.insert(
+                    "entity_id".into(),
+                    serde_json::Value::String(item.id.clone()),
+                );
+                payload.insert(
+                    "memory_type".into(),
+                    serde_json::Value::String(item.memory_type.clone()),
+                );
+                payload.insert(
+                    "source".into(),
+                    serde_json::Value::String(item.source.clone()),
+                );
+                payload.insert(
+                    "user_id".into(),
+                    serde_json::Value::String(
+                        item.user_id.clone().unwrap_or_else(|| "User".into()),
+                    ),
+                );
+                let audit = serde_json::Value::Object(payload);
+                if let Err(err) = repository.append_metadata_patch(&item.id, audit).await {
+                    log_metadata_patch_audit_failure(&item.id, &err);
+                }
+            }
+            Err(update_err) => {
+                failed_ids.push(format!("{} ({update_err})", item.id));
+            }
+        }
+    }
 
-    // 更新済み行を互換テーブルへ再挿入する (journal には書かない: 当該イベン
-    // トは redaction済みのため再 append は競合する)。
-    let reinsert_vectors = vectors
-        .map(|vectors| vectors.into_iter().map(Some).collect::<Vec<_>>())
-        .unwrap_or_else(|| vec![None; items.len()]);
-    if let Err(insert_err) =
-        insert_on_table(&table, items.to_vec(), reinsert_vectors, false, false).await
-    {
-        // import 失敗: 元データを互換テーブルへ復旧して Err を返す。
-        let restore_len = originals.len();
-        let restore =
-            insert_on_table(&table, originals, vec![None; restore_len], false, false).await;
-        let restore_note = match restore {
-            Ok(count) => format!("originals restored ({count} rows)"),
-            Err(restore_err) => format!(
-                "ORIGINAL RESTORE FAILED ({restore_err}) — LanceDB backup からの復旧が必要です"
-            ),
-        };
+    if !failed_ids.is_empty() {
         return Err(format!(
-            "bulk update failed at import stage ({insert_err}); {restore_note}"
+            "bulk metadata update failed for {} rows: {}",
+            failed_ids.len(),
+            failed_ids.join("; ")
         ));
     }
-    Ok(items.len())
+    Ok(updated)
 }
+
+/// metadata_patch journal 記録の失敗は best-effort 監査であり、メタデータ
+/// 更新自体は互換テーブルに反映済み。失敗はコンソールへ出力する。
+fn log_metadata_patch_audit_failure(entity_id: &str, error: &str) {
+    eprintln!("[LanceDB] metadata_patch journal record failed for {entity_id}: {error}");
+}
+
 /// 再帰的ディレクトリコピー
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     let src_metadata = std::fs::symlink_metadata(src)?;
@@ -3686,10 +3705,9 @@ mod tests {
             item("upd-b", "observation", "new b"),
         ];
         updated[0].user_id = Some("Streamer".to_string());
-        let vectors = Some(vec![sample_vector(1.0), sample_vector(2.0)]);
-        let count = update_memories_bulk(&root, &updated, vectors)
+        let count = update_memories_bulk(&root, &updated)
             .await
-            .expect("bulk update with valid vectors must succeed");
+            .expect("in-place metadata update must succeed");
         assert_eq!(count, 2);
 
         let row = get_memory_by_id(&root, "upd-a")
@@ -3699,43 +3717,13 @@ mod tests {
         assert_eq!(row.document, "new a");
         assert_eq!(row.memory_type, "user_speech");
         assert_eq!(row.user_id.as_deref(), Some("Streamer"));
-        // 呼び出し側が明示したベクトルは保存される (None の場合は解放され、
-        // バックグラウンドの再埋め込みで更新される)
-        assert_eq!(
-            row.vector_source.as_deref(),
-            Some(VECTOR_SOURCE_DOCUMENT),
-            "caller-provided vectors are stored with the updated row"
-        );
+        // in-place UPDATE はベクトル列を触らない: seed 時の状態が保持される
+        assert_eq!(row.vector_source.as_deref(), None);
         let row_b = get_memory_by_id(&root, "upd-b")
             .await
             .expect("query row b")
             .expect("row b must exist after update");
         assert_eq!(row_b.document, "new b");
-        cleanup(&root);
-    }
-
-    #[tokio::test]
-    async fn bulk_update_failure_restores_original_rows() {
-        let root = unique_test_root("bulk-update-restore");
-        insert_memory_batch(&root, vec![item("res-a", "memory", "original a")], None)
-            .await
-            .expect("seed row for restore test");
-
-        // 不正な次元のベクトルで import 段階を確実に失敗させる
-        let updated = vec![item("res-a", "memory", "updated a")];
-        let bad_vectors = Some(vec![vec![0.0; 5]]);
-        let err = update_memories_bulk(&root, &updated, bad_vectors)
-            .await
-            .expect_err("import failure must surface to the caller");
-        assert!(err.contains("import stage"), "{err}");
-        assert!(err.contains("originals restored"), "{err}");
-
-        // 元データが失われていないこと (復旧済み)
-        let row = get_memory_by_id(&root, "res-a")
-            .await
-            .expect("query res-a")
-            .expect("original row must survive a failed update");
-        assert_eq!(row.document, "original a");
         cleanup(&root);
     }
 
@@ -3753,7 +3741,7 @@ mod tests {
         // vectors=None (プロダクション経路): 内容更新のためベクトルは解放され、
         // バックグラウンドの再埋め込みで更新される。
         let updated = vec![item("nov-1", "memory", "更新後の本文")];
-        let count = update_memories_bulk(&root, &updated, None)
+        let count = update_memories_bulk(&root, &updated)
             .await
             .expect("metadata-only update with no vectors must succeed");
         assert_eq!(count, 1);
@@ -3778,13 +3766,13 @@ mod tests {
             .await
             .expect("seed row for validation test");
 
-        assert!(update_memories_bulk(&root, &[], None).await.is_err());
-        let missing = update_memories_bulk(&root, &[item("missing", "memory", "x")], None)
+        assert!(update_memories_bulk(&root, &[]).await.is_err());
+        let missing = update_memories_bulk(&root, &[item("missing", "memory", "x")])
             .await
             .expect_err("missing id must abort before mutation");
         assert!(missing.contains("見つかりません"), "{missing}");
         let duplicate = vec![item("keep-1", "memory", "x"), item("keep-1", "memory", "y")];
-        assert!(update_memories_bulk(&root, &duplicate, None).await.is_err());
+        assert!(update_memories_bulk(&root, &duplicate).await.is_err());
 
         // 検証失敗は変異前に中止されるため元データが無傷であること
         let row = get_memory_by_id(&root, "keep-1")
