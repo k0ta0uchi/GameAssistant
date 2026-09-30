@@ -3286,52 +3286,80 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
     let table = get_or_create_memories_table(&db, root_dir).await?;
     let repository = MemoryRepository::open(root_dir).await?;
 
+    // 事前存在確認: ジャーナル・互換テーブルのどちらにも一切の変更を加える
+    // 前に全 ID の存在を検証し、欠落 ID はバッチ全体を中断する。
+    for item in items {
+        let predicate = format!("id = '{}'", escape_sql_literal(&item.id));
+        let mut stream = table
+            .query()
+            .only_if(predicate)
+            .execute()
+            .await
+            .map_err(|error| format!("メモリー存在確認に失敗しました ({}): {error}", item.id))?;
+        let mut found = false;
+        while let Some(batch) = stream.try_next().await.map_err(|error| {
+            format!(
+                "メモリー存在確認の読み取りに失敗しました ({}): {error}",
+                item.id
+            )
+        })? {
+            if batch.num_rows() > 0 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("更新対象のメモリーが見つかりません: {}", item.id));
+        }
+    }
+
+    // フェーズ 1: ジャーナル先行。メタデータ編集は journal 操作
+    // (MetadataPatch) として恒久記録し、記録に失敗した場合は互換テーブルに
+    // 触れる前にバッチ全体を失敗させる。ジャーナルコミットの成功が更新成功
+    // の前提条件であり、クラッシュ時もジャーナルから状態を復元できる。
+    for item in items {
+        let payload = serde_json::json!({
+            "entity_id": item.id,
+            "memory_type": item.memory_type,
+            "source": item.source,
+            "user_id": item.user_id.clone().unwrap_or_else(|| "User".to_string()),
+        });
+        repository
+            .append_metadata_patch(&item.id, payload)
+            .await
+            .map_err(|error| {
+                format!("メタデータ更新の記録に失敗しました ({}): {error}", item.id)
+            })?;
+    }
+
+    // フェーズ 2: 互換テーブルへの in-place UPDATE。memory_type / source /
+    // user_id 列のみを更新し、document / vector / vector_source 列は一切
+    // 変更しないため既存ベクトルは保持される。
     let mut updated = 0usize;
     let mut failed_ids: Vec<String> = Vec::new();
     for item in items {
-        let escape = escape_sql_literal;
-        let predicate = format!("id = '{}'", escape(&item.id));
+        let predicate = format!("id = '{}'", escape_sql_literal(&item.id));
         let result = table
             .update()
             .only_if(predicate)
-            .column("memory_type", format!("'{}'", escape(&item.memory_type)))
-            .column("source", format!("'{}'", escape(&item.source)))
+            .column(
+                "memory_type",
+                format!("'{}'", escape_sql_literal(&item.memory_type)),
+            )
+            .column("source", format!("'{}'", escape_sql_literal(&item.source)))
             .column(
                 "user_id",
-                format!("'{}'", escape(item.user_id.as_deref().unwrap_or("User"))),
+                format!(
+                    "'{}'",
+                    escape_sql_literal(item.user_id.as_deref().unwrap_or("User"))
+                ),
             )
             .execute()
             .await;
         match result {
-            Ok(_) => {
-                updated += 1;
-                let mut payload = serde_json::Map::new();
-                payload.insert(
-                    "entity_id".into(),
-                    serde_json::Value::String(item.id.clone()),
-                );
-                payload.insert(
-                    "memory_type".into(),
-                    serde_json::Value::String(item.memory_type.clone()),
-                );
-                payload.insert(
-                    "source".into(),
-                    serde_json::Value::String(item.source.clone()),
-                );
-                payload.insert(
-                    "user_id".into(),
-                    serde_json::Value::String(
-                        item.user_id.clone().unwrap_or_else(|| "User".into()),
-                    ),
-                );
-                let audit = serde_json::Value::Object(payload);
-                if let Err(err) = repository.append_metadata_patch(&item.id, audit).await {
-                    log_metadata_patch_audit_failure(&item.id, &err);
-                }
-            }
-            Err(update_err) => {
-                failed_ids.push(format!("{} ({update_err})", item.id));
-            }
+            Ok(result) if result.rows_updated > 0 => updated += 1,
+            Ok(_) => failed_ids.push(format!("{} (not found)", item.id)),
+            Err(update_err) => failed_ids.push(format!("{} ({update_err})", item.id)),
         }
     }
 
@@ -3347,9 +3375,6 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
 
 /// metadata_patch journal 記録の失敗は best-effort 監査であり、メタデータ
 /// 更新自体は互換テーブルに反映済み。失敗はコンソールへ出力する。
-fn log_metadata_patch_audit_failure(entity_id: &str, error: &str) {
-    eprintln!("[LanceDB] metadata_patch journal record failed for {entity_id}: {error}");
-}
 
 /// 再帰的ディレクトリコピー
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -3687,7 +3712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_update_replaces_document_and_metadata() {
+    async fn bulk_update_updates_metadata_and_preserves_document_and_vector() {
         let root = unique_test_root("bulk-update-ok");
         insert_memory_batch(
             &root,
@@ -3695,14 +3720,14 @@ mod tests {
                 item("upd-a", "memory", "old a"),
                 item("upd-b", "memory", "old b"),
             ],
-            None,
+            Some(vec![sample_vector(1.0), sample_vector(2.0)]),
         )
         .await
         .expect("seed rows for bulk update");
 
         let mut updated = vec![
-            item("upd-a", "user_speech", "new a"),
-            item("upd-b", "observation", "new b"),
+            item("upd-a", "user_speech", "old a"),
+            item("upd-b", "observation", "old b"),
         ];
         updated[0].user_id = Some("Streamer".to_string());
         let count = update_memories_bulk(&root, &updated)
@@ -3714,22 +3739,30 @@ mod tests {
             .await
             .expect("query row a")
             .expect("row a must exist after update");
-        assert_eq!(row.document, "new a");
+        // in-place UPDATE: document とベクトルは不変、表示メタデータのみ更新
+        assert_eq!(row.document, "old a");
         assert_eq!(row.memory_type, "user_speech");
         assert_eq!(row.user_id.as_deref(), Some("Streamer"));
-        // in-place UPDATE はベクトル列を触らない: seed 時の状態が保持される
-        assert_eq!(row.vector_source.as_deref(), None);
+        assert_eq!(
+            read_row_vector(&root, "upd-a").await,
+            Some(sample_vector(1.0))
+        );
         let row_b = get_memory_by_id(&root, "upd-b")
             .await
             .expect("query row b")
             .expect("row b must exist after update");
-        assert_eq!(row_b.document, "new b");
+        assert_eq!(row_b.document, "old b");
+        assert_eq!(row_b.memory_type, "observation");
+        assert_eq!(
+            read_row_vector(&root, "upd-b").await,
+            Some(sample_vector(2.0))
+        );
         cleanup(&root);
     }
 
     #[tokio::test]
-    async fn bulk_update_without_vectors_clears_vector_for_background_reembed() {
-        let root = unique_test_root("bulk-update-no-vectors");
+    async fn bulk_update_preserves_existing_vector() {
+        let root = unique_test_root("bulk-update-preserve-vector");
         insert_memory_batch(
             &root,
             vec![item("nov-1", "user_speech", "元の本文")],
@@ -3738,25 +3771,75 @@ mod tests {
         .await
         .expect("seed row with document vector");
 
-        // vectors=None (プロダクション経路): 内容更新のためベクトルは解放され、
-        // バックグラウンドの再埋め込みで更新される。
-        let updated = vec![item("nov-1", "memory", "更新後の本文")];
+        let before = get_memory_by_id(&root, "nov-1")
+            .await
+            .expect("query nov-1 before update")
+            .expect("seeded row must exist");
+
+        // vectors=None (プロダクション経路): metadata-only の in-place UPDATE
+        // では既存ベクトル・vector_source は保持される。
+        let updated = vec![item("nov-1", "memory", "元の本文")];
         let count = update_memories_bulk(&root, &updated)
             .await
-            .expect("metadata-only update with no vectors must succeed");
+            .expect("metadata-only update must succeed");
         assert_eq!(count, 1);
 
         let row = get_memory_by_id(&root, "nov-1")
             .await
             .expect("query nov-1")
             .expect("row must exist after update");
-        assert_eq!(row.document, "更新後の本文");
+        assert_eq!(row.document, "元の本文");
+        assert_eq!(row.memory_type, "memory");
+        assert_eq!(row.vector_source, before.vector_source);
         assert_eq!(
-            row.vector_source.as_deref(),
-            Some(VECTOR_SOURCE_NONE),
-            "vector must be cleared (none) for background re-embedding"
+            read_row_vector(&root, "nov-1").await,
+            Some(sample_vector(1.0)),
+            "existing vector must be preserved by metadata-only update"
         );
         cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_survives_repository_reopen() {
+        let root = unique_test_root("bulk-update-reopen");
+        insert_memory_batch(&root, vec![item("reopen-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        let updated = vec![item("reopen-1", "insight", "本文")];
+        update_memories_bulk(&root, &updated)
+            .await
+            .expect("bulk update must succeed");
+
+        // リポジトリ再オープン後も表示メタデータの更新が維持される
+        // (ジャーナルの MetadataPatch 記録と互換テーブルの in-place UPDATE が
+        // どちらも恒久ストアに書き込まれていることの検証)。
+        let reopened = MemoryRepository::open(&root)
+            .await
+            .expect("repository reopen must succeed");
+        drop(reopened);
+        let row = get_memory_by_id(&root, "reopen-1")
+            .await
+            .expect("query after reopen")
+            .expect("row must survive reopen");
+        assert_eq!(row.memory_type, "insight");
+        cleanup(&root);
+    }
+
+    async fn read_row_vector(root: &std::path::Path, id: &str) -> Option<Vec<f32>> {
+        let db = get_or_create_db(root).await.ok()?;
+        let table = get_or_create_memories_table(&db, root).await.ok()?;
+        let predicate = format!("id = '{}'", escape_sql_literal(id));
+        let mut stream = table.query().only_if(predicate).execute().await.ok()?;
+        let batch = stream.try_next().await.ok()??;
+        let column = batch.column_by_name("vector")?;
+        let vectors = column.as_any().downcast_ref::<FixedSizeListArray>()?;
+        if vectors.is_null(0) {
+            return None;
+        }
+        let inner = vectors.value(0);
+        let values = inner.as_any().downcast_ref::<Float32Array>()?;
+        Some((0..values.len()).map(|index| values.value(index)).collect())
     }
 
     #[tokio::test]

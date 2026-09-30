@@ -2046,33 +2046,16 @@ impl MemoryRepository {
                 }
             }
             OperationKind::MetadataPatch => {
-                // The display metadata patch updates the raw event's content
-                // column in the materialized table.
-                let entity_id = envelope
-                    .payload()
-                    .get("entity_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| "metadata patch entity_id missing".to_string())?;
-                let content = envelope
-                    .payload()
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(|value| value.replace(char::from_u32(39).expect("valid char"), "''"));
-                let table = open_table(self.paths.raw_events(), RAW_TABLE).await?;
-                let predicate = format!("event_id = '{}'", entity_id);
-                let mut builder = table.update().only_if(predicate);
-                if let Some(escaped) = &content {
-                    builder = builder.column("content", format!("'{}'", escaped));
-                }
-                let result = builder
-                    .execute()
-                    .await
-                    .map_err(|error| format!("Apply metadata patch error: {}", error))?;
-                if result.rows_updated == 0 {
-                    return Err(format!(
-                        "metadata patch target not found: {}",
-                        envelope.entity_id()
-                    ));
+                // MetadataPatch は互換レイヤの表示メタデータ (memory_type /
+                // source / user_id) 編集の恒久記録である。互換テーブルへの反映
+                // はジャーナルコミット成功後に呼び出し側が in-place UPDATE で
+                // 実施するため、replay 側は payload スキーマの検証のみを行う。
+                // 不備のある payload は無音で無視せずエラーとして表面化させる。
+                let payload = envelope.payload();
+                for key in ["entity_id", "memory_type", "source", "user_id"] {
+                    if payload.get(key).and_then(Value::as_str).is_none() {
+                        return Err(format!("metadata patch payload missing: {key}"));
+                    }
                 }
             }
             OperationKind::Fact => {
