@@ -2035,7 +2035,7 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    fn runtime_root_ignores_an_unrelated_process_cwd() {
+    fn platform_runtime_root_ignores_an_unrelated_process_cwd() {
         let _cwd_guard = CWD_TEST_LOCK.lock().unwrap();
         let unrelated = std::env::temp_dir().join(format!(
             "gameassistant-unrelated-cwd-{}-{}",
@@ -2069,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_replacement_keeps_old_target_when_install_cannot_replace_it() {
+    fn storage_atomic_replacement_keeps_old_target_when_install_cannot_replace_it() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-atomic-{}-{}",
             std::process::id(),
@@ -2187,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn every_embedded_requirements_manifest_is_bound_to_runtime_state() {
+    fn storage_every_embedded_requirements_manifest_is_bound_to_runtime_state() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-requirements-bundle-{}-{}",
             std::process::id(),
@@ -2214,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_requirements_metadata_is_not_reported_as_a_completed_runtime() {
+    fn storage_stale_requirements_metadata_is_not_reported_as_a_completed_runtime() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-stale-requirements-{}-{}",
             std::process::id(),
@@ -2250,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn lockfile_with_a_stale_requirements_header_is_not_ready() {
+    fn storage_lockfile_with_a_stale_requirements_header_is_not_ready() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-stale-lock-{}-{}",
             std::process::id(),
@@ -2296,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_diagnostics_keep_tokenizer_and_embedding_failures_distinct() {
+    fn storage_runtime_diagnostics_keep_tokenizer_and_embedding_failures_distinct() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-diagnostics-{}-{}",
             std::process::id(),
@@ -2332,7 +2332,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_dependency_files_invalidate_each_runtime_layer_even_with_stale_probe_flags() {
+    fn storage_missing_dependency_files_invalidate_each_runtime_layer_even_with_stale_probe_flags() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-dependency-loss-{}-{}",
             std::process::id(),
@@ -2414,7 +2414,7 @@ mod tests {
     }
 
     #[test]
-    fn every_runtime_status_exposes_current_gemma_contract_metadata() {
+    fn storage_every_runtime_status_exposes_current_gemma_contract_metadata() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-status-{}-{}",
             std::process::id(),
@@ -2441,7 +2441,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_marker_alone_cannot_authorize_session_start() {
+    fn storage_complete_marker_alone_cannot_authorize_session_start() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-gate-{}-{}",
             std::process::id(),
@@ -2479,7 +2479,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_is_distinct_from_error_and_clears_stale_error_fields() {
+    fn storage_cancellation_is_distinct_from_error_and_clears_stale_error_fields() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-cancel-{}-{}",
             std::process::id(),
@@ -2499,7 +2499,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_gemma_terms_clears_a_stale_setup_error() {
+    fn storage_accepting_gemma_terms_clears_a_stale_setup_error() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-terms-error-{}-{}",
             std::process::id(),
@@ -2519,7 +2519,7 @@ mod tests {
     }
 
     #[test]
-    fn asr_script_executable_contract_reports_supplied_absolute_paths() {
+    fn platform_asr_script_executable_contract_reports_supplied_absolute_paths() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-asr-contract-{}-{}",
             std::process::id(),

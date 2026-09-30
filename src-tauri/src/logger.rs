@@ -150,7 +150,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn writes_app_log_under_the_injected_runtime_root() {
+    fn storage_writes_app_log_under_the_injected_runtime_root() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-logger-{}-{}",
             std::process::id(),

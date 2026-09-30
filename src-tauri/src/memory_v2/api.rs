@@ -1667,7 +1667,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_statuses_reads_status_from_nested_operation_payload() {
+    async fn storage_summary_statuses_reads_status_from_nested_operation_payload() {
         let root =
             std::env::temp_dir().join(format!("memory-v2-api-status-{}", uuid::Uuid::new_v4()));
         let repository = MemoryRepository::open(&root).await.unwrap();
@@ -1704,7 +1704,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summary_retry_count_counts_distinct_attempt_ids_not_status_rows() {
+    async fn storage_summary_retry_count_counts_distinct_attempt_ids_not_status_rows() {
         let root = std::env::temp_dir().join(format!(
             "memory-v2-api-retry-count-{}",
             uuid::Uuid::new_v4()

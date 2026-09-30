@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gemini_retries_bounded_transient_http_failure_without_logging_key() {
+    async fn platform_gemini_retries_bounded_transient_http_failure_without_logging_key() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
@@ -755,7 +755,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gemini_empty_response_is_retried_and_never_returned_as_success() {
+    async fn platform_gemini_empty_response_is_retried_and_never_returned_as_success() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));

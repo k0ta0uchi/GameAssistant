@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn gemma_terms_require_version_and_model_hash_metadata() {
+    fn storage_gemma_terms_require_version_and_model_hash_metadata() {
         let root = tempfile_root("terms");
         crate::settings::save_setting_key(&root, "gemma_terms_accepted", serde_json::json!(true))
             .unwrap();
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_gemma_file_is_not_considered_installed() {
+    fn storage_invalid_gemma_file_is_not_considered_installed() {
         let root = tempfile_root("invalid-gemma");
         let path = root.join(GEMMA_MODEL_ID);
         std::fs::write(&path, b"not-a-valid-model").unwrap();
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn every_model_consumer_uses_the_portable_models_root() {
+    fn storage_every_model_consumer_uses_the_portable_models_root() {
         let root = tempfile_root("portable-root");
         crate::settings::save_setting_key(
             &root,
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_download_registration_is_rejected_without_replacing_owner() {
+    fn storage_concurrent_download_registration_is_rejected_without_replacing_owner() {
         let manager = super::ModelManager::new();
         let root = tempfile_root("registration");
         let first = manager
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_required_hugging_face_files_are_not_installed() {
+    fn storage_truncated_required_hugging_face_files_are_not_installed() {
         let root = tempfile_root("truncated-tree");
         let model_dir = super::portable_models_dir(&root).join("kotoba-whisper-v2.0-faster");
         std::fs::create_dir_all(&model_dir).unwrap();
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn manually_placed_runtime_files_are_accepted_without_manifest() {
+    fn storage_manually_placed_runtime_files_are_accepted_without_manifest() {
         let root = tempfile_root("manual-model");
         let model_dir = super::portable_models_dir(&root).join("kotoba-whisper-v2.0-faster");
         std::fs::create_dir_all(&model_dir).unwrap();
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn install_manifest_rejects_truncated_and_duplicate_files() {
+    fn storage_install_manifest_rejects_truncated_and_duplicate_files() {
         let root = tempfile_root("manifest-validation");
         let model_dir = super::portable_models_dir(&root).join("GLuCoSE-base-ja");
         std::fs::create_dir_all(&model_dir).unwrap();
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn model_download_lock_is_shared_by_distinct_managers() {
+    fn storage_model_download_lock_is_shared_by_distinct_managers() {
         let root = tempfile_root("cross-manager");
         let first = super::ModelManager::new();
         let second = super::ModelManager::new();
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn gemma_hash_is_recomputed_after_same_size_content_mutation() {
+    fn storage_gemma_hash_is_recomputed_after_same_size_content_mutation() {
         let root = tempfile_root("gemma-mutation");
         let path = root.join(GEMMA_MODEL_ID);
         let mut file = std::fs::File::create(&path).unwrap();
@@ -557,7 +557,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_and_final_install_have_one_deterministic_winner() {
+    fn storage_cancellation_and_final_install_have_one_deterministic_winner() {
         let root = tempfile_root("cancel-linearization");
         let part = root.join("model.part");
         let target = root.join("model");
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tree_api_pagination_downloads_every_advertised_file_and_writes_manifest() {
+    async fn platform_tree_api_pagination_downloads_every_advertised_file_and_writes_manifest() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -725,7 +725,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_rejects_truncated_http_body_and_honors_late_cancellation() {
+    async fn platform_download_rejects_truncated_http_body_and_honors_late_cancellation() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_accepts_chunked_body_without_content_length() {
+    async fn platform_download_accepts_chunked_body_without_content_length() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gemma_resume_rejects_a_short_206_body_after_valid_start_end_and_total() {
+    async fn platform_gemma_resume_rejects_a_short_206_body_after_valid_start_end_and_total() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
