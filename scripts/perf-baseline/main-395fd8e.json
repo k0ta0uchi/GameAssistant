@@ -1,0 +1,110 @@
+{
+  "issue": 13,
+  "baseline_of": "main@395fd8e (fix: make LanceDB bulk metadata updates recoverable and atomic)",
+  "environment": {
+    "os": "Windows_NT",
+    "cargo": "cargo 1.94.0-nightly (6d1bd93c4 2026-01-10)",
+    "rustc": "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+    "cargo_build_jobs": "2",
+    "logical_cpus": "28",
+    "dependency_profile": "[profile.dev.package.\"*\"] / [profile.test.package.\"*\"] opt-level = 3 (unchanged)",
+    "notes": "MSVC (vcvars64) environment; timings measured back-to-back on the same machine"
+  },
+  "phases_seconds": {
+    "clean_build": 4194,
+    "test_compile_cold": 194.15,
+    "test_run_cold": 92.59,
+    "warm_build_steady_state": 214.94,
+    "test_compile_warm": 10.1,
+    "test_run_warm": 98.86
+  },
+  "phase_notes": {
+    "clean_build": "cargo clean -> cargo build --timings (29.4GiB removed, full dependency rebuild)",
+    "warm_build_steady_state": "build on a fully warm cache right after a test run; includes bin refresh + link (not a no-op)",
+    "test_run": "cargo test --lib total wall time (harness start + all 323 tests)"
+  },
+  "top_crates_clean_build": [
+    {
+      "seconds": 927.2,
+      "mode": "todo",
+      "unit": "lance 10.0.0"
+    },
+    {
+      "seconds": 359.7,
+      "mode": "todo",
+      "unit": "datafusion 54.1.0"
+    },
+    {
+      "seconds": 330.5,
+      "mode": "todo",
+      "unit": "lance-index 10.0.0"
+    },
+    {
+      "seconds": 313.7,
+      "mode": "todo",
+      "unit": "datafusion-expr 54.1.0"
+    },
+    {
+      "seconds": 301.0,
+      "mode": "todo",
+      "unit": "lancedb 0.37.1"
+    },
+    {
+      "seconds": 290.1,
+      "mode": "todo",
+      "unit": "lance-namespace-impls 10.0.0"
+    },
+    {
+      "seconds": 273.0,
+      "mode": "todo",
+      "unit": "lance-bitpacking 10.0.0"
+    },
+    {
+      "seconds": 266.2,
+      "mode": "todo",
+      "unit": "datafusion-optimizer 54.1.0"
+    },
+    {
+      "seconds": 250.1,
+      "mode": "todo",
+      "unit": "datafusion-physical-expr 54.1.0"
+    },
+    {
+      "seconds": 214.9,
+      "mode": "todo",
+      "unit": "datafusion-sql 54.1.0"
+    },
+    {
+      "seconds": 165.1,
+      "mode": "todo",
+      "unit": "datafusion-functions-aggregate 54.1.0"
+    },
+    {
+      "seconds": 160.9,
+      "mode": "todo",
+      "unit": "datafusion-physical-plan 54.1.0"
+    },
+    {
+      "seconds": 157.1,
+      "mode": "todo",
+      "unit": "datafusion-functions 54.1.0"
+    },
+    {
+      "seconds": 155.2,
+      "mode": "todo",
+      "unit": "lance-datafusion 10.0.0"
+    },
+    {
+      "seconds": 147.4,
+      "mode": "todo",
+      "unit": "datafusion-functions-nested 54.1.0"
+    }
+  ],
+  "top_crates_test_compile_cold": [
+    {
+      "seconds": 188.4,
+      "mode": "todo",
+      "unit": "gameassistant 0.3.2"
+    }
+  ]
+}

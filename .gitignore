@@ -84,3 +84,5 @@ src-tauri/resources/llama/
 
 
 
+# generated measurement artifacts (only curated baseline-*.json files are committed)
+scripts/perf-baseline/*/
