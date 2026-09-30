@@ -5,13 +5,23 @@
 # repo's vcvars64 step:
 #   powershell -ExecutionPolicy Bypass -File scripts\measure-cargo-baseline.ps1 -Label main -Clean
 #
-# Phases (cold/warm are never mixed):
-#   warm-build      cargo build --timings               (existing target dir)
-#   test-compile-w  cargo test --lib --no-run --timings (existing target dir)
-#   test-run-warm   cargo test --lib                    (existing target dir)
-#   clean-build     cargo clean -> cargo build --timings            (-Clean only)
-#   test-compile-c  cargo test --lib --no-run --timings             (-Clean only)
-#   test-run-cold   cargo test --lib                                (-Clean only)
+# Phases (-Clean reorders them cold-first so the warm phases always measure
+# the same freshly-warmed target produced by the cold pipeline):
+#   -Clean:           1. cargo clean
+#                     2. clean-build      cargo build --timings      (cold)
+#                     3. test-compile-c   cargo test --lib --no-run   (cold)
+#                     4. test-run-cold    cargo test --lib            (cold)
+#                     5. warm-build       cargo build --timings       (warm)
+#                     6. test-compile-w   cargo test --lib --no-run   (warm)
+#                     7. test-run-warm    cargo test --lib            (warm)
+#   without -Clean:   warm-build -> test-compile-w -> test-run-warm only
+#                     (depends on whatever target state existed before the
+#                     run; results are machine-state dependent)
+#
+# Definitions:
+#   warm build = rebuild using the existing target directory (no-op to
+#     partial). It is NOT a controlled-source-edit incremental rebuild
+#     benchmark; measuring that would be a separate issue.
 #
 # cargo clean runs ONLY when -Clean is passed; the script always finishes
 # with a fully warm target dir so the developer cache is preserved.
@@ -139,21 +149,10 @@ Write-Host ('CARGO_BUILD_JOBS=' + $envSnapshot.cargo_build_jobs + ' CPUs=' + $en
 
 $results = @{}
 
-if (-not $SkipWarm) {
-    $results['warm_build'] = Invoke-MeasuredPhase `
-        -Name 'warm-build' `
-        -CargoArgs @('build', '--manifest-path', $manifest, '--timings') `
-        -ExpectTimings
-    $results['test_compile_warm'] = Invoke-MeasuredPhase `
-        -Name 'test-compile-warm' `
-        -CargoArgs @('test', '--manifest-path', $manifest, '--lib', '--no-run', '--timings') `
-        -ExpectTimings
-    $results['test_run_warm'] = Invoke-MeasuredPhase `
-        -Name 'test-run-warm' `
-        -CargoArgs @('test', '--manifest-path', $manifest, '--lib')
-}
-
 if ($Clean) {
+    # Cold-first ordering: the warm phases below then always measure the
+    # same freshly-warmed target produced by this cold pipeline, keeping
+    # before/after comparisons reproducible.
     Write-Host '=== [clean] cargo clean (cold measurement requested via -Clean)'
     & cargo clean --manifest-path $manifest
     if ($LASTEXITCODE -ne 0) { throw "cargo clean failed with $LASTEXITCODE" }
@@ -168,6 +167,20 @@ if ($Clean) {
         -ExpectTimings
     $results['test_run_cold'] = Invoke-MeasuredPhase `
         -Name 'test-run-cold' `
+        -CargoArgs @('test', '--manifest-path', $manifest, '--lib')
+}
+
+if (-not $SkipWarm) {
+    $results['warm_build'] = Invoke-MeasuredPhase `
+        -Name 'warm-build' `
+        -CargoArgs @('build', '--manifest-path', $manifest, '--timings') `
+        -ExpectTimings
+    $results['test_compile_warm'] = Invoke-MeasuredPhase `
+        -Name 'test-compile-warm' `
+        -CargoArgs @('test', '--manifest-path', $manifest, '--lib', '--no-run', '--timings') `
+        -ExpectTimings
+    $results['test_run_warm'] = Invoke-MeasuredPhase `
+        -Name 'test-run-warm' `
         -CargoArgs @('test', '--manifest-path', $manifest, '--lib')
 }
 
