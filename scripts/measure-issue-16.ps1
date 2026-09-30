@@ -17,15 +17,28 @@ $sccacheStatsJson = Join-Path $PSScriptRoot 'perf-baseline\issue-16-sccache-stat
 
 Write-Host "=== Benchmarking cargo test vs cargo-nextest (Warm) ===" -ForegroundColor Cyan
 
+# Record baseline python PIDs so we never terminate pre-existing developer processes
+$baselinePythonPids = @(Get-Process python -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
+Write-Host ("Baseline Python PIDs preserved ({0} processes): {1}" -f $baselinePythonPids.Count, ($baselinePythonPids -join ', ')) -ForegroundColor DarkGray
+
 function Cleanup-TestArtifacts {
-    # Terminate orphan python child processes from tests to free VRAM/ports
-    Get-Process python -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -match 'GameAssistant' } catch { $false }
-    } | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Milliseconds 500
+    param([int[]]$BaselinePids = @())
+    # Only terminate newly spawned python processes created after benchmark started
+    $orphans = Get-Process python -ErrorAction SilentlyContinue | Where-Object {
+        $_.Id -notin $BaselinePids -and (
+            try { $_.Path -match 'GameAssistant' } catch { $false }
+        )
+    }
+    foreach ($proc in $orphans) {
+        try {
+            Write-Host ("  Cleaning orphan benchmark child PID: {0}" -f $proc.Id) -ForegroundColor DarkYellow
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
+    Start-Sleep -Milliseconds 800
 }
 
-function Measure-Cmd([scriptblock]$Script) {
+function Measure-Cmd([scriptblock]$Script, [int[]]$BaselinePids = @()) {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     & $Script | Out-Null
     $exitCode = $LASTEXITCODE
@@ -33,15 +46,15 @@ function Measure-Cmd([scriptblock]$Script) {
     if ($exitCode -ne 0) {
         throw "Benchmark command failed with exit code $exitCode"
     }
-    Cleanup-TestArtifacts
+    Cleanup-TestArtifacts -BaselinePids $BaselinePids
     return [math]::Round($sw.Elapsed.TotalSeconds, 2)
 }
 
-function Run-Benchmark([string]$Name, [scriptblock]$Script, [int]$N = 2) {
+function Run-Benchmark([string]$Name, [scriptblock]$Script, [int]$N = 2, [int[]]$BaselinePids = @()) {
     $samples = @()
     Write-Host ("Testing {0} ({1} samples)..." -f $Name, $N) -ForegroundColor DarkCyan
     for ($i = 1; $i -le $N; $i++) {
-        $sec = Measure-Cmd $Script
+        $sec = Measure-Cmd $Script -BaselinePids $BaselinePids
         Write-Host ("  Sample {0}: {1}s" -f $i, $sec)
         $samples += $sec
     }
@@ -78,7 +91,7 @@ if (Test-Path -LiteralPath $sccacheStatsJson) {
 
 Push-Location $srcTauriDir
 try {
-    Cleanup-TestArtifacts
+    Cleanup-TestArtifacts -BaselinePids $baselinePythonPids
 
     # Ensure warm test binary with strict exit code validation
     Write-Host "Warming test binary..." -ForegroundColor DarkGray
@@ -90,16 +103,16 @@ try {
     # 1. Warm Compile Check (--no-run)
     $warmCompile = Run-Benchmark "Warm Compile (cargo test --lib --no-run)" {
         cargo test --lib --no-run
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     # 2. Fast Suite (145 tests)
     $cargoFast = Run-Benchmark "Fast Suite: cargo test" {
         cargo test --manifest-path $manifest --lib -- --skip lance_memory --skip memory_v2::repository --skip memory_v2::journal --skip memory_v2::manifest --skip storage_ --skip platform_
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     $nextestFast = Run-Benchmark "Fast Suite: cargo nextest" {
         cargo nextest run --manifest-path $manifest --lib -E 'not (test(lance_memory) | test(memory_v2::repository) | test(memory_v2::journal) | test(memory_v2::manifest) | test(storage_) | test(platform_))'
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     # 3. Memory Suite (156 tests)
     $cargoMemory = Run-Benchmark "Memory Suite: cargo test" {
@@ -108,29 +121,29 @@ try {
             cargo test --manifest-path $manifest --lib $f | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "cargo test failed for filter $f with exit code $LASTEXITCODE" }
         }
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     $nextestMemory = Run-Benchmark "Memory Suite: cargo nextest" {
         cargo nextest run --manifest-path $manifest --lib -E 'test(lance_memory) | test(memory_v2::repository) | test(memory_v2::journal) | test(memory_v2::manifest) | test(storage_)'
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     # 4. Platform Suite (22 tests)
     $cargoPlatform = Run-Benchmark "Platform Suite: cargo test" {
         cargo test --manifest-path $manifest --lib platform_
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     $nextestPlatform = Run-Benchmark "Platform Suite: cargo nextest" {
         cargo nextest run --manifest-path $manifest --lib -E 'test(platform_)'
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     # 5. Full Suite (323 tests)
     $cargoFull = Run-Benchmark "Full Suite: cargo test" {
         cargo test --manifest-path $manifest --lib
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     $nextestFull = Run-Benchmark "Full Suite: cargo nextest" {
         cargo nextest run --manifest-path $manifest --lib
-    } $Iterations
+    } $Iterations $baselinePythonPids
 
     $results = @{
         timestamp = (Get-Date).ToString("o")
@@ -183,9 +196,9 @@ try {
             adopted = $true
             recommendation = "Adopt as optional test runner in scripts/test-rust.ps1 with graceful fallback to cargo test"
             reasons = @(
-                "Memory suite is ~2x faster with nextest (12.90s vs 25.77s, ~50% reduction)",
-                "Fast suite has slight process-spawning overhead with nextest (2.05s vs 1.10s), so Cargo runner remains best for Fast suite",
-                "Full suite exhibits resource contention (ASR / TCP / NTFS) under high concurrency (60.74s vs 25.64s), so Cargo runner remains best for Full suite",
+                ("Memory suite is ~2x faster with nextest ({0:N2}s vs {1:N2}s, ~{2:N0}% reduction)" -f $nextestMemory.mean, $cargoMemory.mean, ((1.0 - ($nextestMemory.mean / $cargoMemory.mean)) * 100)),
+                ("Fast suite has slight process-spawning overhead with nextest ({0:N2}s vs {1:N2}s), so Cargo runner remains best for Fast suite" -f $nextestFast.mean, $cargoFast.mean),
+                ("Full suite exhibits resource contention (ASR / TCP / NTFS) under high concurrency ({0:N2}s vs {1:N2}s), so Cargo runner remains best for Full suite" -f $nextestFull.mean, $cargoFull.mean),
                 "Full test equivalence verified (323/323 tests passed, 0 failures, 0 skipped)",
                 "Adopted as an optional runner in scripts/test-rust.ps1 (-Runner Nextest) for massive developer productivity gain on Memory integration tests, with graceful fallback to standard Cargo runner"
             )
@@ -196,6 +209,6 @@ try {
     Write-Host ("Results saved to: {0}" -f $outJson) -ForegroundColor Cyan
 }
 finally {
-    Cleanup-TestArtifacts
+    Cleanup-TestArtifacts -BaselinePids $baselinePythonPids
     Pop-Location
 }

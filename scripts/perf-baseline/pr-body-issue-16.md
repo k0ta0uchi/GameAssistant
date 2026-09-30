@@ -14,10 +14,10 @@ Closes #16
 
 | Suite | テスト件数 | `cargo test` (mean) | `cargo nextest` (mean) | 差分 / 変化 | 備考 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Fast** | 145 | 1.10s (0.80 - 1.35) | 2.05s (1.96 - 2.14) | +0.95s | テスト実行自体は0.72sだが、145プロセスの起動・監視オーバーヘッドによる微増 |
-| **Memory** | 156 | 25.77s (23.47 - 26.60) | **12.50s (12.39 - 12.95)** | **-13.27s (約50%短縮 / 2倍高速)** | LanceDB / ストレージ統合テスト群で絶大な高速化を達成 |
-| **Platform** | 22 | 21.68s (21.67 - 21.84) | 23.40s (23.04 - 24.02) | +1.72s | ASR 外部プロセス・ライブ接続待機が律速のため同等 |
-| **Full** | 323 | **25.64s (25.44 - 26.37)** | 28.90s (27.91 - 60.74) | +3.26s〜 | 全件一括の高並列実行により、ASRサーバー通信とNTFSストレージ競合が発生 |
+| **Fast** | 145 | 0.86s (0.80 - 0.93) | 2.20s (2.19 - 2.20) | +1.34s | テスト実行自体は0.7s未満だが、145プロセスの起動・監視オーバーヘッドによる微増 |
+| **Memory** | 156 | 26.11s (26.05 - 26.17) | **13.75s (13.67 - 13.83)** | **-12.36s (約47%短縮 / 約1.9倍高速)** | LanceDB / ストレージ統合テスト群で絶大な並列高速化を達成 |
+| **Platform** | 22 | 22.20s (21.81 - 22.58) | 23.60s (23.25 - 23.96) | +1.40s | ASR 外部プロセス・ライブ接続待機が律速のため同等 |
+| **Full** | 323 | **26.08s (25.84 - 26.33)** | 29.01s (28.85 - 29.17) | +2.93s | 全件一括の高並列実行により、ASRサーバー通信とNTFSストレージ競合が発生 |
 
 ### テスト結果の等価性 (Equivalence)
 - `cargo test`: 323 passed, 0 failed
@@ -26,7 +26,7 @@ Closes #16
 
 ### 採否判断: **条件付き採用 / オプション統合 (Adopted: true)**
 - **採用理由**:
-  - **Memory suite が 25.8s から 12.5s へと半減（2倍高速化）**。
+  - **Memory suite が 26.1s から 13.8s へと約半減（約1.9倍高速化）**。
   - プロセス分離によるテストクラッシュ時の障害特定（Isolation）に優れる。
 - **トレードオフと設計**:
   - Fast スイートおよび Full スイートではスレッドプール型の標準 Cargo ランナーが最速かつ安定しているため、デフォルトの強制にはせず、`scripts/test-rust.ps1 -Runner Nextest` によるオプトイン方式を採用。
@@ -71,6 +71,10 @@ Closes #16
    - `scripts/perf-baseline/issue-16-sccache-stats.json` に provenance を永続化し、`measure-issue-16.ps1` からも参照・更新可能に統合。
 3. **成果物 JSON の記述整合性**:
    - `nextest_evaluation.reasons` の評価記述を、PR 本文および実測データ（Memory 2倍高速、Fast はプロセスオーバーヘッドで Cargo が優勢）と完全に整合。
+4. **差分 PID 追跡による安全なプロセス終了 (Blocker対応)**:
+   - ベンチマーク開始前に既存の Python プロセス PID を記録（`$baselinePythonPids`）し、テスト後に新規 spawn された孤立子プロセスのみを特定して終了する差分 PID 方式に改修。別ウィンドウで稼働中の GameAssistant 開発セッションや手動起動した Python プロセスを一切巻き込まない安全性を担保。
+5. **Committed JSON と PR 本文の完全な Provenance 一致 (Medium対応)**:
+   - 全 suite を 2 サンプルで再計測し、`scripts/perf-baseline/issue-16-nextest-sccache.json` の `samples`, `mean`, `min`, `max` と PR 本文の数値を完全に同期。
 
 ---
 
@@ -105,7 +109,7 @@ scripts\test-rust.ps1 -Suite Fast
 scripts\test-rust.ps1 -Suite Full
 
 # Nextest runner の活用 (Memory suite で2倍高速):
-scripts\test-rust.ps1 -Suite Memory -Runner Nextest   # ~12.5s で完了
+scripts\test-rust.ps1 -Suite Memory -Runner Nextest   # ~13.8s で完了
 ```
 
 ### フォールバック動作 (Fallback)

@@ -1,40 +1,44 @@
-﻿{
+{
     "fast_suite":  {
                        "cargo_test":  {
                                           "min":  0.8,
                                           "samples":  [
+                                                          0.93,
                                                           0.8
                                                       ],
-                                          "mean":  0.8,
-                                          "max":  0.8
+                                          "mean":  0.86,
+                                          "max":  0.93
                                       },
                        "tests_count":  145,
                        "cargo_nextest":  {
-                                             "min":  2.09,
+                                             "min":  2.19,
                                              "samples":  [
-                                                             2.09
+                                                             2.2,
+                                                             2.19
                                                          ],
-                                             "mean":  2.09,
-                                             "max":  2.09
+                                             "mean":  2.2,
+                                             "max":  2.2
                                          }
                    },
     "memory_suite":  {
                          "cargo_test":  {
-                                            "min":  23.47,
+                                            "min":  26.05,
                                             "samples":  [
-                                                            23.47
+                                                            26.05,
+                                                            26.17
                                                         ],
-                                            "mean":  23.47,
-                                            "max":  23.47
+                                            "mean":  26.11,
+                                            "max":  26.17
                                         },
                          "tests_count":  156,
                          "cargo_nextest":  {
-                                               "min":  12.5,
+                                               "min":  13.67,
                                                "samples":  [
-                                                               12.5
+                                                               13.67,
+                                                               13.83
                                                            ],
-                                               "mean":  12.5,
-                                               "max":  12.5
+                                               "mean":  13.75,
+                                               "max":  13.83
                                            }
                      },
     "sccache_version":  "sccache 0.18.0",
@@ -48,51 +52,56 @@
     "rust_version":  "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
     "full_suite":  {
                        "cargo_test":  {
-                                          "min":  26.37,
+                                          "min":  25.84,
                                           "samples":  [
-                                                          26.37
+                                                          25.84,
+                                                          26.33
                                                       ],
-                                          "mean":  26.37,
-                                          "max":  26.37
+                                          "mean":  26.08,
+                                          "max":  26.33
                                       },
                        "tests_count":  323,
                        "cargo_nextest":  {
-                                             "min":  28.9,
+                                             "min":  28.85,
                                              "samples":  [
-                                                             28.9
+                                                             28.85,
+                                                             29.17
                                                          ],
-                                             "mean":  28.9,
-                                             "max":  28.9
+                                             "mean":  29.01,
+                                             "max":  29.17
                                          }
                    },
     "platform_suite":  {
                            "cargo_test":  {
-                                              "min":  21.84,
+                                              "min":  21.81,
                                               "samples":  [
-                                                              21.84
+                                                              22.58,
+                                                              21.81
                                                           ],
-                                              "mean":  21.84,
-                                              "max":  21.84
+                                              "mean":  22.2,
+                                              "max":  22.58
                                           },
                            "tests_count":  22,
                            "cargo_nextest":  {
-                                                 "min":  23.4,
+                                                 "min":  23.25,
                                                  "samples":  [
-                                                                 23.4
+                                                                 23.96,
+                                                                 23.25
                                                              ],
-                                                 "mean":  23.4,
-                                                 "max":  23.4
+                                                 "mean":  23.6,
+                                                 "max":  23.96
                                              }
                        },
     "warm_compile_no_run":  {
-                                "min":  0.75,
+                                "min":  0.73,
                                 "samples":  [
-                                                0.75
+                                                0.73,
+                                                0.76
                                             ],
-                                "mean":  0.75,
-                                "max":  0.75
+                                "mean":  0.74,
+                                "max":  0.76
                             },
-    "timestamp":  "2026-10-01T01:55:09.8090311+09:00",
+    "timestamp":  "2026-10-01T02:10:39.9427157+09:00",
     "host":  "Windows MSVC",
     "sccache_evaluation":  {
                                "benchmark_target":  "cargo check",
@@ -122,9 +131,9 @@
                                "adopted":  true,
                                "recommendation":  "Adopt as optional test runner in scripts/test-rust.ps1 with graceful fallback to cargo test",
                                "reasons":  [
-                                               "Memory suite is ~2x faster with nextest (12.90s vs 25.77s, ~50% reduction)",
-                                               "Fast suite has slight process-spawning overhead with nextest (2.05s vs 1.10s), so Cargo runner remains best for Fast suite",
-                                               "Full suite exhibits resource contention (ASR / TCP / NTFS) under high concurrency (60.74s vs 25.64s), so Cargo runner remains best for Full suite",
+                                               "Memory suite is ~2x faster with nextest (13.75s vs 26.11s, ~47% reduction)",
+                                               "Fast suite has slight process-spawning overhead with nextest (2.20s vs 0.86s), so Cargo runner remains best for Fast suite",
+                                               "Full suite exhibits resource contention (ASR / TCP / NTFS) under high concurrency (29.01s vs 26.08s), so Cargo runner remains best for Full suite",
                                                "Full test equivalence verified (323/323 tests passed, 0 failures, 0 skipped)",
                                                "Adopted as an optional runner in scripts/test-rust.ps1 (-Runner Nextest) for massive developer productivity gain on Memory integration tests, with graceful fallback to standard Cargo runner"
                                            ]
