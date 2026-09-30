@@ -779,7 +779,7 @@ fn legacy_batch_to_items(
     Ok((items, vector_values))
 }
 
-fn escape_sql_literal(value: &str) -> String {
+pub(crate) fn escape_sql_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
@@ -3259,6 +3259,269 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
     Ok(existing.len())
 }
 
+/// 一括メタデータ更新 (issue: 「delete→import」の2段階を1つの原子的な操作に)。
+///
+/// 互換テーブル行の memory_type/source/user_id を in-place UPDATE する
+/// (LanceDB の update は行単位で原子的)。削除・再挿入がないため:
+/// - 失敗しても既存行 (本文/ベクトル) は無傷
+/// - ID/ベクトルは保持され、表示メタデータだけが更新される
+/// 各行の更新結果を journal に metadata_patch として記録し、失敗時は
+/// エラーに失敗 ID を含めて返す (部分成功の判別可能)。
+/// Replays committed MetadataPatch journal operations onto the compatibility
+/// memories table. This closes the crash window between the journal commit
+/// and the in-place projection UPDATE: a patch that was recorded but never
+/// projected is re-applied on the next repair pass. Payloads hold absolute
+/// values, so re-applying them in journal order is idempotent.
+///
+/// startup repair (`initialize_runtime`) から呼ばれる public 経路。
+/// MetadataPatch projection を変更する全経路 (startup repair / bulk update)
+/// が `METADATA_UPDATE_LOCK` を共有し、journal の適用順序と projection の
+/// 反映順序の逆転を防ぐ。
+pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String> {
+    let _guard = METADATA_UPDATE_LOCK.lock().await;
+    let _process_guard = acquire_metadata_transaction_guard(root_dir).await?;
+    let repository = MemoryRepository::open(root_dir)
+        .await
+        .map_err(|error| format!("repository open error: {error}"))?;
+    repair_metadata_projection_with(&repository, root_dir).await
+}
+
+/// `METADATA_UPDATE_LOCK` 保持中に実行される repair 本体。bulk update は
+/// lock 保持中にこの関数を直接呼ぶため public 経路を経由せず、mutex の
+/// 二重取得による deadlock は発生しない。
+async fn repair_metadata_projection_with(
+    repository: &MemoryRepository,
+    root_dir: &Path,
+) -> Result<usize, String> {
+    // journal recovery API 経由で commit済みの MetadataPatch のみを取得する
+    // (begin + operation だけで commit frame のない未 commit 操作は対象外。
+    // checksum / sequence / canonical 検証も journal 層で実施される)。
+    let records = repository
+        .read_committed_metadata_patches()
+        .await
+        .map_err(|error| format!("metadata patch read error: {error}"))?;
+    #[cfg(test)]
+    {
+        let gate = REPAIR_TEST_PAUSE.lock().ok().and_then(|state| {
+            let (root, gate) = state.as_ref()?;
+            (root.as_path() == root_dir).then(|| gate.clone())
+        });
+        if let Some(gate) = gate {
+            // テスト専用停止点: journal 読み取り後・projection 適用前の
+            // interleave を決定的に再現する (対象 root のテストのみ有効)。
+            gate.signal.notify_one();
+            gate.resume.notified().await;
+        }
+    }
+    // 表示 id ごとに最後の patch を採用して後勝ちで再適用 (冪等)。
+    let mut latest: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for envelope in records {
+        let display_id = envelope
+            .get("payload")
+            .and_then(|patch| patch.get("entity_id"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(display_id) = display_id {
+            latest.insert(display_id.to_string(), envelope);
+        }
+    }
+    if latest.is_empty() {
+        return Ok(0);
+    }
+
+    let db = get_or_create_db(root_dir).await?;
+    let table = get_or_create_memories_table(&db, root_dir).await?;
+    let mut applied = 0usize;
+    for envelope in latest.into_values() {
+        // The envelope's entity_id is the canonical stable UUID; the
+        // compatibility row is keyed by the display id in the patch payload.
+        let Some(patch) = envelope.get("payload") else {
+            continue;
+        };
+        let (Some(entity_id), Some(memory_type), Some(source)) = (
+            patch.get("entity_id").and_then(serde_json::Value::as_str),
+            patch.get("memory_type").and_then(serde_json::Value::as_str),
+            patch.get("source").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let user_id = patch
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("User");
+        let predicate = format!("id = '{}'", escape_sql_literal(entity_id));
+        let result = table
+            .update()
+            .only_if(predicate)
+            .column(
+                "memory_type",
+                format!("'{}'", escape_sql_literal(memory_type)),
+            )
+            .column("source", format!("'{}'", escape_sql_literal(source)))
+            .column("user_id", format!("'{}'", escape_sql_literal(user_id)))
+            .execute()
+            .await
+            .map_err(|error| format!("metadata patch repair error: {error}"))?;
+        applied += result.rows_updated as usize;
+    }
+    Ok(applied)
+}
+
+/// Serializes the whole metadata-update logical transaction (repair →
+/// journal batch commit → compatibility projection UPDATE) per process.
+/// The journal write lock alone only covers the commit; without this lock a
+/// concurrent bulk update could interleave the projection UPDATEs out of
+/// journal order and leave the projection older than the journal (frontend
+/// の二重送信ガードでは複数 window / 別経路を含む backend 整合性は保証できない)。
+static METADATA_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// root/store 単位のプロセス間排他: 別アプリインスタンスとの journal /
+/// projection 順序逆転を防ぐ OS アドバイザリロック (metadata_update.lock)。
+/// 呼び出し側は必ず先に `METADATA_UPDATE_LOCK` を取得するため、同一プロセス
+/// 内でこのロックが競合することはない。
+async fn acquire_metadata_transaction_guard(
+    root_dir: &Path,
+) -> Result<crate::memory_v2::journal::FileLock, String> {
+    let metadata_paths = crate::memory_v2::paths::MemoryPaths::from_runtime_root(root_dir)
+        .map_err(|error| format!("memory paths error: {error}"))?;
+    crate::memory_v2::journal::acquire_metadata_transaction_lock(metadata_paths.metadata_lock())
+        .map_err(|error| format!("metadata transaction lock error: {error}"))
+}
+
+// テスト専用: repair の journal 読み取り後・projection 適用前の interleave を
+// 決定的に再現するための停止点。対象 root に紐付いているため、並列実行される
+// 他テスト (異なる root) がフックを消費することはない。
+#[cfg(test)]
+struct RepairTestGate {
+    root: std::path::PathBuf,
+    signal: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+#[cfg(test)]
+static REPAIR_TEST_PAUSE: std::sync::Mutex<
+    Option<(std::path::PathBuf, std::sync::Arc<RepairTestGate>)>,
+> = std::sync::Mutex::new(None);
+
+pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
+    if items.is_empty() {
+        return Err("更新対象のメモリーがありません".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let id = item.id.trim();
+        if id.is_empty() {
+            return Err("空のIDが含まれています".to_string());
+        }
+        if !seen.insert(id.to_string()) {
+            return Err(format!("重複したIDが含まれています: {id}"));
+        }
+    }
+
+    // 並行 bulk update の直列化: repair → journal batch commit → projection
+    // UPDATE の論理トランザクション全体を排他し、journal の順序と projection
+    // の最終状態の逆転を防ぐ。
+    let _update_guard = METADATA_UPDATE_LOCK.lock().await;
+    let _process_guard = acquire_metadata_transaction_guard(root_dir).await?;
+
+    let db = get_or_create_db(root_dir).await?;
+    let table = get_or_create_memories_table(&db, root_dir).await?;
+    // クラッシュ復旧: journal に記録済みだが互換テーブルへ未反映の
+    // MetadataPatch があれば、新しい編集の前に修復する。
+    let repository = MemoryRepository::open(root_dir).await?;
+    // クラッシュ復旧: commit済みだが互換テーブルへ未反映の MetadataPatch を
+    // 新しい編集の前に修復する。
+    repair_metadata_projection_with(&repository, root_dir).await?;
+
+    // 事前存在確認: ジャーナル・互換テーブルのどちらにも一切の変更を加える
+    // 前に全 ID の存在を検証し、欠落 ID はバッチ全体を中断する。
+    for item in items {
+        let predicate = format!("id = '{}'", escape_sql_literal(&item.id));
+        let mut stream = table
+            .query()
+            .only_if(predicate)
+            .execute()
+            .await
+            .map_err(|error| format!("メモリー存在確認に失敗しました ({}): {error}", item.id))?;
+        let mut found = false;
+        while let Some(batch) = stream.try_next().await.map_err(|error| {
+            format!(
+                "メモリー存在確認の読み取りに失敗しました ({}): {error}",
+                item.id
+            )
+        })? {
+            if batch.num_rows() > 0 {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(format!("更新対象のメモリーが見つかりません: {}", item.id));
+        }
+    }
+
+    // フェーズ 1: ジャーナル先行 (単一バッチで全件 commit、all-or-nothing)。
+    // バッチ境界により journal I/O 失敗時は 0 件のみ durable となり、
+    // repair が失敗した一括更新の一部を後から反映することはない。
+    let patches: Vec<(String, serde_json::Value)> = items
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                serde_json::json!({
+                    "entity_id": item.id,
+                    "memory_type": item.memory_type,
+                    "source": item.source,
+                    "user_id": item.user_id.clone().unwrap_or_else(|| "User".to_string()),
+                }),
+            )
+        })
+        .collect();
+    repository
+        .commit_metadata_patches(patches)
+        .await
+        .map_err(|error| format!("メタデータ更新の記録に失敗しました: {error}"))?;
+
+    // フェーズ 2: 互換テーブルへの in-place UPDATE。memory_type / source /
+    // user_id 列のみを更新し、document / vector / vector_source 列は一切
+    // 変更しないため既存ベクトルは保持される。
+    let mut updated = 0usize;
+    let mut failed_ids: Vec<String> = Vec::new();
+    for item in items {
+        let predicate = format!("id = '{}'", escape_sql_literal(&item.id));
+        let result = table
+            .update()
+            .only_if(predicate)
+            .column(
+                "memory_type",
+                format!("'{}'", escape_sql_literal(&item.memory_type)),
+            )
+            .column("source", format!("'{}'", escape_sql_literal(&item.source)))
+            .column(
+                "user_id",
+                format!(
+                    "'{}'",
+                    escape_sql_literal(item.user_id.as_deref().unwrap_or("User"))
+                ),
+            )
+            .execute()
+            .await;
+        match result {
+            Ok(result) if result.rows_updated > 0 => updated += 1,
+            Ok(_) => failed_ids.push(format!("{} (not found)", item.id)),
+            Err(update_err) => failed_ids.push(format!("{} ({update_err})", item.id)),
+        }
+    }
+
+    if !failed_ids.is_empty() {
+        return Err(format!(
+            "bulk metadata update failed for {} rows: {}",
+            failed_ids.len(),
+            failed_ids.join("; ")
+        ));
+    }
+    Ok(updated)
+}
+
 /// 再帰的ディレクトリコピー
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     let src_metadata = std::fs::symlink_metadata(src)?;
@@ -3592,6 +3855,513 @@ mod tests {
             timestamp: "2026-09-02T12:00:00+09:00".to_string(),
             user_id: Some("tester".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn bulk_update_updates_metadata_and_preserves_document_and_vector() {
+        let root = unique_test_root("bulk-update-ok");
+        insert_memory_batch(
+            &root,
+            vec![
+                item("upd-a", "memory", "old a"),
+                item("upd-b", "memory", "old b"),
+            ],
+            Some(vec![sample_vector(1.0), sample_vector(2.0)]),
+        )
+        .await
+        .expect("seed rows for bulk update");
+
+        let mut updated = vec![
+            item("upd-a", "user_speech", "old a"),
+            item("upd-b", "observation", "old b"),
+        ];
+        updated[0].user_id = Some("Streamer".to_string());
+        let count = update_memories_bulk(&root, &updated)
+            .await
+            .expect("in-place metadata update must succeed");
+        assert_eq!(count, 2);
+
+        let row = get_memory_by_id(&root, "upd-a")
+            .await
+            .expect("query row a")
+            .expect("row a must exist after update");
+        // in-place UPDATE: document とベクトルは不変、表示メタデータのみ更新
+        assert_eq!(row.document, "old a");
+        assert_eq!(row.memory_type, "user_speech");
+        assert_eq!(row.user_id.as_deref(), Some("Streamer"));
+        assert_eq!(
+            read_row_vector(&root, "upd-a").await,
+            Some(sample_vector(1.0))
+        );
+        let row_b = get_memory_by_id(&root, "upd-b")
+            .await
+            .expect("query row b")
+            .expect("row b must exist after update");
+        assert_eq!(row_b.document, "old b");
+        assert_eq!(row_b.memory_type, "observation");
+        assert_eq!(
+            read_row_vector(&root, "upd-b").await,
+            Some(sample_vector(2.0))
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_preserves_existing_vector() {
+        let root = unique_test_root("bulk-update-preserve-vector");
+        insert_memory_batch(
+            &root,
+            vec![item("nov-1", "user_speech", "元の本文")],
+            Some(vec![sample_vector(1.0)]),
+        )
+        .await
+        .expect("seed row with document vector");
+
+        let before = get_memory_by_id(&root, "nov-1")
+            .await
+            .expect("query nov-1 before update")
+            .expect("seeded row must exist");
+
+        // vectors=None (プロダクション経路): metadata-only の in-place UPDATE
+        // では既存ベクトル・vector_source は保持される。
+        let updated = vec![item("nov-1", "memory", "元の本文")];
+        let count = update_memories_bulk(&root, &updated)
+            .await
+            .expect("metadata-only update must succeed");
+        assert_eq!(count, 1);
+
+        let row = get_memory_by_id(&root, "nov-1")
+            .await
+            .expect("query nov-1")
+            .expect("row must exist after update");
+        assert_eq!(row.document, "元の本文");
+        assert_eq!(row.memory_type, "memory");
+        assert_eq!(row.vector_source, before.vector_source);
+        assert_eq!(
+            read_row_vector(&root, "nov-1").await,
+            Some(sample_vector(1.0)),
+            "existing vector must be preserved by metadata-only update"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_survives_repository_reopen() {
+        let root = unique_test_root("bulk-update-reopen");
+        insert_memory_batch(&root, vec![item("reopen-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        let updated = vec![item("reopen-1", "insight", "本文")];
+        update_memories_bulk(&root, &updated)
+            .await
+            .expect("bulk update must succeed");
+
+        // リポジトリ再オープン後も表示メタデータの更新が維持される
+        // (ジャーナルの MetadataPatch 記録と互換テーブルの in-place UPDATE が
+        // どちらも恒久ストアに書き込まれていることの検証)。
+        let reopened = MemoryRepository::open(&root)
+            .await
+            .expect("repository reopen must succeed");
+        drop(reopened);
+        let row = get_memory_by_id(&root, "reopen-1")
+            .await
+            .expect("query after reopen")
+            .expect("row must survive reopen");
+        assert_eq!(row.memory_type, "insight");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn metadata_patch_replay_repairs_projection_after_crash() {
+        let root = unique_test_root("metadata-patch-crash");
+        insert_memory_batch(&root, vec![item("crash-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // クラッシュ直後の状態を再現: journal にのみ MetadataPatch を記録し、
+        // 互換テーブルの in-place UPDATE は意図的に行わない。
+        let repository = MemoryRepository::open(&root)
+            .await
+            .expect("open repository");
+        let payload = serde_json::json!({
+            "entity_id": "crash-1",
+            "memory_type": "insight",
+            "source": "User",
+            "user_id": "tester",
+        });
+        repository
+            .append_metadata_patch("crash-1", payload)
+            .await
+            .expect("journal commit must succeed");
+        drop(repository);
+
+        let stale = get_memory_by_id(&root, "crash-1")
+            .await
+            .expect("query stale row")
+            .expect("row must exist");
+        assert_eq!(
+            stale.memory_type, "memory",
+            "projection must still be stale before repair"
+        );
+
+        // repair/replay: projection が patch 済みの metadata に復元される
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert!(repaired >= 1, "at least one patch must be applied");
+        let row = get_memory_by_id(&root, "crash-1")
+            .await
+            .expect("query after repair")
+            .expect("row must exist after repair");
+        assert_eq!(row.memory_type, "insight");
+        assert_eq!(row.source, "User");
+        assert_eq!(row.user_id.as_deref(), Some("tester"));
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn metadata_patch_aba_edits_are_distinct_journal_operations() {
+        let root = unique_test_root("metadata-patch-aba");
+        insert_memory_batch(&root, vec![item("aba-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // A → B → A: 同じ状態へ戻す編集も独立した journal 操作として記録される
+        let repository = MemoryRepository::open(&root)
+            .await
+            .expect("open repository");
+        let patch_a = serde_json::json!({
+            "entity_id": "aba-1",
+            "memory_type": "A",
+            "source": "User",
+            "user_id": "tester",
+        });
+        let patch_b = serde_json::json!({
+            "entity_id": "aba-1",
+            "memory_type": "B",
+            "source": "User",
+            "user_id": "tester",
+        });
+        repository
+            .append_metadata_patch("aba-1", patch_a.clone())
+            .await
+            .expect("patch A must commit");
+        repository
+            .append_metadata_patch("aba-1", patch_b)
+            .await
+            .expect("patch B must commit");
+        repository
+            .append_metadata_patch("aba-1", patch_a)
+            .await
+            .expect("second A patch must commit as a new operation");
+        drop(repository);
+
+        // projection はシード状態のまま (クラッシュ直後と同等)。repair は
+        // journal の最後の patch (A) を適用するため B への巻き戻りは起きない。
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert!(repaired >= 1, "repair must apply the last patch");
+        let row = get_memory_by_id(&root, "aba-1")
+            .await
+            .expect("query after repair")
+            .expect("row must exist");
+        assert_eq!(row.memory_type, "A", "the last A patch must win");
+
+        // 3 つの metadata_patch 操作が journal に記録されていること
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let raw = std::fs::read_to_string(paths.journal()).expect("read journal");
+        let journaled = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| {
+                record
+                    .get("operation_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("metadata_patch")
+            })
+            .count();
+        assert_eq!(
+            journaled, 3,
+            "A→B→A must produce three distinct journal operations"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn repair_ignores_uncommitted_metadata_patch() {
+        let root = unique_test_root("metadata-patch-uncommitted");
+        insert_memory_batch(&root, vec![item("uc-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // begin + operation frame のみで commit frame のない状態を作る
+        // (operation frame 書込み後・commit 前のクラッシュ相当)。
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let journal =
+            crate::memory_v2::journal::Journal::open_with_lock(paths.journal(), paths.lock())
+                .expect("open journal");
+        // write_intent の payload はシリアライズ済み envelope である必要がある。
+        let envelope = crate::memory_v2::operation::OperationEnvelope::new(
+            crate::memory_v2::operation::OperationKind::MetadataPatch,
+            "uc-1",
+            "1970-01-01T00:00:00Z",
+            None,
+            serde_json::json!({
+                "entity_id": "uc-1",
+                "memory_type": "ghost",
+                "source": "User",
+                "user_id": "tester",
+            }),
+        )
+        .expect("envelope for uncommitted intent");
+        // write_intent は使用不可ファサードのため、明示的なバッチ API で
+        // begin + operation frame のみを書き、commit は意図的に省略する。
+        let batch_id = format!("batch-{}", uuid::Uuid::new_v4());
+        journal.begin_batch(&batch_id).expect("begin batch");
+        journal
+            .append_operation_envelope(&batch_id, &envelope)
+            .expect("append uncommitted operation");
+        // commit_batch は呼ばない (未 commit 状態のまま)
+        drop(journal);
+
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert_eq!(
+            repaired, 0,
+            "uncommitted metadata_patch must never be applied"
+        );
+        let row = get_memory_by_id(&root, "uc-1")
+            .await
+            .expect("query uc-1")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, "memory",
+            "projection must be unchanged by an uncommitted patch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_commits_all_patches_in_single_journal_batch() {
+        let root = unique_test_root("metadata-patch-single-batch");
+        insert_memory_batch(
+            &root,
+            vec![
+                item("sb-1", "memory", "本文1"),
+                item("sb-2", "memory", "本文2"),
+            ],
+            None,
+        )
+        .await
+        .expect("seed rows");
+
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let count_kinds = |raw: &str, want: &str| {
+            raw.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|record| {
+                    record
+                        .get("operation_kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(want)
+                })
+                .count()
+        };
+        let before = std::fs::read_to_string(paths.journal()).expect("read journal before");
+        let before_commits = count_kinds(&before, "batch_commit");
+
+        let updated = vec![
+            item("sb-1", "insight", "本文1"),
+            item("sb-2", "fact", "本文2"),
+        ];
+        update_memories_bulk(&root, &updated)
+            .await
+            .expect("bulk update must succeed");
+
+        // journal 構造の検証: bulk の metadata_patch 操作は 2 件で、単一バッチ
+        // (batch_commit が更新前から +1) として commit される。部分反映の
+        // batch が存在しないことの構造的証明。
+        let after = std::fs::read_to_string(paths.journal()).expect("read journal after");
+        let patch_ops = count_kinds(&after, "metadata_patch");
+        let batch_commits = count_kinds(&after, "batch_commit");
+        assert_eq!(patch_ops, 2, "both patches must be journaled");
+        assert_eq!(
+            batch_commits,
+            before_commits + 1,
+            "bulk patches must share ONE journal batch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_bulk_updates_keep_projection_matching_journal() {
+        let root = unique_test_root("metadata-patch-concurrent");
+        insert_memory_batch(&root, vec![item("cc-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // 2 つの bulk update を並行実行 (current-thread runtime 上で await 点で
+        // interleave する)。論理トランザクション全体の直列化により、完了後の
+        // projection は journal 上の最後の committed patch と一致しなければ
+        // ならない。
+        let root_a = root.clone();
+        let task_a = tokio::spawn(async move {
+            update_memories_bulk(&root_a, &[item("cc-1", "A", "本文")]).await
+        });
+        let root_b = root.clone();
+        let task_b = tokio::spawn(async move {
+            update_memories_bulk(&root_b, &[item("cc-1", "B", "本文")]).await
+        });
+        task_a.await.expect("task a").expect("bulk a");
+        task_b.await.expect("task b").expect("bulk b");
+
+        let repository = MemoryRepository::open(&root).await.expect("reopen");
+        let patches = repository
+            .read_committed_metadata_patches()
+            .await
+            .expect("read committed patches");
+        let last_memory_type = patches
+            .last()
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(|patch| patch.get("memory_type"))
+            .and_then(serde_json::Value::as_str)
+            .expect("last committed patch memory_type");
+        let row = get_memory_by_id(&root, "cc-1")
+            .await
+            .expect("query row")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, last_memory_type,
+            "projection must match the last committed journal patch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_repair_and_bulk_update_keep_projection_matching_journal() {
+        let root = unique_test_root("metadata-patch-repair-vs-bulk");
+        insert_memory_batch(&root, vec![item("rb-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // journal に patch A のみ commit し、projection はシード状態のまま残す
+        // (crash window 相当)。
+        let repository = MemoryRepository::open(&root).await.expect("open");
+        repository
+            .append_metadata_patch(
+                "rb-1",
+                serde_json::json!({
+                    "entity_id": "rb-1",
+                    "memory_type": "A",
+                    "source": "User",
+                    "user_id": "tester",
+                }),
+            )
+            .await
+            .expect("commit patch A");
+        drop(repository);
+
+        // テストフックを準備 (対象 root に紐付け): repair を journal 読み取り後
+        // に一時停止させ、bulk update との interleave を決定的にする。
+        let gate = std::sync::Arc::new(RepairTestGate {
+            root: root.clone(),
+            signal: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        *REPAIR_TEST_PAUSE.lock().expect("pause lock") = Some((root.clone(), gate.clone()));
+
+        // 1) public repair を起動 (lock 取得 → journal 読み取り → 停止)。
+        let root_r = root.clone();
+        let task_r = tokio::spawn(async move { repair_metadata_projection(&root_r).await });
+        gate.signal.notified().await;
+        // 最初の repair 停止を検知したら即フックを解除する。解除しないと
+        // bulk 内部の repair が再度停止して deadlock する。
+        *REPAIR_TEST_PAUSE.lock().expect("pause lock") = None;
+
+        // 2) bulk update B を起動。新実装では repair が lock を保持中のため、
+        // bulk は repair 完了まで待機する (旧実装ではここで bulk が先に B を
+        // journal/projection へ反映し、その後 repair が古い A を上書きする
+        // interleave が発生する)。current-thread runtime のため、task_b は
+        // 親が yield するまで poll されない。
+        let root_b = root.clone();
+        let task_b = tokio::spawn(async move {
+            update_memories_bulk(&root_b, &[item("rb-1", "B", "本文")]).await
+        });
+
+        // 3) 停止中の repair を再開 → lock 解放 → bulk が走行する。
+        // (task_b の完了待ちを先に取ると repair の再開待ちと循環し deadlock
+        // するため、必ず resume を先に送る)
+        gate.resume.notify_one();
+        task_r.await.expect("task r").expect("repair");
+        task_b.await.expect("task b").expect("bulk b");
+
+        // 4) journal 上の最後の committed patch と projection が一致する。
+        let repository = MemoryRepository::open(&root).await.expect("reopen");
+        let patches = repository
+            .read_committed_metadata_patches()
+            .await
+            .expect("read committed patches");
+        let last_memory_type = patches
+            .last()
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(|patch| patch.get("memory_type"))
+            .and_then(serde_json::Value::as_str)
+            .expect("last committed patch memory_type");
+        let row = get_memory_by_id(&root, "rb-1")
+            .await
+            .expect("query row")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, last_memory_type,
+            "projection must match the last committed journal patch"
+        );
+        cleanup(&root);
+    }
+
+    async fn read_row_vector(root: &std::path::Path, id: &str) -> Option<Vec<f32>> {
+        let db = get_or_create_db(root).await.ok()?;
+        let table = get_or_create_memories_table(&db, root).await.ok()?;
+        let predicate = format!("id = '{}'", escape_sql_literal(id));
+        let mut stream = table.query().only_if(predicate).execute().await.ok()?;
+        let batch = stream.try_next().await.ok()??;
+        let column = batch.column_by_name("vector")?;
+        let vectors = column.as_any().downcast_ref::<FixedSizeListArray>()?;
+        if vectors.is_null(0) {
+            return None;
+        }
+        let inner = vectors.value(0);
+        let values = inner.as_any().downcast_ref::<Float32Array>()?;
+        Some((0..values.len()).map(|index| values.value(index)).collect())
+    }
+
+    #[tokio::test]
+    async fn bulk_update_rejects_missing_and_duplicate_ids_before_mutation() {
+        let root = unique_test_root("bulk-update-validate");
+        insert_memory_batch(&root, vec![item("keep-1", "memory", "kept")], None)
+            .await
+            .expect("seed row for validation test");
+
+        assert!(update_memories_bulk(&root, &[]).await.is_err());
+        let missing = update_memories_bulk(&root, &[item("missing", "memory", "x")])
+            .await
+            .expect_err("missing id must abort before mutation");
+        assert!(missing.contains("見つかりません"), "{missing}");
+        let duplicate = vec![item("keep-1", "memory", "x"), item("keep-1", "memory", "y")];
+        assert!(update_memories_bulk(&root, &duplicate).await.is_err());
+
+        // 検証失敗は変異前に中止されるため元データが無傷であること
+        let row = get_memory_by_id(&root, "keep-1")
+            .await
+            .expect("query keep-1")
+            .expect("row must be untouched by aborted updates");
+        assert_eq!(row.document, "kept");
+        cleanup(&root);
     }
 
     #[tokio::test]

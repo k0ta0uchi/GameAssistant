@@ -18,6 +18,7 @@ pub enum OperationKind {
     Redaction,
     Embedding,
     SummaryStatus,
+    MetadataPatch,
 }
 
 impl OperationKind {
@@ -28,6 +29,7 @@ impl OperationKind {
             Self::Redaction => "redaction",
             Self::Embedding => "embedding",
             Self::SummaryStatus => "summary_status",
+            Self::MetadataPatch => "metadata_patch",
         }
     }
 }

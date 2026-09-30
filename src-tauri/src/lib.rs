@@ -369,6 +369,17 @@ async fn import_memories_to_lance(
     lance_memory::insert_memory_batch(&state.root_dir, items, vectors).await
 }
 
+/// 一括メタデータ更新 (issue: delete→import の2段階を1つの復旧可能な操作に)。
+/// import 失敗時は元データが自動復旧されるため、呼び出し側の2段階処理に
+/// 依存しない。
+#[tauri::command]
+async fn update_lance_memories_bulk(
+    state: State<'_, AppState>,
+    items: Vec<MemoryItem>,
+) -> Result<usize, String> {
+    lance_memory::update_memories_bulk(&state.root_dir, &items).await
+}
+
 #[tauri::command]
 fn lance_backup(state: State<AppState>) -> Result<String, String> {
     let res = lance_memory::backup_lance_db(&state.root_dir)?;
@@ -855,6 +866,11 @@ async fn initialize_runtime(
         tauri::async_runtime::spawn(async move { asr_session_mgr.ensure_asr_ready().await });
     let memory_root = state.root_dir.clone();
     let memory_task = tauri::async_runtime::spawn(async move {
+        // Crash recovery: replay committed MetadataPatch operations that never
+        // reached the compatibility projection before opening the repository.
+        if let Err(error) = lance_memory::repair_metadata_projection(&memory_root).await {
+            eprintln!("[LanceDB] metadata projection repair skipped: {error}");
+        }
         MemoryRepository::open(memory_root).await.map(|_| ())
     });
     let mut asr_task = Box::pin(asr_task);
@@ -1422,6 +1438,7 @@ pub fn run() {
             delete_lance_memory,
             delete_lance_memories_bulk,
             import_memories_to_lance,
+            update_lance_memories_bulk,
             memory_v2::api::memory_manager_list_raw,
             memory_v2::api::memory_manager_list_facts,
             memory_v2::api::memory_manager_list_summaries,
