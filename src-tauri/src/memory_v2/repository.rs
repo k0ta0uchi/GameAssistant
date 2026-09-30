@@ -1289,11 +1289,10 @@ impl MemoryRepository {
     /// Display metadata update (metadata_patch) operation to the journal.
     /// The authoritative raw event content is unchanged; only the
     /// compatibility projection's display metadata is patched by the caller.
-    pub async fn append_metadata_patch(
-        &self,
+    fn metadata_patch_envelope(
         entity_id: &str,
         patch: serde_json::Value,
-    ) -> StoreResult<()> {
+    ) -> StoreResult<OperationEnvelope> {
         let canonical_id = Self::canonical_event_id(entity_id);
         // MetadataPatch は「状態」ではなく「編集操作」である。operation_id は
         // payload を含む決定的ハッシュのため、同じ状態へ戻す編集 (A→B→A) を
@@ -1308,16 +1307,66 @@ impl MemoryRepository {
                 serde_json::Value::String(Uuid::new_v4().to_string()),
             );
         }
-        let envelope = OperationEnvelope::new(
+        OperationEnvelope::new(
             OperationKind::MetadataPatch,
             canonical_id,
             "1970-01-01T00:00:00Z",
             None,
             attempt,
         )
-        .map_err(memory_error)?;
+        .map_err(memory_error)
+    }
+
+    pub async fn append_metadata_patch(
+        &self,
+        entity_id: &str,
+        patch: serde_json::Value,
+    ) -> StoreResult<()> {
+        let envelope = Self::metadata_patch_envelope(entity_id, patch)?;
         self.commit_operation(envelope).await?;
         Ok(())
+    }
+
+    /// Commits display-metadata patches for multiple memories as ONE journal
+    /// batch. The single batch boundary makes the bulk edit all-or-nothing: a
+    /// journal failure mid-commit leaves no durable patch, so repair can never
+    /// apply a partial subset of a failed bulk update.
+    pub async fn commit_metadata_patches(
+        &self,
+        patches: Vec<(String, serde_json::Value)>,
+    ) -> StoreResult<usize> {
+        let mut envelopes = Vec::with_capacity(patches.len());
+        for (entity_id, patch) in patches {
+            envelopes.push(Self::metadata_patch_envelope(&entity_id, patch)?);
+        }
+        self.commit_operations(envelopes).await
+    }
+
+    /// Returns committed MetadataPatch envelopes in journal order for
+    /// compatibility-projection repair. The compact journal index provides the
+    /// committed-only boundary: uncommitted records (begin + operation frames
+    /// without a commit frame) are never returned, and checksum / sequence /
+    /// canonical validation stay inside the journal layer.
+    pub async fn read_committed_metadata_patches(&self) -> StoreResult<Vec<serde_json::Value>> {
+        let journal = self.journal.clone();
+        let index = journal.recover_index().map_err(|error| error.to_string())?;
+        let patch_kind = OperationKind::MetadataPatch.as_str();
+        let mut offsets: Vec<u64> = index
+            .operations
+            .iter()
+            .filter(|(_, operation)| {
+                operation.operation_kind == patch_kind
+                    && index
+                        .committed_operation_ids
+                        .contains(&operation.operation_id)
+            })
+            .filter_map(|(_, operation)| operation.offset)
+            .collect();
+        offsets.sort_unstable();
+        let records = journal
+            .read_operation_records_at_offsets(&offsets)
+            .map_err(|error| error.to_string())?;
+        Ok(records.into_iter().map(|record| record.payload).collect())
     }
 
     pub async fn append_redaction(&self, entity_id: &str) -> StoreResult<bool> {

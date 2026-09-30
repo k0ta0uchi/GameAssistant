@@ -3272,34 +3272,39 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
 /// and the in-place projection UPDATE: a patch that was recorded but never
 /// projected is re-applied on the next repair pass. Payloads hold absolute
 /// values, so re-applying them in journal order is idempotent.
+/// Replays committed MetadataPatch journal operations onto the compatibility
+/// memories table. This closes the crash window between the journal commit
+/// and the in-place projection UPDATE: a patch that was recorded but never
+/// projected is re-applied on the next repair pass. Payloads hold absolute
+/// values, so re-applying them in journal order is idempotent.
 pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String> {
-    let paths = crate::memory_v2::paths::MemoryPaths::from_runtime_root(root_dir)
-        .map_err(|error| format!("memory paths error: {error}"))?;
-    // journal.jsonl を直接走査する (checkpoint やレポートキャッシュに依存せず
-    // 全履歴を対象にする)。行単位の JSON として読み、entity_id ごとに最後の
-    // metadata_patch を収集して後勝ちで再適用する (絶対値なので冪等)。
-    // 不完全な最終行 (クラッシュ断片) はパースエラーとしてスキップされる。
-    let raw = std::fs::read_to_string(paths.journal())
-        .map_err(|error| format!("journal read error: {error}"))?;
+    let repository = MemoryRepository::open(root_dir)
+        .await
+        .map_err(|error| format!("repository open error: {error}"))?;
+    repair_metadata_projection_with(&repository, root_dir).await
+}
+
+async fn repair_metadata_projection_with(
+    repository: &MemoryRepository,
+    root_dir: &Path,
+) -> Result<usize, String> {
+    // journal recovery API 経由で commit済みの MetadataPatch のみを取得する
+    // (begin + operation だけで commit frame のない未 commit 操作は対象外。
+    // checksum / sequence / canonical 検証も journal 層で実施される)。
+    let records = repository
+        .read_committed_metadata_patches()
+        .await
+        .map_err(|error| format!("metadata patch read error: {error}"))?;
+    // 表示 id ごとに最後の patch を採用して後勝ちで再適用 (冪等)。
     let mut latest: std::collections::BTreeMap<String, serde_json::Value> =
         std::collections::BTreeMap::new();
-    for line in raw.lines() {
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if record
-            .get("operation_kind")
-            .and_then(serde_json::Value::as_str)
-            != Some("metadata_patch")
-        {
-            continue;
-        }
-        if let Some(entity_id) = record
+    for envelope in records {
+        let display_id = envelope
             .get("payload")
-            .and_then(|payload| payload.get("entity_id"))
-            .and_then(serde_json::Value::as_str)
-        {
-            latest.insert(entity_id.to_string(), record);
+            .and_then(|patch| patch.get("entity_id"))
+            .and_then(serde_json::Value::as_str);
+        if let Some(display_id) = display_id {
+            latest.insert(display_id.to_string(), envelope);
         }
     }
     if latest.is_empty() {
@@ -3309,17 +3314,14 @@ pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String
     let db = get_or_create_db(root_dir).await?;
     let table = get_or_create_memories_table(&db, root_dir).await?;
     let mut applied = 0usize;
-    for record in latest.into_values() {
-        // The journal line's payload field carries the serialized envelope;
-        // the display metadata lives in the envelope's own payload.
-        let Some(envelope) = record.get("payload") else {
+    for envelope in latest.into_values() {
+        // The envelope's entity_id is the canonical stable UUID; the
+        // compatibility row is keyed by the display id in the patch payload.
+        let Some(patch) = envelope.get("payload") else {
             continue;
         };
-        let patch = envelope.get("payload").cloned().unwrap_or_default();
         let (Some(entity_id), Some(memory_type), Some(source)) = (
-            envelope
-                .get("entity_id")
-                .and_then(serde_json::Value::as_str),
+            patch.get("entity_id").and_then(serde_json::Value::as_str),
             patch.get("memory_type").and_then(serde_json::Value::as_str),
             patch.get("source").and_then(serde_json::Value::as_str),
         ) else {
@@ -3329,13 +3331,7 @@ pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String
             .get("user_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("User");
-        // The envelope's entity_id is the canonical stable UUID; the
-        // compatibility row is keyed by the display id recorded in the patch.
-        let display_id = patch
-            .get("entity_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(entity_id);
-        let predicate = format!("id = '{}'", escape_sql_literal(display_id));
+        let predicate = format!("id = '{}'", escape_sql_literal(entity_id));
         let result = table
             .update()
             .only_if(predicate)
@@ -3372,8 +3368,10 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
     let table = get_or_create_memories_table(&db, root_dir).await?;
     // クラッシュ復旧: journal に記録済みだが互換テーブルへ未反映の
     // MetadataPatch があれば、新しい編集の前に修復する。
-    repair_metadata_projection(root_dir).await?;
     let repository = MemoryRepository::open(root_dir).await?;
+    // クラッシュ復旧: commit済みだが互換テーブルへ未反映の MetadataPatch を
+    // 新しい編集の前に修復する。
+    repair_metadata_projection_with(&repository, root_dir).await?;
 
     // 事前存在確認: ジャーナル・互換テーブルのどちらにも一切の変更を加える
     // 前に全 ID の存在を検証し、欠落 ID はバッチ全体を中断する。
@@ -3402,24 +3400,27 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
         }
     }
 
-    // フェーズ 1: ジャーナル先行。メタデータ編集は journal 操作
-    // (MetadataPatch) として恒久記録し、記録に失敗した場合は互換テーブルに
-    // 触れる前にバッチ全体を失敗させる。ジャーナルコミットの成功が更新成功
-    // の前提条件であり、クラッシュ時もジャーナルから状態を復元できる。
-    for item in items {
-        let payload = serde_json::json!({
-            "entity_id": item.id,
-            "memory_type": item.memory_type,
-            "source": item.source,
-            "user_id": item.user_id.clone().unwrap_or_else(|| "User".to_string()),
-        });
-        repository
-            .append_metadata_patch(&item.id, payload)
-            .await
-            .map_err(|error| {
-                format!("メタデータ更新の記録に失敗しました ({}): {error}", item.id)
-            })?;
-    }
+    // フェーズ 1: ジャーナル先行 (単一バッチで全件 commit、all-or-nothing)。
+    // バッチ境界により journal I/O 失敗時は 0 件のみ durable となり、
+    // repair が失敗した一括更新の一部を後から反映することはない。
+    let patches: Vec<(String, serde_json::Value)> = items
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                serde_json::json!({
+                    "entity_id": item.id,
+                    "memory_type": item.memory_type,
+                    "source": item.source,
+                    "user_id": item.user_id.clone().unwrap_or_else(|| "User".to_string()),
+                }),
+            )
+        })
+        .collect();
+    repository
+        .commit_metadata_patches(patches)
+        .await
+        .map_err(|error| format!("メタデータ更新の記録に失敗しました: {error}"))?;
 
     // フェーズ 2: 互換テーブルへの in-place UPDATE。memory_type / source /
     // user_id 列のみを更新し、document / vector / vector_source 列は一切
@@ -4029,6 +4030,115 @@ mod tests {
         assert_eq!(
             journaled, 3,
             "A→B→A must produce three distinct journal operations"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn repair_ignores_uncommitted_metadata_patch() {
+        let root = unique_test_root("metadata-patch-uncommitted");
+        insert_memory_batch(&root, vec![item("uc-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // begin + operation frame のみで commit frame のない状態を作る
+        // (operation frame 書込み後・commit 前のクラッシュ相当)。
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let journal =
+            crate::memory_v2::journal::Journal::open_with_lock(paths.journal(), paths.lock())
+                .expect("open journal");
+        // write_intent の payload はシリアライズ済み envelope である必要がある。
+        let envelope = crate::memory_v2::operation::OperationEnvelope::new(
+            crate::memory_v2::operation::OperationKind::MetadataPatch,
+            "uc-1",
+            "1970-01-01T00:00:00Z",
+            None,
+            serde_json::json!({
+                "entity_id": "uc-1",
+                "memory_type": "ghost",
+                "source": "User",
+                "user_id": "tester",
+            }),
+        )
+        .expect("envelope for uncommitted intent");
+        // write_intent は使用不可ファサードのため、明示的なバッチ API で
+        // begin + operation frame のみを書き、commit は意図的に省略する。
+        let batch_id = format!("batch-{}", uuid::Uuid::new_v4());
+        journal.begin_batch(&batch_id).expect("begin batch");
+        journal
+            .append_operation_envelope(&batch_id, &envelope)
+            .expect("append uncommitted operation");
+        // commit_batch は呼ばない (未 commit 状態のまま)
+        drop(journal);
+
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert_eq!(
+            repaired, 0,
+            "uncommitted metadata_patch must never be applied"
+        );
+        let row = get_memory_by_id(&root, "uc-1")
+            .await
+            .expect("query uc-1")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, "memory",
+            "projection must be unchanged by an uncommitted patch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn bulk_update_commits_all_patches_in_single_journal_batch() {
+        let root = unique_test_root("metadata-patch-single-batch");
+        insert_memory_batch(
+            &root,
+            vec![
+                item("sb-1", "memory", "本文1"),
+                item("sb-2", "memory", "本文2"),
+            ],
+            None,
+        )
+        .await
+        .expect("seed rows");
+
+        let paths =
+            crate::memory_v2::paths::MemoryPaths::from_runtime_root(&root).expect("memory paths");
+        let count_kinds = |raw: &str, want: &str| {
+            raw.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|record| {
+                    record
+                        .get("operation_kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(want)
+                })
+                .count()
+        };
+        let before = std::fs::read_to_string(paths.journal()).expect("read journal before");
+        let before_commits = count_kinds(&before, "batch_commit");
+
+        let updated = vec![
+            item("sb-1", "insight", "本文1"),
+            item("sb-2", "fact", "本文2"),
+        ];
+        update_memories_bulk(&root, &updated)
+            .await
+            .expect("bulk update must succeed");
+
+        // journal 構造の検証: bulk の metadata_patch 操作は 2 件で、単一バッチ
+        // (batch_commit が更新前から +1) として commit される。部分反映の
+        // batch が存在しないことの構造的証明。
+        let after = std::fs::read_to_string(paths.journal()).expect("read journal after");
+        let patch_ops = count_kinds(&after, "metadata_patch");
+        let batch_commits = count_kinds(&after, "batch_commit");
+        assert_eq!(patch_ops, 2, "both patches must be journaled");
+        assert_eq!(
+            batch_commits,
+            before_commits + 1,
+            "bulk patches must share ONE journal batch"
         );
         cleanup(&root);
     }
