@@ -6765,8 +6765,17 @@ mod tests {
             "nod scheduling must not wait for audio completion"
         );
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let logs = session.log_mgr.get_logs();
+        let mut logs = session.log_mgr.get_logs();
+        for _ in 0..20 {
+            if logs.iter().any(|entry| {
+                entry.message.contains("status=nod_failed")
+                    && entry.message.contains("reason=nod_asset_missing")
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            logs = session.log_mgr.get_logs();
+        }
         assert!(logs.iter().any(|entry| {
             entry.message.contains("status=nod_scheduled")
                 && entry.message.contains("phase=final")

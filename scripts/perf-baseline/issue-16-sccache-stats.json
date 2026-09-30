@@ -1,0 +1,24 @@
+{
+    "benchmark_target": "cargo check",
+    "cache_hit_rate_pct": 76.88,
+    "cache_hit_rebuild_sec": 309.98,
+    "cache_hits": 572,
+    "cache_misses": 172,
+    "cold_build_sec": 316.0,
+    "host": "Windows MSVC",
+    "non_cacheable_crate_type": 147,
+    "c_cpp_support": "cl.exe not in default PATH; single C++ file compile is <0.3s; no measurable cache impact",
+    "reasons": [
+        "Cache hit rate is 76.88% but wall time improvement is negligible (~1.9%, 316s -> 310s)",
+        "Bottleneck is linking and non-cacheable proc-macro / cdylib / heavy crates",
+        "MSVC C++ caching provides negligible benefit (<0.3s) and requires Visual Studio command prompt environment",
+        "Additional background daemon and tool maintenance overhead does not justify the negligible gain"
+    ],
+    "rust_version": "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+    "sccache_version": "sccache 0.18.0",
+    "timestamp": "2026-09-30T21:33:19+09:00",
+    "wall_time_reduction_pct": 1.91,
+    "wall_time_reduction_sec": 6.02,
+    "adopted": false,
+    "raw_stats_hit": "Compile requests                    912\nCompile requests executed           744\nCache hits                          572\nCache hits (Rust)                   572\nCache misses                        172\nCache misses (Rust)                 172\nCache hits rate                   76.88 %\nCache hits rate (Rust)            76.88 %\nCache timeouts                        0\nCache read errors                     0\nForced recaches                       0\nCache write errors                    0\nCache errors                          0\nCompilations                        172\nCompilation failures                  0\nNon-cacheable compilations            0\nNon-cacheable calls                 162\nNon-compilation calls                 6\nUnsupported compiler calls            0\nAverage cache write               0.017 s\nAverage compiler                  2.819 s\nAverage cache read hit            0.004 s\nFailed distributed compilations       0\n\nNon-cacheable reasons:\ncrate-type                          147\n-                                     8\nmissing input                         6\nincremental                           1\n\nCache location                  Local disk: \"C:\\\\Users\\\\k0ta0\\\\AppData\\\\Local\\\\Mozilla\\\\sccache\\\\cache\"\nBase directories                (none)\nUse direct/preprocessor mode?   yes\nVersion (client)                0.18.0\nCache size                          398 MiB\nMax cache size                       10 GiB"
+}
