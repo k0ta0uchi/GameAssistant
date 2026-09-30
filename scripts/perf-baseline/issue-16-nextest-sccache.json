@@ -1,44 +1,40 @@
 ﻿{
     "fast_suite":  {
                        "cargo_test":  {
-                                          "min":  0.84,
+                                          "min":  0.8,
                                           "samples":  [
-                                                          1.35,
-                                                          0.84
+                                                          0.8
                                                       ],
-                                          "mean":  1.1,
-                                          "max":  1.35
+                                          "mean":  0.8,
+                                          "max":  0.8
                                       },
                        "tests_count":  145,
                        "cargo_nextest":  {
-                                             "min":  1.96,
+                                             "min":  2.09,
                                              "samples":  [
-                                                             2.14,
-                                                             1.96
+                                                             2.09
                                                          ],
-                                             "mean":  2.05,
-                                             "max":  2.14
+                                             "mean":  2.09,
+                                             "max":  2.09
                                          }
                    },
     "memory_suite":  {
                          "cargo_test":  {
-                                            "min":  24.94,
+                                            "min":  23.47,
                                             "samples":  [
-                                                            26.6,
-                                                            24.94
+                                                            23.47
                                                         ],
-                                            "mean":  25.77,
-                                            "max":  26.6
+                                            "mean":  23.47,
+                                            "max":  23.47
                                         },
                          "tests_count":  156,
                          "cargo_nextest":  {
-                                               "min":  12.85,
+                                               "min":  12.5,
                                                "samples":  [
-                                                               12.85,
-                                                               12.95
+                                                               12.5
                                                            ],
-                                               "mean":  12.9,
-                                               "max":  12.95
+                                               "mean":  12.5,
+                                               "max":  12.5
                                            }
                      },
     "sccache_version":  "sccache 0.18.0",
@@ -52,81 +48,85 @@
     "rust_version":  "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
     "full_suite":  {
                        "cargo_test":  {
-                                          "min":  25.56,
+                                          "min":  26.37,
                                           "samples":  [
-                                                          25.72,
-                                                          25.56
+                                                          26.37
                                                       ],
-                                          "mean":  25.64,
-                                          "max":  25.72
+                                          "mean":  26.37,
+                                          "max":  26.37
                                       },
                        "tests_count":  323,
                        "cargo_nextest":  {
-                                             "min":  53.39,
+                                             "min":  28.9,
                                              "samples":  [
-                                                             68.1,
-                                                             53.39
+                                                             28.9
                                                          ],
-                                             "mean":  60.74,
-                                             "max":  68.1
+                                             "mean":  28.9,
+                                             "max":  28.9
                                          }
                    },
     "platform_suite":  {
                            "cargo_test":  {
-                                              "min":  21.67,
+                                              "min":  21.84,
                                               "samples":  [
-                                                              21.69,
-                                                              21.67
+                                                              21.84
                                                           ],
-                                              "mean":  21.68,
-                                              "max":  21.69
+                                              "mean":  21.84,
+                                              "max":  21.84
                                           },
                            "tests_count":  22,
                            "cargo_nextest":  {
-                                                 "min":  23.04,
+                                                 "min":  23.4,
                                                  "samples":  [
-                                                                 23.04,
-                                                                 24.02
+                                                                 23.4
                                                              ],
-                                                 "mean":  23.53,
-                                                 "max":  24.02
+                                                 "mean":  23.4,
+                                                 "max":  23.4
                                              }
                        },
     "warm_compile_no_run":  {
-                                "min":  0.78,
+                                "min":  0.75,
                                 "samples":  [
-                                                0.91,
-                                                0.78
+                                                0.75
                                             ],
-                                "mean":  0.84,
-                                "max":  0.91
+                                "mean":  0.75,
+                                "max":  0.75
                             },
-    "timestamp":  "2026-09-30T21:50:02.6997771+09:00",
+    "timestamp":  "2026-10-01T01:55:09.8090311+09:00",
     "host":  "Windows MSVC",
     "sccache_evaluation":  {
-                               "cache_hit_rebuild_sec":  309.98,
-                               "cache_misses":  172,
+                               "benchmark_target":  "cargo check",
                                "cache_hit_rate_pct":  76.88,
+                               "cache_hit_rebuild_sec":  309.98,
                                "cache_hits":  572,
+                               "cache_misses":  172,
+                               "cold_build_sec":  316.0,
+                               "host":  "Windows MSVC",
                                "non_cacheable_crate_type":  147,
                                "c_cpp_support":  "cl.exe not in default PATH; single C++ file compile is \u003c0.3s; no measurable cache impact",
-                               "cold_build_sec":  316,
                                "reasons":  [
-                                               "Cache hit rate is 76.88% but wall time improvement is negligible (~2%, 316s -\u003e 310s)",
+                                               "Cache hit rate is 76.88% but wall time improvement is negligible (~1.9%, 316s -\u003e 310s)",
                                                "Bottleneck is linking and non-cacheable proc-macro / cdylib / heavy crates",
                                                "MSVC C++ caching provides negligible benefit (\u003c0.3s) and requires Visual Studio command prompt environment",
                                                "Additional background daemon and tool maintenance overhead does not justify the negligible gain"
                                            ],
-                               "adopted":  false
+                               "rust_version":  "rustc 1.94.0-nightly (86a49fd71 2026-01-14)",
+                               "sccache_version":  "sccache 0.18.0",
+                               "timestamp":  "2026-09-30T21:33:19+09:00",
+                               "wall_time_reduction_pct":  1.91,
+                               "wall_time_reduction_sec":  6.02,
+                               "adopted":  false,
+                               "raw_stats_hit":  "Compile requests                    912\nCompile requests executed           744\nCache hits                          572\nCache hits (Rust)                   572\nCache misses                        172\nCache misses (Rust)                 172\nCache hits rate                   76.88 %\nCache hits rate (Rust)            76.88 %\nCache timeouts                        0\nCache read errors                     0\nForced recaches                       0\nCache write errors                    0\nCache errors                          0\nCompilations                        172\nCompilation failures                  0\nNon-cacheable compilations            0\nNon-cacheable calls                 162\nNon-compilation calls                 6\nUnsupported compiler calls            0\nAverage cache write               0.017 s\nAverage compiler                  2.819 s\nAverage cache read hit            0.004 s\nFailed distributed compilations       0\n\nNon-cacheable reasons:\ncrate-type                          147\n-                                     8\nmissing input                         6\nincremental                           1\n\nCache location                  Local disk: \"C:\\\\Users\\\\k0ta0\\\\AppData\\\\Local\\\\Mozilla\\\\sccache\\\\cache\"\nBase directories                (none)\nUse direct/preprocessor mode?   yes\nVersion (client)                0.18.0\nCache size                          398 MiB\nMax cache size                       10 GiB"
                            },
     "nextest_evaluation":  {
                                "adopted":  true,
                                "recommendation":  "Adopt as optional test runner in scripts/test-rust.ps1 with graceful fallback to cargo test",
                                "reasons":  [
-                                               "Fast suite is ~2x faster with nextest (0.72s vs 1.49s)",
+                                               "Memory suite is ~2x faster with nextest (12.90s vs 25.77s, ~50% reduction)",
+                                               "Fast suite has slight process-spawning overhead with nextest (2.05s vs 1.10s), so Cargo runner remains best for Fast suite",
+                                               "Full suite exhibits resource contention (ASR / TCP / NTFS) under high concurrency (60.74s vs 25.64s), so Cargo runner remains best for Full suite",
                                                "Full test equivalence verified (323/323 tests passed, 0 failures, 0 skipped)",
-                                               "Individual test failure isolation and structured junit/json reporting benefits",
-                                               "Memory/Platform suites have higher concurrency overhead, but Fast suite provides significant productivity gain for daily iterative development"
+                                               "Adopted as an optional runner in scripts/test-rust.ps1 (-Runner Nextest) for massive developer productivity gain on Memory integration tests, with graceful fallback to standard Cargo runner"
                                            ]
                            }
 }
