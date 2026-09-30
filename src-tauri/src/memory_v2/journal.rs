@@ -2126,7 +2126,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-struct FileLock {
+pub(crate) struct FileLock {
     file: File,
 }
 
@@ -2167,6 +2167,16 @@ impl FileLock {
         }
     }
 }
+/// Acquires a process-shared advisory lock file for the metadata-update
+/// logical transaction (repair → journal batch commit → compatibility
+/// projection UPDATE). The OS file lock serializes concurrent app instances
+/// on the same root/store; the guard releases it on drop. The in-process
+/// `METADATA_UPDATE_LOCK` serializes tasks before this file lock is ever
+/// attempted, so the two locks never contend within one process.
+pub(crate) fn acquire_metadata_transaction_lock(path: &Path) -> Result<FileLock, JournalError> {
+    FileLock::acquire(path)
+}
+
 impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();

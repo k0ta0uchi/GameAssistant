@@ -15,6 +15,7 @@ pub struct MemoryPaths {
     journal: PathBuf,
     manifest: PathBuf,
     lock: PathBuf,
+    metadata_lock: PathBuf,
     staging: PathBuf,
     legacy: PathBuf,
 }
@@ -34,6 +35,7 @@ impl MemoryPaths {
             journal: memory_root.join("journal.jsonl"),
             manifest: memory_root.join("manifest.json"),
             lock: memory_root.join("journal.lock"),
+            metadata_lock: memory_root.join("metadata_update.lock"),
             staging: memory_root.join("staging"),
             legacy: memory_root.join("legacy"),
             runtime_root,
@@ -48,6 +50,7 @@ impl MemoryPaths {
             &paths.journal,
             &paths.manifest,
             &paths.lock,
+            &paths.metadata_lock,
             &paths.staging,
             &paths.legacy,
         ] {
@@ -83,6 +86,12 @@ impl MemoryPaths {
     }
     pub fn lock(&self) -> &Path {
         &self.lock
+    }
+    /// Process-shared advisory lock file serializing the metadata-update
+    /// logical transaction (repair → journal batch commit → compatibility
+    /// projection UPDATE) across concurrent app instances.
+    pub fn metadata_lock(&self) -> &Path {
+        &self.metadata_lock
     }
     pub fn staging(&self) -> &Path {
         &self.staging

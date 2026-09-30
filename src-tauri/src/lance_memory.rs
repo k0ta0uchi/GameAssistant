@@ -3279,6 +3279,7 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
 /// 反映順序の逆転を防ぐ。
 pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String> {
     let _guard = METADATA_UPDATE_LOCK.lock().await;
+    let _process_guard = acquire_metadata_transaction_guard(root_dir).await?;
     let repository = MemoryRepository::open(root_dir)
         .await
         .map_err(|error| format!("repository open error: {error}"))?;
@@ -3300,15 +3301,16 @@ async fn repair_metadata_projection_with(
         .await
         .map_err(|error| format!("metadata patch read error: {error}"))?;
     #[cfg(test)]
-    if REPAIR_TEST_ARMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-        // テスト専用停止点: journal 読み取り後・projection 適用前の
-        // interleave を決定的に再現する (他テストでは armed=false のため
-        // 即座に通過する)。signal でテストに到達を通知し、resume で再開する。
-        if let Some(signal) = REPAIR_TEST_SIGNAL.get() {
-            signal.notify_one();
-        }
-        if let Some(resume) = REPAIR_TEST_RESUME.get() {
-            resume.notified().await;
+    {
+        let gate = REPAIR_TEST_PAUSE.lock().ok().and_then(|state| {
+            let (root, gate) = state.as_ref()?;
+            (root.as_path() == root_dir).then(|| gate.clone())
+        });
+        if let Some(gate) = gate {
+            // テスト専用停止点: journal 読み取り後・projection 適用前の
+            // interleave を決定的に再現する (対象 root のテストのみ有効)。
+            gate.signal.notify_one();
+            gate.resume.notified().await;
         }
     }
     // 表示 id ごとに最後の patch を採用して後勝ちで再適用 (冪等)。
@@ -3373,15 +3375,32 @@ async fn repair_metadata_projection_with(
 /// の二重送信ガードでは複数 window / 別経路を含む backend 整合性は保証できない)。
 static METADATA_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// root/store 単位のプロセス間排他: 別アプリインスタンスとの journal /
+/// projection 順序逆転を防ぐ OS アドバイザリロック (metadata_update.lock)。
+/// 呼び出し側は必ず先に `METADATA_UPDATE_LOCK` を取得するため、同一プロセス
+/// 内でこのロックが競合することはない。
+async fn acquire_metadata_transaction_guard(
+    root_dir: &Path,
+) -> Result<crate::memory_v2::journal::FileLock, String> {
+    let metadata_paths = crate::memory_v2::paths::MemoryPaths::from_runtime_root(root_dir)
+        .map_err(|error| format!("memory paths error: {error}"))?;
+    crate::memory_v2::journal::acquire_metadata_transaction_lock(metadata_paths.metadata_lock())
+        .map_err(|error| format!("metadata transaction lock error: {error}"))
+}
+
 // テスト専用: repair の journal 読み取り後・projection 適用前の interleave を
-// 決定的に再現するための停止点 (concurrent_repair_and_bulk_update テストの
-// み初期化し、他テストでは無効)。
+// 決定的に再現するための停止点。対象 root に紐付いているため、並列実行される
+// 他テスト (異なる root) がフックを消費することはない。
 #[cfg(test)]
-static REPAIR_TEST_SIGNAL: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+struct RepairTestGate {
+    root: std::path::PathBuf,
+    signal: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
 #[cfg(test)]
-static REPAIR_TEST_RESUME: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
-#[cfg(test)]
-static REPAIR_TEST_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static REPAIR_TEST_PAUSE: std::sync::Mutex<
+    Option<(std::path::PathBuf, std::sync::Arc<RepairTestGate>)>,
+> = std::sync::Mutex::new(None);
 
 pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
     if items.is_empty() {
@@ -3402,6 +3421,7 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
     // UPDATE の論理トランザクション全体を排他し、journal の順序と projection
     // の最終状態の逆転を防ぐ。
     let _update_guard = METADATA_UPDATE_LOCK.lock().await;
+    let _process_guard = acquire_metadata_transaction_guard(root_dir).await?;
 
     let db = get_or_create_db(root_dir).await?;
     let table = get_or_create_memories_table(&db, root_dir).await?;
@@ -4247,16 +4267,22 @@ mod tests {
             .expect("commit patch A");
         drop(repository);
 
-        // テストフックを準備: repair を journal 読み取り後に一時停止させ、
-        // bulk update との interleave を決定的にする。
-        let signal = REPAIR_TEST_SIGNAL.get_or_init(Default::default);
-        let resume = REPAIR_TEST_RESUME.get_or_init(Default::default);
-        REPAIR_TEST_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+        // テストフックを準備 (対象 root に紐付け): repair を journal 読み取り後
+        // に一時停止させ、bulk update との interleave を決定的にする。
+        let gate = std::sync::Arc::new(RepairTestGate {
+            root: root.clone(),
+            signal: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+        });
+        *REPAIR_TEST_PAUSE.lock().expect("pause lock") = Some((root.clone(), gate.clone()));
 
         // 1) public repair を起動 (lock 取得 → journal 読み取り → 停止)。
         let root_r = root.clone();
         let task_r = tokio::spawn(async move { repair_metadata_projection(&root_r).await });
-        signal.notified().await;
+        gate.signal.notified().await;
+        // 最初の repair 停止を検知したら即フックを解除する。解除しないと
+        // bulk 内部の repair が再度停止して deadlock する。
+        *REPAIR_TEST_PAUSE.lock().expect("pause lock") = None;
 
         // 2) bulk update B を起動。新実装では repair が lock を保持中のため、
         // bulk は repair 完了まで待機する (旧実装ではここで bulk が先に B を
@@ -4271,7 +4297,7 @@ mod tests {
         // 3) 停止中の repair を再開 → lock 解放 → bulk が走行する。
         // (task_b の完了待ちを先に取ると repair の再開待ちと循環し deadlock
         // するため、必ず resume を先に送る)
-        resume.notify_one();
+        gate.resume.notify_one();
         task_r.await.expect("task r").expect("repair");
         task_b.await.expect("task b").expect("bulk b");
 
