@@ -3267,6 +3267,92 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
 /// - ID/ベクトルは保持され、表示メタデータだけが更新される
 /// 各行の更新結果を journal に metadata_patch として記録し、失敗時は
 /// エラーに失敗 ID を含めて返す (部分成功の判別可能)。
+/// Replays committed MetadataPatch journal operations onto the compatibility
+/// memories table. This closes the crash window between the journal commit
+/// and the in-place projection UPDATE: a patch that was recorded but never
+/// projected is re-applied on the next repair pass. Payloads hold absolute
+/// values, so re-applying them in journal order is idempotent.
+pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String> {
+    let paths = crate::memory_v2::paths::MemoryPaths::from_runtime_root(root_dir)
+        .map_err(|error| format!("memory paths error: {error}"))?;
+    // journal.jsonl を直接走査する (checkpoint やレポートキャッシュに依存せず
+    // 全履歴を対象にする)。行単位の JSON として読み、entity_id ごとに最後の
+    // metadata_patch を収集して後勝ちで再適用する (絶対値なので冪等)。
+    // 不完全な最終行 (クラッシュ断片) はパースエラーとしてスキップされる。
+    let raw = std::fs::read_to_string(paths.journal())
+        .map_err(|error| format!("journal read error: {error}"))?;
+    let mut latest: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for line in raw.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if record
+            .get("operation_kind")
+            .and_then(serde_json::Value::as_str)
+            != Some("metadata_patch")
+        {
+            continue;
+        }
+        if let Some(entity_id) = record
+            .get("payload")
+            .and_then(|payload| payload.get("entity_id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            latest.insert(entity_id.to_string(), record);
+        }
+    }
+    if latest.is_empty() {
+        return Ok(0);
+    }
+
+    let db = get_or_create_db(root_dir).await?;
+    let table = get_or_create_memories_table(&db, root_dir).await?;
+    let mut applied = 0usize;
+    for record in latest.into_values() {
+        // The journal line's payload field carries the serialized envelope;
+        // the display metadata lives in the envelope's own payload.
+        let Some(envelope) = record.get("payload") else {
+            continue;
+        };
+        let patch = envelope.get("payload").cloned().unwrap_or_default();
+        let (Some(entity_id), Some(memory_type), Some(source)) = (
+            envelope
+                .get("entity_id")
+                .and_then(serde_json::Value::as_str),
+            patch.get("memory_type").and_then(serde_json::Value::as_str),
+            patch.get("source").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let user_id = patch
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("User");
+        // The envelope's entity_id is the canonical stable UUID; the
+        // compatibility row is keyed by the display id recorded in the patch.
+        let display_id = patch
+            .get("entity_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(entity_id);
+        let predicate = format!("id = '{}'", escape_sql_literal(display_id));
+        let result = table
+            .update()
+            .only_if(predicate)
+            .column(
+                "memory_type",
+                format!("'{}'", escape_sql_literal(memory_type)),
+            )
+            .column("source", format!("'{}'", escape_sql_literal(source)))
+            .column("user_id", format!("'{}'", escape_sql_literal(user_id)))
+            .execute()
+            .await
+            .map_err(|error| format!("metadata patch repair error: {error}"))?;
+        applied += result.rows_updated as usize;
+    }
+    Ok(applied)
+}
+
 pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
     if items.is_empty() {
         return Err("更新対象のメモリーがありません".to_string());
@@ -3284,6 +3370,9 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
 
     let db = get_or_create_db(root_dir).await?;
     let table = get_or_create_memories_table(&db, root_dir).await?;
+    // クラッシュ復旧: journal に記録済みだが互換テーブルへ未反映の
+    // MetadataPatch があれば、新しい編集の前に修復する。
+    repair_metadata_projection(root_dir).await?;
     let repository = MemoryRepository::open(root_dir).await?;
 
     // 事前存在確認: ジャーナル・互換テーブルのどちらにも一切の変更を加える
@@ -3823,6 +3912,54 @@ mod tests {
             .expect("query after reopen")
             .expect("row must survive reopen");
         assert_eq!(row.memory_type, "insight");
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn metadata_patch_replay_repairs_projection_after_crash() {
+        let root = unique_test_root("metadata-patch-crash");
+        insert_memory_batch(&root, vec![item("crash-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // クラッシュ直後の状態を再現: journal にのみ MetadataPatch を記録し、
+        // 互換テーブルの in-place UPDATE は意図的に行わない。
+        let repository = MemoryRepository::open(&root)
+            .await
+            .expect("open repository");
+        let payload = serde_json::json!({
+            "entity_id": "crash-1",
+            "memory_type": "insight",
+            "source": "User",
+            "user_id": "tester",
+        });
+        repository
+            .append_metadata_patch("crash-1", payload)
+            .await
+            .expect("journal commit must succeed");
+        drop(repository);
+
+        let stale = get_memory_by_id(&root, "crash-1")
+            .await
+            .expect("query stale row")
+            .expect("row must exist");
+        assert_eq!(
+            stale.memory_type, "memory",
+            "projection must still be stale before repair"
+        );
+
+        // repair/replay: projection が patch 済みの metadata に復元される
+        let repaired = repair_metadata_projection(&root)
+            .await
+            .expect("repair must succeed");
+        assert!(repaired >= 1, "at least one patch must be applied");
+        let row = get_memory_by_id(&root, "crash-1")
+            .await
+            .expect("query after repair")
+            .expect("row must exist after repair");
+        assert_eq!(row.memory_type, "insight");
+        assert_eq!(row.source, "User");
+        assert_eq!(row.user_id.as_deref(), Some("tester"));
         cleanup(&root);
     }
 

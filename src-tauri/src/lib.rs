@@ -866,6 +866,11 @@ async fn initialize_runtime(
         tauri::async_runtime::spawn(async move { asr_session_mgr.ensure_asr_ready().await });
     let memory_root = state.root_dir.clone();
     let memory_task = tauri::async_runtime::spawn(async move {
+        // Crash recovery: replay committed MetadataPatch operations that never
+        // reached the compatibility projection before opening the repository.
+        if let Err(error) = lance_memory::repair_metadata_projection(&memory_root).await {
+            eprintln!("[LanceDB] metadata projection repair skipped: {error}");
+        }
         MemoryRepository::open(memory_root).await.map(|_| ())
     });
     let mut asr_task = Box::pin(asr_task);
