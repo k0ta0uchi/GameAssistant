@@ -88,6 +88,31 @@ Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップ�
    npm run tauri dev
    ```
 
+5. **テストの実行 (Testing):**
+   階層化されたテストスイートを実行できます：
+   ```powershell
+   # 高速ユニットテスト (~1.1s)
+   scripts\test-rust.ps1 -Suite Fast
+
+   # LanceDB / ストレージ統合テスト
+   scripts\test-rust.ps1 -Suite Memory
+
+   # プラットフォーム・外部依存テスト
+   scripts\test-rust.ps1 -Suite Platform
+
+   # 全テスト (323 tests)
+   scripts\test-rust.ps1 -Suite Full
+   ```
+   ※ `cargo-nextest` を導入すると、Memory スイートを約 2 倍高速（~12.9s）に実行できます（未インストール時は自動的に標準 Cargo で実行されます）：
+   ```powershell
+   # nextest のインストール
+   winget install nextest.cargo-nextest
+   # または cargo install cargo-nextest --locked
+
+   # nextest を指定して実行
+   scripts\test-rust.ps1 -Suite Memory -Runner Nextest
+   ```
+
 ---
 
 ## 🛠️ 技術スタック (Technology Stack)
