@@ -3272,18 +3272,22 @@ pub async fn delete_memories_bulk(root_dir: &Path, ids: &[String]) -> Result<usi
 /// and the in-place projection UPDATE: a patch that was recorded but never
 /// projected is re-applied on the next repair pass. Payloads hold absolute
 /// values, so re-applying them in journal order is idempotent.
-/// Replays committed MetadataPatch journal operations onto the compatibility
-/// memories table. This closes the crash window between the journal commit
-/// and the in-place projection UPDATE: a patch that was recorded but never
-/// projected is re-applied on the next repair pass. Payloads hold absolute
-/// values, so re-applying them in journal order is idempotent.
+///
+/// startup repair (`initialize_runtime`) から呼ばれる public 経路。
+/// MetadataPatch projection を変更する全経路 (startup repair / bulk update)
+/// が `METADATA_UPDATE_LOCK` を共有し、journal の適用順序と projection の
+/// 反映順序の逆転を防ぐ。
 pub async fn repair_metadata_projection(root_dir: &Path) -> Result<usize, String> {
+    let _guard = METADATA_UPDATE_LOCK.lock().await;
     let repository = MemoryRepository::open(root_dir)
         .await
         .map_err(|error| format!("repository open error: {error}"))?;
     repair_metadata_projection_with(&repository, root_dir).await
 }
 
+/// `METADATA_UPDATE_LOCK` 保持中に実行される repair 本体。bulk update は
+/// lock 保持中にこの関数を直接呼ぶため public 経路を経由せず、mutex の
+/// 二重取得による deadlock は発生しない。
 async fn repair_metadata_projection_with(
     repository: &MemoryRepository,
     root_dir: &Path,
@@ -3295,6 +3299,18 @@ async fn repair_metadata_projection_with(
         .read_committed_metadata_patches()
         .await
         .map_err(|error| format!("metadata patch read error: {error}"))?;
+    #[cfg(test)]
+    if REPAIR_TEST_ARMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        // テスト専用停止点: journal 読み取り後・projection 適用前の
+        // interleave を決定的に再現する (他テストでは armed=false のため
+        // 即座に通過する)。signal でテストに到達を通知し、resume で再開する。
+        if let Some(signal) = REPAIR_TEST_SIGNAL.get() {
+            signal.notify_one();
+        }
+        if let Some(resume) = REPAIR_TEST_RESUME.get() {
+            resume.notified().await;
+        }
+    }
     // 表示 id ごとに最後の patch を採用して後勝ちで再適用 (冪等)。
     let mut latest: std::collections::BTreeMap<String, serde_json::Value> =
         std::collections::BTreeMap::new();
@@ -3356,6 +3372,16 @@ async fn repair_metadata_projection_with(
 /// journal order and leave the projection older than the journal (frontend
 /// の二重送信ガードでは複数 window / 別経路を含む backend 整合性は保証できない)。
 static METADATA_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// テスト専用: repair の journal 読み取り後・projection 適用前の interleave を
+// 決定的に再現するための停止点 (concurrent_repair_and_bulk_update テストの
+// み初期化し、他テストでは無効)。
+#[cfg(test)]
+static REPAIR_TEST_SIGNAL: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+#[cfg(test)]
+static REPAIR_TEST_RESUME: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+#[cfg(test)]
+static REPAIR_TEST_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Result<usize, String> {
     if items.is_empty() {
@@ -3475,9 +3501,6 @@ pub async fn update_memories_bulk(root_dir: &Path, items: &[MemoryItem]) -> Resu
     }
     Ok(updated)
 }
-
-/// metadata_patch journal 記録の失敗は best-effort 監査であり、メタデータ
-/// 更新自体は互換テーブルに反映済み。失敗はコンソールへ出力する。
 
 /// 再帰的ディレクトリコピー
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -4190,6 +4213,81 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("last committed patch memory_type");
         let row = get_memory_by_id(&root, "cc-1")
+            .await
+            .expect("query row")
+            .expect("row must exist");
+        assert_eq!(
+            row.memory_type, last_memory_type,
+            "projection must match the last committed journal patch"
+        );
+        cleanup(&root);
+    }
+
+    #[tokio::test]
+    async fn concurrent_repair_and_bulk_update_keep_projection_matching_journal() {
+        let root = unique_test_root("metadata-patch-repair-vs-bulk");
+        insert_memory_batch(&root, vec![item("rb-1", "memory", "本文")], None)
+            .await
+            .expect("seed row");
+
+        // journal に patch A のみ commit し、projection はシード状態のまま残す
+        // (crash window 相当)。
+        let repository = MemoryRepository::open(&root).await.expect("open");
+        repository
+            .append_metadata_patch(
+                "rb-1",
+                serde_json::json!({
+                    "entity_id": "rb-1",
+                    "memory_type": "A",
+                    "source": "User",
+                    "user_id": "tester",
+                }),
+            )
+            .await
+            .expect("commit patch A");
+        drop(repository);
+
+        // テストフックを準備: repair を journal 読み取り後に一時停止させ、
+        // bulk update との interleave を決定的にする。
+        let signal = REPAIR_TEST_SIGNAL.get_or_init(Default::default);
+        let resume = REPAIR_TEST_RESUME.get_or_init(Default::default);
+        REPAIR_TEST_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // 1) public repair を起動 (lock 取得 → journal 読み取り → 停止)。
+        let root_r = root.clone();
+        let task_r = tokio::spawn(async move { repair_metadata_projection(&root_r).await });
+        signal.notified().await;
+
+        // 2) bulk update B を起動。新実装では repair が lock を保持中のため、
+        // bulk は repair 完了まで待機する (旧実装ではここで bulk が先に B を
+        // journal/projection へ反映し、その後 repair が古い A を上書きする
+        // interleave が発生する)。current-thread runtime のため、task_b は
+        // 親が yield するまで poll されない。
+        let root_b = root.clone();
+        let task_b = tokio::spawn(async move {
+            update_memories_bulk(&root_b, &[item("rb-1", "B", "本文")]).await
+        });
+
+        // 3) 停止中の repair を再開 → lock 解放 → bulk が走行する。
+        // (task_b の完了待ちを先に取ると repair の再開待ちと循環し deadlock
+        // するため、必ず resume を先に送る)
+        resume.notify_one();
+        task_r.await.expect("task r").expect("repair");
+        task_b.await.expect("task b").expect("bulk b");
+
+        // 4) journal 上の最後の committed patch と projection が一致する。
+        let repository = MemoryRepository::open(&root).await.expect("reopen");
+        let patches = repository
+            .read_committed_metadata_patches()
+            .await
+            .expect("read committed patches");
+        let last_memory_type = patches
+            .last()
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(|patch| patch.get("memory_type"))
+            .and_then(serde_json::Value::as_str)
+            .expect("last committed patch memory_type");
+        let row = get_memory_by_id(&root, "rb-1")
             .await
             .expect("query row")
             .expect("row must exist");
