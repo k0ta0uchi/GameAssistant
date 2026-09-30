@@ -16,7 +16,14 @@
     "test_run_cold": 82.1,
     "warm_build_steady_state": 0.87,
     "test_compile_warm": 0.75,
-    "test_run_warm": 32.28
+    "test_run_warm": 32.28,
+    "test_run_warm_initial": 32.28,
+    "test_run_warm_samples": [
+      35.76,
+      26.09,
+      29.33
+    ],
+    "test_run_warm_mean": 30.39
   },
   "phase_notes": {
     "clean_build": "cargo clean -> cargo build --timings (full rebuild with opt-level=1 dependencies)",
