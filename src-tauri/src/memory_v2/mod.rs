@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn paths_expose_isolated_journal_manifest_lock_staging_and_legacy_locations() {
+    fn storage_paths_expose_isolated_journal_manifest_lock_staging_and_legacy_locations() {
         let root = temp_root("paths");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         assert_eq!(paths.journal(), root.join("data/memory_v2/journal.jsonl"));
@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_appends_canonical_checksummed_intent_and_commit_durably() {
+    fn storage_journal_appends_canonical_checksummed_intent_and_commit_durably() {
         let root = temp_root("journal");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal = journal::Journal::open_with_lock(paths.journal(), paths.lock()).unwrap();
@@ -701,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_ignores_only_an_incomplete_final_line_but_rejects_malformed_complete_lines() {
+    fn storage_journal_ignores_only_an_incomplete_final_line_but_rejects_malformed_complete_lines() {
         let root = temp_root("tails");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal = journal::Journal::open_with_lock(paths.journal(), paths.lock()).unwrap();
@@ -743,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_rejects_duplicate_conflicts_sequence_checksum_and_unknown_state() {
+    fn storage_journal_rejects_duplicate_conflicts_sequence_checksum_and_unknown_state() {
         let root = temp_root("validation");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal = journal::Journal::open_with_lock(paths.journal(), paths.lock()).unwrap();
@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_retries_are_deterministic_no_ops() {
+    fn storage_committed_retries_are_deterministic_no_ops() {
         let root = temp_root("retry");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal = journal::Journal::open_with_lock(paths.journal(), paths.lock()).unwrap();
@@ -837,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_writers_have_unique_monotonic_sequences() {
+    fn storage_concurrent_writers_have_unique_monotonic_sequences() {
         let root = temp_root("concurrent");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal =
@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_selector_validates_current_store_names_and_monotonic_generation() {
+    fn storage_manifest_selector_validates_current_store_names_and_monotonic_generation() {
         let root = temp_root("manifest");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let selector = manifest::ManifestSelector::new(paths.manifest(), paths.staging()).unwrap();

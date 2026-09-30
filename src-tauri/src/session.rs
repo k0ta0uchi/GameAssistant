@@ -6158,7 +6158,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_callback_arms_partial_once_and_promotes_final_once() {
+    async fn storage_session_callback_arms_partial_once_and_promotes_final_once() {
         let session = test_session_manager("callback-wake-red");
         session.start_session();
         session
@@ -6212,7 +6212,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_asr_callback_gate_accepts_final_but_rejects_partial() {
+    fn storage_stale_asr_callback_gate_accepts_final_but_rejects_partial() {
         let session = test_session_manager("stale-asr-callback-gate");
         session.start_session();
         let context = session
@@ -6238,7 +6238,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_final_is_persisted_raw_but_not_queued_for_live_summary() {
+    async fn storage_stale_final_is_persisted_raw_but_not_queued_for_live_summary() {
         let session = test_session_manager("stale-final-summary-boundary");
         session.start_session();
         let context = session
@@ -6271,7 +6271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_final_asr_is_classified_without_logging_transcript() {
+    async fn storage_empty_final_asr_is_classified_without_logging_transcript() {
         let session = test_session_manager("empty-final-admission-diagnostic");
         session.start_session();
         let context = session
@@ -6299,7 +6299,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_asr_stream_is_classified_without_exposing_stream_payload() {
+    async fn storage_unknown_asr_stream_is_classified_without_exposing_stream_payload() {
         let session = test_session_manager("unknown-stream-admission-diagnostic");
         session.start_session();
         let context = session
@@ -6334,7 +6334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_word_final_still_persists_raw_event() {
+    async fn storage_stop_word_final_still_persists_raw_event() {
         let session = test_session_manager("stop-word-raw-red");
         session.start_session();
         let event = super::SessionEvent {
@@ -6359,7 +6359,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_resets_wake_state_before_blog_drain_boundary() {
+    async fn storage_stop_resets_wake_state_before_blog_drain_boundary() {
         let session = test_session_manager("stop-blog-boundary-red");
         session.start_session();
         session.asr_engine.begin_wake_word_session(1);
@@ -6393,7 +6393,7 @@ mod tests {
     }
 
     #[test]
-    fn stopped_session_archive_is_reclaimed_when_blog_is_disabled() {
+    fn storage_stopped_session_archive_is_reclaimed_when_blog_is_disabled() {
         let session = test_session_manager("archive-reclaim");
         std::fs::write(
             session.root_dir.join("settings.json"),
@@ -6486,7 +6486,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selected_blog_sources_resolve_dedupe_and_sort_chronologically() {
+    async fn storage_selected_blog_sources_resolve_dedupe_and_sort_chronologically() {
         let session = test_session_manager("selected-blog");
         let row = |id: &str, timestamp: &str, doc: &str| MemoryItem {
             id: id.to_string(),
@@ -6556,7 +6556,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_summary_can_emit_after_stop_but_not_after_replacement_start() {
+    fn storage_stale_summary_can_emit_after_stop_but_not_after_replacement_start() {
         let session = test_session_manager("fact-generation-boundary");
         session.start_session();
         let first = session
@@ -6642,7 +6642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_manual_input_is_not_reported_as_success() {
+    async fn storage_empty_manual_input_is_not_reported_as_success() {
         let session = test_session_manager("empty-manual-input-outcome-red");
 
         let result = session
@@ -6663,7 +6663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_session_input_is_not_reported_as_success() {
+    async fn storage_stale_session_input_is_not_reported_as_success() {
         let session = test_session_manager("stale-input-outcome-red");
         session.start_session();
         let context = session
@@ -6701,7 +6701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_gemini_key_is_classified_before_generation_started() {
+    async fn storage_missing_gemini_key_is_classified_before_generation_started() {
         let session = test_session_manager("missing-gemini-key-preflight");
         session.start_session();
         let context = session
@@ -6746,7 +6746,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_received_schedules_nod_without_waiting_for_audio_completion() {
+    async fn storage_prompt_received_schedules_nod_without_waiting_for_audio_completion() {
         let session = test_session_manager("prompt-received-nod-background");
         session.start_session();
         let context = session
@@ -6779,7 +6779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_nod_schedule_is_rejected_after_generation_boundary() {
+    async fn storage_stale_nod_schedule_is_rejected_after_generation_boundary() {
         let session = test_session_manager("stale-nod-generation-boundary");
         session.start_session();
         let context = session
@@ -6809,7 +6809,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_prompt_final_is_classified_without_calling_gemini() {
+    async fn storage_non_prompt_final_is_classified_without_calling_gemini() {
         let session = test_session_manager("non-prompt-final-outcome");
         session.start_session();
         let context = session
@@ -6863,7 +6863,7 @@ mod tests {
     }
 
     #[test]
-    fn blog_article_paths_never_collide_within_one_second() {
+    fn storage_blog_article_paths_never_collide_within_one_second() {
         let dir = unique_session_test_root("blog-names");
         let first = unique_blog_path(&dir, "2026-09-07_12-00-00");
         assert_eq!(first, dir.join("2026-09-07_12-00-00.md"));
@@ -6880,7 +6880,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_drain_reports_outstanding_raw_save_tasks_after_bounded_wait() {
+    async fn storage_stop_drain_reports_outstanding_raw_save_tasks_after_bounded_wait() {
         let session = test_session_manager("stop-drain");
 
         // No in-flight raw-save tasks: the drain completes immediately.
@@ -6913,7 +6913,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_drain_wakes_as_soon_as_the_last_guard_drops() {
+    async fn storage_stop_drain_wakes_as_soon_as_the_last_guard_drops() {
         let session = test_session_manager("stop-drain-wake");
         let guard = session.begin_event_task();
         let waiter = tokio::spawn({

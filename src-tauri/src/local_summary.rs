@@ -1862,7 +1862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn queue_overflow_uses_a_stable_machine_reason() {
+    async fn storage_queue_overflow_uses_a_stable_machine_reason() {
         let root = temp_summary_root("queue-reason");
         let service = LocalSummaryService::new(root.clone());
         let model_path = root.join("gemma-3-1b-it-Q4_K_S.gguf");
@@ -2083,7 +2083,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_server_must_be_the_bootstrap_validated_runtime_binary() {
+    fn storage_summary_server_must_be_the_bootstrap_validated_runtime_binary() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-summary-server-{}-{}",
             std::process::id(),
@@ -2096,7 +2096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_queue_rejects_new_events_when_full() {
+    async fn storage_bounded_queue_rejects_new_events_when_full() {
         let root = temp_summary_root("queue-full");
         let service = LocalSummaryService::new(root.clone());
         // No worker is started here, so the queue cannot drain: the state is
@@ -2176,7 +2176,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_reports_the_contract_json_shape() {
+    async fn storage_status_reports_the_contract_json_shape() {
         let root = temp_summary_root("status-shape");
         let service = LocalSummaryService::new(root.clone());
         let status = service.status().await;
@@ -2199,7 +2199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_state_transitions_follow_the_spec() {
+    async fn storage_status_state_transitions_follow_the_spec() {
         let root = temp_summary_root("status-states");
         let service = LocalSummaryService::new(root.clone());
 
@@ -2289,7 +2289,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_log_rotates_to_a_single_generation() {
+    fn storage_summary_log_rotates_to_a_single_generation() {
         let root = temp_summary_root("log-rotation");
         let log_path = root.join("summary.log");
         let rotated_path = root.join("summary.log.1");

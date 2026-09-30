@@ -654,7 +654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_live_twitch_connect() {
+    async fn platform_test_live_twitch_connect() {
         let svc = TwitchService::new();
         let settings = TwitchBotSettings {
             channel: "k0ta0uchi".to_string(),

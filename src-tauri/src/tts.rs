@@ -425,7 +425,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_nod_wav_files_exist() {
+    async fn platform_test_nod_wav_files_exist() {
         let Some(root) = std::env::var_os("GAMEASSISTANT_DISTRIBUTION_ROOT") else {
             // Source/unit-test CI may intentionally omit shipped audio. The
             // fixture contract below still exercises the complete file set;
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nod_asset_fixture_contains_every_required_index() {
+    async fn platform_nod_asset_fixture_contains_every_required_index() {
         let root = std::env::temp_dir().join(format!(
             "ga-nod-fixture-{}-{}",
             std::process::id(),
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_nod_assets_are_reported_as_an_error() {
+    async fn platform_missing_nod_assets_are_reported_as_an_error() {
         let root = std::env::temp_dir().join(format!(
             "ga-missing-nod-assets-{}-{}",
             std::process::id(),
