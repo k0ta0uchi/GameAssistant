@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_helper_process_cannot_bypass_held_lock() {
+    fn platform_lock_helper_process_cannot_bypass_held_lock() {
         if let Ok(root) = std::env::var("GAMEASSISTANT_LOCK_TEST_ROOT") {
             assert!(
                 super::acquire_download_lock(&std::path::Path::new(&root).join("models")).is_err()
@@ -489,7 +489,7 @@ mod tests {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "model_manager::tests::lock_helper_process_cannot_bypass_held_lock",
+                "model_manager::tests::platform_lock_helper_process_cannot_bypass_held_lock",
                 "--nocapture",
             ])
             .env("GAMEASSISTANT_LOCK_TEST_ROOT", &root)
@@ -505,7 +505,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_lock_denies_delete_and_stable_path_replacement_while_held() {
+    fn platform_windows_lock_denies_delete_and_stable_path_replacement_while_held() {
         let root = tempfile_root("windows-lock-share");
         let models = root.join("models");
         let lock_path = models.join(".model-download.lock");

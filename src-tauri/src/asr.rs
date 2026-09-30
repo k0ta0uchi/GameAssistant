@@ -2771,7 +2771,7 @@ mod tests {
     }
 
     #[test]
-    fn asr_engine_wrapper_exposes_state_machine_for_session_callbacks() {
+    fn platform_asr_engine_wrapper_exposes_state_machine_for_session_callbacks() {
         let engine = AsrEngine::new();
         engine.configure_wake_word(WakeWordConfig::new(vec!["ねえぐり".to_string()]));
         engine.begin_wake_word_session(42);
@@ -2823,7 +2823,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transcribe_dummy_audio() {
+    fn platform_test_transcribe_dummy_audio() {
         let engine = AsrEngine::new();
         let dummy = vec![0.0f32; 16000]; // 1秒の無音
         let result = engine.transcribe_pcm_native(&dummy);
@@ -2831,7 +2831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transcribe_wav_file() {
+    fn platform_test_transcribe_wav_file() {
         let wav_path = "J:\\Train\\wav\\Kota\\0001.wav";
         if !std::path::Path::new(wav_path).exists() {
             println!("WAV file not found at: {}", wav_path);
@@ -2888,7 +2888,7 @@ mod tests {
     }
 
     #[test]
-    fn test_whisper_ws_client() {
+    fn platform_test_whisper_ws_client() {
         let client = WhisperWsClient::new();
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -2963,7 +2963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ws_probe_is_bounded_when_server_accepts_without_handshake() {
+    async fn platform_ws_probe_is_bounded_when_server_accepts_without_handshake() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let accept_task = tokio::spawn(async move {
@@ -3004,7 +3004,7 @@ mod tests {
     }
 
     #[test]
-    fn child_output_is_forwarded_to_the_application_console_log() {
+    fn platform_child_output_is_forwarded_to_the_application_console_log() {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-asr-log-{}-{}",
             std::process::id(),
@@ -3031,7 +3031,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn connection_failure_cleanup_kills_owned_asr_process() {
+    fn platform_connection_failure_cleanup_kills_owned_asr_process() {
         use std::os::windows::process::CommandExt;
 
         let client = WhisperWsClient::new();
@@ -3088,7 +3088,7 @@ mod tests {
     }
 
     #[test]
-    fn test_device_transition_notification_dedup() {
+    fn platform_test_device_transition_notification_dedup() {
         let client = WhisperWsClient::new();
         assert_eq!(*client.last_notified_device.lock(), None);
 
