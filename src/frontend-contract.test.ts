@@ -349,6 +349,7 @@ class TauriHarness {
   failRegistrationAt: number | null = null;
   failRegistrationEvents = new Set<string>();
   failSaveSettingKeys = new Set<string>();
+  saveSettingWarning: string | null = null;
   modelsStatus: unknown[] = [];
   failGetSetupStatus = false;
   syncStatusOnSave = true;
@@ -644,7 +645,10 @@ class TauriHarness {
           };
         }
       }
-      return this.settings;
+      if (this.saveSettingWarning) {
+        return { settings: this.settings, warning: this.saveSettingWarning };
+      }
+      return { settings: this.settings, warning: null };
     }
     if (command === "session_start" || command === "cancel_setup")
       return undefined;
@@ -2570,6 +2574,113 @@ for (const [reason, expectedLabel, retryable] of [
   assert.equal(parsed[0].predicate, "likes");
 
   await act(async () => root.unmount());
+  await settleEffects();
+}
+
+// In Tauri environment, updateSetting only invokes save_setting and never issues HTTP POST to legacy /api/settings.
+{
+  const { harness } = makeHarness();
+  let fetchCalled = false;
+  const previousFetch = globalThis.fetch;
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    writable: true,
+    value: async (url: string) => {
+      if (String(url).includes("/api/settings")) {
+        fetchCalled = true;
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+  try {
+    const { renderer, snapshot } = await mountHook(harness);
+    await act(async () => {
+      await snapshot.current!.updateSetting("test_key", "test_val");
+    });
+    assert.equal(
+      fetchCalled,
+      false,
+      "Legacy HTTP fetch should not be called in Tauri environment",
+    );
+    assert.equal(harness.settings.test_key, "test_val");
+    renderer.unmount();
+    await settleEffects();
+  } finally {
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: previousFetch,
+    });
+  }
+}
+
+// When persistence fails in updateSetting, the optimistic update rolls back to the previous state.
+{
+  const { harness } = makeHarness();
+  harness.settings.audio_device = "original_device";
+  harness.settings.enable_discord_capture = false;
+  harness.failSaveSettingKeys.add("audio_device");
+
+  const { renderer, snapshot } = await mountHook(harness);
+  let errorThrown = false;
+  try {
+    await act(async () => {
+      await snapshot.current!.updateSetting("audio_device", "failed_device", {
+        throwOnError: true,
+      });
+    });
+  } catch {
+    errorThrown = true;
+  }
+
+  assert.equal(
+    errorThrown,
+    true,
+    "updateSetting with throwOnError should rethrow persistence error",
+  );
+  // Rollback check:
+  assert.equal(
+    snapshot.current!.settings.audio_device,
+    "original_device",
+    "UI settings should roll back to previous value on failure",
+  );
+  assert.equal(
+    snapshot.current!.selectedDevice,
+    "original_device",
+    "selectedDevice state should roll back on failure",
+  );
+
+  renderer.unmount();
+  await settleEffects();
+}
+
+// When worker sync produces a warning but persistence succeeds, settings are retained and a warning toast is shown.
+{
+  const { harness } = makeHarness();
+  harness.saveSettingWarning =
+    "Failed to apply VRAM preallocation to ASR worker: WebSocket connection not active";
+
+  const { renderer, snapshot } = await mountHook(harness);
+  await act(async () => {
+    await snapshot.current!.updateSetting("preallocate_vram", true);
+  });
+
+  assert.equal(
+    snapshot.current!.settings.preallocate_vram,
+    true,
+    "Settings should remain updated when persistence succeeds",
+  );
+  assert.equal(
+    snapshot.current!.toast?.type,
+    "warning",
+    "Toast type should be warning on worker sync failure",
+  );
+  assert.ok(
+    snapshot.current!.toast?.message.includes("ワーカー反映警告"),
+    "Toast message should notify user of worker sync warning",
+  );
+
+  renderer.unmount();
   await settleEffects();
 }
 
