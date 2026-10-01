@@ -1,0 +1,101 @@
+name: Portable EXE Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-portable:
+    name: Build Portable EXE (Windows)
+    runs-on: windows-latest
+    # contents: write is required by softprops/action-gh-release to upload release assets on tag pushes
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      PROTOC: ${{ github.workspace }}/tools/protoc/bin/protoc.exe
+      PROTOC_INCLUDE: ${{ github.workspace }}/tools/protoc/include
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate release tag version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $pkgVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tagVersion -ne $pkgVersion) {
+            Write-Error "Release tag mismatch! Git tag is '${{ github.ref_name }}', but package.json version is '$pkgVersion'."
+            exit 1
+          }
+          Write-Host "Pre-build check passed: Git tag matches package.json version ($tagVersion)." -ForegroundColor Green
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-01-14
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          shared-key: "windows-ci"
+          key: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'src-tauri/.cargo/config.toml') }}
+          cache-all-crates: "true"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.12"
+
+      - name: Build Portable EXE
+        id: build
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            .\scripts\build-portable.ps1 -ExpectedVersion "${{ github.ref_name }}"
+          } else {
+            .\scripts\build-portable.ps1
+          }
+
+      - name: Upload Portable EXE Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.artifact_name || 'GameAssistant-portable' }}
+          path: dist_release/*.exe
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Verify release tag matches built artifact
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $tagVersion = "${{ github.ref_name }}".TrimStart('v')
+          $builtVersion = "${{ steps.build.outputs.version }}"
+          if ($tagVersion -ne $builtVersion) {
+            Write-Error "Release tag mismatch! Git tag is '${{ github.ref_name }}' (expected v$builtVersion), but built executable is v$builtVersion."
+            exit 1
+          }
+          Write-Host "Verification passed: Tag version '$tagVersion' matches built executable version '$builtVersion'." -ForegroundColor Green
+
+      - name: Create / Update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist_release/*.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
