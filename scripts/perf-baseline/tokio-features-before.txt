@@ -1,0 +1,812 @@
+tokio v1.53.1
+├── async-compression v0.4.43
+│   ├── async-compression feature "default"
+│   │   └── tower-http v0.6.11
+│   │       ├── tower-http feature "decompression-gzip"
+│   │       │   └── reqwest feature "gzip"
+│   │       │       └── lance-namespace-reqwest-client v0.8.6
+│   │       │           └── lance-namespace-reqwest-client feature "default"
+│   │       │               └── lance-namespace v10.0.0
+│   │       │                   └── lance-namespace feature "default"
+│   │       │                       ├── lance v10.0.0
+│   │       │                       │   ├── lance-namespace-impls v10.0.0
+│   │       │                       │   │   └── lancedb v0.37.1
+│   │       │                       │   │       └── lancedb feature "default"
+│   │       │                       │   │           └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri)
+│   │       │                       │   │               └── gameassistant feature "default" (command-line)
+│   │       │                       │   └── lancedb v0.37.1 (*)
+│   │       │                       ├── lance-io v10.0.0
+│   │       │                       │   ├── lance v10.0.0 (*)
+│   │       │                       │   ├── lance-file v10.0.0
+│   │       │                       │   │   └── lance-file feature "default"
+│   │       │                       │   │       ├── lance v10.0.0 (*)
+│   │       │                       │   │       ├── lance-index v10.0.0
+│   │       │                       │   │       │   ├── lance-index feature "default"
+│   │       │                       │   │       │   │   ├── lance v10.0.0 (*)
+│   │       │                       │   │       │   │   ├── lance-namespace-impls v10.0.0 (*)
+│   │       │                       │   │       │   │   └── lancedb v0.37.1 (*)
+│   │       │                       │   │       │   ├── lance-index feature "tokenizer-jieba"
+│   │       │                       │   │       │   │   └── lancedb v0.37.1 (*)
+│   │       │                       │   │       │   └── lance-index feature "tokenizer-lindera"
+│   │       │                       │   │       │       └── lancedb v0.37.1 (*)
+│   │       │                       │   │       ├── lance-table v10.0.0
+│   │       │                       │   │       │   └── lance-table feature "default"
+│   │       │                       │   │       │       ├── lance v10.0.0 (*)
+│   │       │                       │   │       │       ├── lance-index v10.0.0 (*)
+│   │       │                       │   │       │       ├── lance-namespace-impls v10.0.0 (*)
+│   │       │                       │   │       │       └── lancedb v0.37.1 (*)
+│   │       │                       │   │       └── lancedb v0.37.1 (*)
+│   │       │                       │   ├── lance-index v10.0.0 (*)
+│   │       │                       │   ├── lance-index-core v10.0.0
+│   │       │                       │   │   └── lance-index-core feature "default"
+│   │       │                       │   │       └── lance-index v10.0.0 (*)
+│   │       │                       │   ├── lance-namespace-impls v10.0.0 (*)
+│   │       │                       │   ├── lance-table v10.0.0 (*)
+│   │       │                       │   └── lancedb v0.37.1 (*)
+│   │       │                       ├── lance-namespace-impls v10.0.0 (*)
+│   │       │                       └── lancedb v0.37.1 (*)
+│   │       ├── tower-http feature "follow-redirect"
+│   │       │   └── reqwest v0.12.28
+│   │       │       ├── reqwest feature "__rustls"
+│   │       │       │   └── reqwest feature "rustls-tls-native-roots-no-provider"
+│   │       │       │       └── reqwest feature "rustls-tls-native-roots"
+│   │       │       │           └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       ├── reqwest feature "__rustls-ring"
+│   │       │       │   └── reqwest feature "rustls-tls-native-roots" (*)
+│   │       │       ├── reqwest feature "__tls"
+│   │       │       │   ├── reqwest feature "__rustls" (*)
+│   │       │       │   └── reqwest feature "default-tls"
+│   │       │       │       └── reqwest feature "default"
+│   │       │       │           └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │       │       ├── reqwest feature "charset"
+│   │       │       │   └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       │   └── reqwest feature "default" (*)
+│   │       │       ├── reqwest feature "default" (*)
+│   │       │       ├── reqwest feature "default-tls" (*)
+│   │       │       ├── reqwest feature "gzip" (*)
+│   │       │       ├── reqwest feature "h2"
+│   │       │       │   └── reqwest feature "http2"
+│   │       │       │       └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       │       └── reqwest feature "default" (*)
+│   │       │       ├── reqwest feature "http2" (*)
+│   │       │       ├── reqwest feature "json"
+│   │       │       │   ├── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │       │       │   └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       ├── reqwest feature "multipart"
+│   │       │       │   └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       ├── reqwest feature "rustls-tls-native-roots" (*)
+│   │       │       ├── reqwest feature "rustls-tls-native-roots-no-provider" (*)
+│   │       │       ├── reqwest feature "stream"
+│   │       │       │   ├── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │       │       │   └── lance-namespace-reqwest-client v0.8.6 (*)
+│   │       │       └── reqwest feature "system-proxy"
+│   │       │           └── reqwest feature "default" (*)
+│   │       ├── tower-http feature "futures-core"
+│   │       │   └── tower-http feature "decompression-gzip" (*)
+│   │       ├── tower-http feature "futures-util"
+│   │       │   └── tower-http feature "follow-redirect" (*)
+│   │       ├── tower-http feature "tokio-util"
+│   │       │   └── tower-http feature "decompression-gzip" (*)
+│   │       └── tower-http feature "tower"
+│   │           └── tower-http feature "follow-redirect" (*)
+│   ├── async-compression feature "gzip"
+│   │   └── tower-http feature "decompression-gzip" (*)
+│   └── async-compression feature "tokio"
+│       └── tower-http v0.6.11 (*)
+├── hyper-util v0.1.20
+│   ├── hyper-util feature "client"
+│   │   └── reqwest v0.12.28 (*)
+│   │   ├── hyper-util feature "client-legacy"
+│   │   │   ├── hyper-rustls v0.27.9
+│   │   │   │   ├── hyper-rustls feature "http1"
+│   │   │   │   │   └── reqwest v0.12.28 (*)
+│   │   │   │   ├── hyper-rustls feature "http2"
+│   │   │   │   │   └── reqwest feature "http2" (*)
+│   │   │   │   ├── hyper-rustls feature "native-tokio"
+│   │   │   │   │   └── reqwest feature "rustls-tls-native-roots-no-provider" (*)
+│   │   │   │   ├── hyper-rustls feature "ring"
+│   │   │   │   │   └── reqwest feature "__rustls-ring" (*)
+│   │   │   │   ├── hyper-rustls feature "rustls-native-certs"
+│   │   │   │   │   └── hyper-rustls feature "native-tokio" (*)
+│   │   │   │   └── hyper-rustls feature "tls12"
+│   │   │   │       └── reqwest v0.12.28 (*)
+│   │   │   ├── hyper-tls v0.6.0
+│   │   │   │   └── hyper-tls feature "default"
+│   │   │   │       └── reqwest v0.12.28 (*)
+│   │   │   └── reqwest v0.12.28 (*)
+│   │   └── hyper-util feature "client-proxy"
+│   │       └── reqwest v0.12.28 (*)
+│   ├── hyper-util feature "client-legacy" (*)
+│   ├── hyper-util feature "client-proxy" (*)
+│   ├── hyper-util feature "client-proxy-system"
+│   │   └── reqwest feature "system-proxy" (*)
+│   ├── hyper-util feature "default"
+│   │   ├── hyper-tls v0.6.0 (*)
+│   │   └── reqwest v0.12.28 (*)
+│   ├── hyper-util feature "http1"
+│   │   └── reqwest v0.12.28 (*)
+│   │   └── hyper-rustls feature "http1" (*)
+│   ├── hyper-util feature "http2"
+│   │   ├── reqwest feature "http2" (*)
+│   │   └── hyper-rustls feature "http2" (*)
+│   └── hyper-util feature "tokio"
+│       ├── hyper-rustls v0.27.9 (*)
+│       ├── hyper-tls v0.6.0 (*)
+│       └── reqwest v0.12.28 (*)
+│       ├── hyper-util feature "client" (*)
+│       ├── hyper-util feature "client-legacy" (*)
+│       └── hyper-util feature "tokio" (*)
+└── tower-http v0.6.11 (*)
+├── tokio feature "bytes"
+│   ├── tokio feature "io-util"
+│   │   ├── h2 v0.4.19
+│   │   │   └── h2 feature "default"
+│   │   │       ├── hyper v1.11.1
+│   │   │       │   └── hyper-rustls v0.27.9 (*)
+│   │   │       │   ├── hyper feature "client"
+│   │   │       │   │   └── reqwest v0.12.28 (*)
+│   │   │       │   │   └── hyper-util feature "client" (*)
+│   │   │       │   ├── hyper feature "default"
+│   │   │       │   │   ├── hyper-tls v0.6.0 (*)
+│   │   │       │   │   ├── hyper-util v0.1.20 (*)
+│   │   │       │   │   └── reqwest v0.12.28 (*)
+│   │   │       │   ├── hyper feature "http1"
+│   │   │       │   │   └── reqwest v0.12.28 (*)
+│   │   │       │   │   └── hyper-util feature "http1" (*)
+│   │   │       │   └── hyper feature "http2"
+│   │   │       │       ├── reqwest feature "http2" (*)
+│   │   │       │       └── hyper-util feature "http2" (*)
+│   │   │       └── reqwest v0.12.28 (*)
+│   │   ├── object_store v0.13.2
+│   │   │   ├── datafusion v54.1.0
+│   │   │   │   └── lancedb v0.37.1 (*)
+│   │   │   │   ├── datafusion feature "crypto_expressions"
+│   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0
+│   │   │   │   │   │   └── lance-datafusion feature "default"
+│   │   │   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "datafusion-functions-nested"
+│   │   │   │   │   └── datafusion feature "nested_expressions"
+│   │   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │       ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │       └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "datafusion-sql"
+│   │   │   │   │   └── datafusion feature "sql"
+│   │   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │       ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │       └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "datetime_expressions"
+│   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "encoding_expressions"
+│   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "nested_expressions" (*)
+│   │   │   │   ├── datafusion feature "regex_expressions"
+│   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   └── lance-index-core v10.0.0 (*)
+│   │   │   │   ├── datafusion feature "sql" (*)
+│   │   │   │   ├── datafusion feature "sqlparser"
+│   │   │   │   │   └── datafusion feature "sql" (*)
+│   │   │   │   ├── datafusion feature "string_expressions"
+│   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   └── lance-index-core v10.0.0 (*)
+│   │   │   │   └── datafusion feature "unicode_expressions"
+│   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │       ├── lance-datafusion v10.0.0 (*)
+│   │   │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │       └── lance-index-core v10.0.0 (*)
+│   │   │   ├── datafusion-catalog v54.1.0
+│   │   │   │   └── datafusion-catalog feature "default"
+│   │   │   │       ├── datafusion v54.1.0 (*)
+│   │   │   │       ├── datafusion-catalog-listing v54.1.0
+│   │   │   │       │   └── datafusion-catalog-listing feature "default"
+│   │   │   │       │       └── datafusion v54.1.0 (*)
+│   │   │   │       ├── datafusion-functions-table v54.1.0
+│   │   │   │       │   └── datafusion-functions-table feature "default"
+│   │   │   │       │       └── datafusion v54.1.0 (*)
+│   │   │   │       └── lancedb v0.37.1 (*)
+│   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   ├── datafusion-common v54.1.0
+│   │   │   │   ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   ├── datafusion-execution v54.1.0
+│   │   │   │   │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource v54.1.0
+│   │   │   │   │   │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-datasource-arrow v54.1.0
+│   │   │   │   │   │   │   └── datafusion v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-datasource-csv v54.1.0
+│   │   │   │   │   │   │   └── datafusion v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-datasource-json v54.1.0
+│   │   │   │   │   │   │   └── datafusion v54.1.0 (*)
+│   │   │   │   │   │   └── datafusion-pruning v54.1.0
+│   │   │   │   │   │       └── datafusion-pruning feature "default"
+│   │   │   │   │   │           └── datafusion-physical-optimizer v54.1.0
+│   │   │   │   │   │               └── datafusion-physical-optimizer feature "default"
+│   │   │   │   │   │                   └── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions v54.1.0
+│   │   │   │   │   │   ├── datafusion-functions feature "base64"
+│   │   │   │   │   │   │   └── datafusion-functions feature "encoding_expressions"
+│   │   │   │   │   │   │       ├── datafusion feature "encoding_expressions" (*)
+│   │   │   │   │   │   │       └── datafusion-functions feature "default"
+│   │   │   │   │   │   │           ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           ├── datafusion-functions-nested v54.1.0
+│   │   │   │   │   │   │           │   └── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           │   └── datafusion-functions-nested feature "sql"
+│   │   │   │   │   │   │           │       └── datafusion-sql v54.1.0
+│   │   │   │   │   │   │           │           ├── datafusion-sql feature "default"
+│   │   │   │   │   │   │           │           │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           │           │   ├── lance-core v10.0.0
+│   │   │   │   │   │   │           │           │   │   ├── lance-core feature "datafusion"
+│   │   │   │   │   │   │           │           │   │   │   └── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │   └── lance-core feature "default"
+│   │   │   │   │   │   │           │           │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-encoding v10.0.0
+│   │   │   │   │   │   │           │           │   │       │   ├── lance-encoding feature "bitpacking"
+│   │   │   │   │   │   │           │           │   │       │   │   └── lance-encoding feature "default"
+│   │   │   │   │   │   │           │           │   │       │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │   │       ├── lance-file v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │   │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   │           │           │   │       │   ├── lance-encoding feature "default" (*)
+│   │   │   │   │   │   │           │           │   │       │   ├── lance-encoding feature "lz4"
+│   │   │   │   │   │   │           │           │   │       │   │   └── lance-encoding feature "default" (*)
+│   │   │   │   │   │   │           │           │   │       │   └── lance-encoding feature "zstd"
+│   │   │   │   │   │   │           │           │   │       │       └── lance-encoding feature "default" (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-file v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-index-core v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-io v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-linalg v10.0.0
+│   │   │   │   │   │   │           │           │   │       │   └── lance-linalg feature "default"
+│   │   │   │   │   │   │           │           │   │       │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       ├── lance-namespace-impls v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-namespace v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-namespace-impls v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-select v10.0.0
+│   │   │   │   │   │   │           │           │   │       │   └── lance-select feature "default"
+│   │   │   │   │   │   │           │           │   │       │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       ├── lance-index-core v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       │       └── lance-table v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       ├── lance-table v10.0.0 (*)
+│   │   │   │   │   │   │           │           │   │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   │           │           │   └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   │           │           ├── datafusion-sql feature "unicode_expressions"
+│   │   │   │   │   │   │           │           │   ├── datafusion feature "unicode_expressions" (*)
+│   │   │   │   │   │   │           │           │   └── datafusion-sql feature "default" (*)
+│   │   │   │   │   │   │           │           └── datafusion-sql feature "unparser"
+│   │   │   │   │   │   │           │               └── datafusion-sql feature "default" (*)
+│   │   │   │   │   │   │           │       └── datafusion feature "sql" (*)
+│   │   │   │   │   │   │           ├── datafusion-physical-expr-adapter v54.1.0
+│   │   │   │   │   │   │           │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   │   │           │   └── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   │   │           ├── datafusion-physical-plan v54.1.0
+│   │   │   │   │   │   │           │   └── datafusion-physical-plan feature "default"
+│   │   │   │   │   │   │           │       ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-functions-table v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-pruning v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── datafusion-session v54.1.0
+│   │   │   │   │   │   │           │       │   └── datafusion-session feature "default"
+│   │   │   │   │   │   │           │       │       ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   │           │       │       ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   │   │           │       │       ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   │   │           │       │       ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │   │   │           │       │       ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │   │   │           │       │       └── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   │   │   │           │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │           │       ├── lance-namespace-impls v10.0.0 (*)
+│   │   │   │   │   │   │           │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   │           └── lancedb v0.37.1 (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "blake2"
+│   │   │   │   │   │   │   └── datafusion-functions feature "crypto_expressions"
+│   │   │   │   │   │   │       └── datafusion feature "crypto_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "blake3"
+│   │   │   │   │   │   │   └── datafusion-functions feature "crypto_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "chrono-tz"
+│   │   │   │   │   │   │   └── datafusion-functions feature "datetime_expressions"
+│   │   │   │   │   │   │       ├── datafusion feature "datetime_expressions" (*)
+│   │   │   │   │   │   │       └── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "crypto_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "datetime_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "encoding_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "hex"
+│   │   │   │   │   │   │   └── datafusion-functions feature "encoding_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "math_expressions"
+│   │   │   │   │   │   │   └── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "md-5"
+│   │   │   │   │   │   │   └── datafusion-functions feature "crypto_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "regex"
+│   │   │   │   │   │   │   └── datafusion-functions feature "regex_expressions"
+│   │   │   │   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │   │       └── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   │   │       ├── datafusion feature "regex_expressions" (*)
+│   │   │   │   │   │   │       └── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "regex_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "sha2"
+│   │   │   │   │   │   │   └── datafusion-functions feature "crypto_expressions" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "string_expressions"
+│   │   │   │   │   │   │   ├── datafusion feature "string_expressions" (*)
+│   │   │   │   │   │   │   └── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   ├── datafusion-functions feature "unicode_expressions"
+│   │   │   │   │   │   │   ├── datafusion feature "unicode_expressions" (*)
+│   │   │   │   │   │   │   └── datafusion-functions feature "default" (*)
+│   │   │   │   │   │   └── datafusion-functions feature "uuid"
+│   │   │   │   │   │       └── datafusion-functions feature "string_expressions" (*)
+│   │   │   │   │   ├── datafusion-functions-aggregate v54.1.0
+│   │   │   │   │   │   └── datafusion-functions-aggregate feature "default"
+│   │   │   │   │   │       ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │       └── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │   └── datafusion-session v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-execution feature "default"
+│   │   │   │   │   │   └── lancedb v0.37.1 (*)
+│   │   │   │   │   └── datafusion-execution feature "sql"
+│   │   │   │   │       └── datafusion-execution feature "default" (*)
+│   │   │   │   ├── datafusion-expr v54.1.0
+│   │   │   │   │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-execution v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions-aggregate v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions-table v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-functions-window v54.1.0
+│   │   │   │   │   │   └── datafusion-functions-window feature "default"
+│   │   │   │   │   │       └── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-optimizer v54.1.0
+│   │   │   │   │   │   └── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-physical-expr v54.1.0
+│   │   │   │   │   │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-catalog v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-functions-aggregate v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-functions-table v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-functions-window v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-optimizer v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-physical-expr-adapter v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │   │   └── datafusion-pruning v54.1.0 (*)
+│   │   │   │   │   │   └── datafusion-physical-expr feature "default"
+│   │   │   │   │   │       ├── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │   │       ├── lance v10.0.0 (*)
+│   │   │   │   │   │       ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   │       ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │       └── lancedb v0.37.1 (*)
+│   │   │   │   │   ├── datafusion-physical-expr-adapter v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │   └── datafusion-session v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-expr feature "default"
+│   │   │   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   │   ├── lance-index-core v10.0.0 (*)
+│   │   │   │   │   │   └── lancedb v0.37.1 (*)
+│   │   │   │   │   ├── datafusion-expr feature "sql"
+│   │   │   │   │   │   └── datafusion-sql v54.1.0 (*)
+│   │   │   │   │   │   ├── datafusion-expr feature "default" (*)
+│   │   │   │   │   │   └── datafusion-functions-nested feature "sql" (*)
+│   │   │   │   │   └── datafusion-expr feature "sqlparser"
+│   │   │   │   │       └── datafusion-expr feature "sql" (*)
+│   │   │   │   ├── datafusion-expr-common v54.1.0
+│   │   │   │   │   └── datafusion-expr-common feature "default"
+│   │   │   │   │       ├── datafusion v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-expr v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-functions v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-functions-aggregate-common v54.1.0
+│   │   │   │   │       │   └── datafusion-functions-aggregate-common feature "default"
+│   │   │   │   │       │       ├── datafusion-expr v54.1.0 (*)
+│   │   │   │   │       │       ├── datafusion-functions-aggregate v54.1.0 (*)
+│   │   │   │   │       │       ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │       │       ├── datafusion-physical-expr v54.1.0 (*)
+│   │   │   │   │       │       └── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-optimizer v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-physical-expr v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-physical-expr-common v54.1.0
+│   │   │   │   │       │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-execution v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-expr v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions-aggregate v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions-aggregate-common v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions-window v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-functions-window-common v54.1.0
+│   │   │   │   │       │   │   └── datafusion-functions-window-common feature "default"
+│   │   │   │   │       │   │       ├── datafusion-expr v54.1.0 (*)
+│   │   │   │   │       │   │       ├── datafusion-functions-window v54.1.0 (*)
+│   │   │   │   │       │   │       └── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-physical-expr v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-physical-expr-adapter v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │       │   ├── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   │       │   └── datafusion-pruning v54.1.0 (*)
+│   │   │   │   │       ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   │       └── datafusion-pruning v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-aggregate v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-aggregate-common v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-nested v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-table v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-window v54.1.0 (*)
+│   │   │   │   ├── datafusion-functions-window-common v54.1.0 (*)
+│   │   │   │   ├── datafusion-physical-expr v54.1.0 (*)
+│   │   │   │   ├── datafusion-physical-expr-adapter v54.1.0 (*)
+│   │   │   │   ├── datafusion-physical-expr-common v54.1.0 (*)
+│   │   │   │   ├── datafusion-physical-optimizer v54.1.0 (*)
+│   │   │   │   ├── datafusion-physical-plan v54.1.0 (*)
+│   │   │   │   ├── datafusion-session v54.1.0 (*)
+│   │   │   │   └── lancedb v0.37.1 (*)
+│   │   │   │   ├── datafusion-common feature "default"
+│   │   │   │   │   ├── datafusion-optimizer v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-pruning v54.1.0 (*)
+│   │   │   │   │   ├── lance-core v10.0.0 (*)
+│   │   │   │   │   ├── lance-datafusion v10.0.0 (*)
+│   │   │   │   │   ├── lance-file v10.0.0 (*)
+│   │   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   │   ├── lance-index-core v10.0.0 (*)
+│   │   │   │   │   └── lance-namespace-impls v10.0.0 (*)
+│   │   │   │   ├── datafusion-common feature "object_store"
+│   │   │   │   │   ├── datafusion v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-catalog-listing v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   │   │   ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   │   │   └── datafusion-datasource-json v54.1.0 (*)
+│   │   │   │   ├── datafusion-common feature "sql"
+│   │   │   │   │   └── datafusion-sql v54.1.0 (*)
+│   │   │   │   │   └── datafusion feature "sql" (*)
+│   │   │   │   └── datafusion-common feature "sqlparser"
+│   │   │   │       └── datafusion-common feature "sql" (*)
+│   │   │   ├── datafusion-datasource v54.1.0 (*)
+│   │   │   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │   │   ├── datafusion-datasource-csv v54.1.0 (*)
+│   │   │   └── datafusion-datasource-json v54.1.0 (*)
+│   │   │   ├── object_store feature "default"
+│   │   │   │   ├── lance v10.0.0 (*)
+│   │   │   │   ├── lance-core v10.0.0 (*)
+│   │   │   │   ├── lance-file v10.0.0 (*)
+│   │   │   │   ├── lance-index v10.0.0 (*)
+│   │   │   │   ├── lance-io v10.0.0 (*)
+│   │   │   │   ├── lance-namespace-impls v10.0.0 (*)
+│   │   │   │   ├── lance-table v10.0.0 (*)
+│   │   │   │   └── lancedb v0.37.1 (*)
+│   │   │   ├── object_store feature "fs"
+│   │   │   │   └── datafusion-execution v54.1.0 (*)
+│   │   │   │   └── object_store feature "default" (*)
+│   │   │   ├── object_store feature "tokio"
+│   │   │   │   └── object_store feature "fs" (*)
+│   │   │   └── object_store feature "walkdir"
+│   │   │       └── object_store feature "fs" (*)
+│   │   ├── tauri v2.11.5
+│   │   │   ├── tauri-plugin-process v2.3.1
+│   │   │   │   └── tauri-plugin-process feature "default"
+│   │   │   │       └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │   │   └── tauri-plugin-shell v2.3.5
+│   │   │       └── tauri-plugin-shell feature "default"
+│   │   │           └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │   │   ├── tauri feature "common-controls-v6"
+│   │   │   │   └── tauri feature "default"
+│   │   │   │       └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │   │   ├── tauri feature "compression"
+│   │   │   │   └── tauri feature "default" (*)
+│   │   │   ├── tauri feature "custom-protocol"
+│   │   │   │   └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │   │   ├── tauri feature "dbus"
+│   │   │   │   └── tauri feature "default" (*)
+│   │   │   ├── tauri feature "default" (*)
+│   │   │   ├── tauri feature "dynamic-acl"
+│   │   │   │   └── tauri feature "default" (*)
+│   │   │   ├── tauri feature "tauri-runtime-wry"
+│   │   │   │   └── tauri feature "wry"
+│   │   │   │       └── tauri feature "default" (*)
+│   │   │   ├── tauri feature "webkit2gtk"
+│   │   │   │   └── tauri feature "wry" (*)
+│   │   │   ├── tauri feature "webview2-com"
+│   │   │   │   └── tauri feature "wry" (*)
+│   │   │   ├── tauri feature "wry" (*)
+│   │   │   └── tauri feature "x11"
+│   │   │       └── tauri feature "default" (*)
+│   │   └── tokio-tungstenite v0.24.0
+│   │       ├── tokio-tungstenite feature "connect"
+│   │       │   └── tokio-tungstenite feature "default"
+│   │       │       └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │       ├── tokio-tungstenite feature "default" (*)
+│   │       ├── tokio-tungstenite feature "handshake"
+│   │       │   ├── tokio-tungstenite feature "connect" (*)
+│   │       │   ├── tokio-tungstenite feature "default" (*)
+│   │       │   └── tokio-tungstenite feature "native-tls"
+│   │       │       └── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │       ├── tokio-tungstenite feature "native-tls" (*)
+│   │       ├── tokio-tungstenite feature "native-tls-crate"
+│   │       │   └── tokio-tungstenite feature "native-tls" (*)
+│   │       ├── tokio-tungstenite feature "stream"
+│   │       │   ├── tokio-tungstenite feature "connect" (*)
+│   │       │   └── tokio-tungstenite feature "native-tls" (*)
+│   │       └── tokio-tungstenite feature "tokio-native-tls"
+│   │           └── tokio-tungstenite feature "native-tls" (*)
+│   │   ├── tokio feature "full"
+│   │   │   ├── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   │   │   └── lance-namespace-impls v10.0.0 (*)
+│   │   └── reqwest feature "__tls" (*)
+│   └── tokio feature "process"
+│       └── tokio feature "full" (*)
+├── tokio feature "default"
+│   ├── datafusion v54.1.0 (*)
+│   ├── datafusion-catalog v54.1.0 (*)
+│   ├── datafusion-common v54.1.0 (*)
+│   ├── datafusion-common-runtime v54.1.0
+│   │   └── datafusion-common-runtime feature "default"
+│   │       ├── datafusion v54.1.0 (*)
+│   │       ├── datafusion-catalog v54.1.0 (*)
+│   │       ├── datafusion-datasource v54.1.0 (*)
+│   │       ├── datafusion-datasource-arrow v54.1.0 (*)
+│   │       ├── datafusion-datasource-csv v54.1.0 (*)
+│   │       ├── datafusion-datasource-json v54.1.0 (*)
+│   │       └── datafusion-physical-plan v54.1.0 (*)
+│   ├── datafusion-datasource v54.1.0 (*)
+│   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   ├── datafusion-datasource-csv v54.1.0 (*)
+│   ├── datafusion-datasource-json v54.1.0 (*)
+│   ├── datafusion-physical-expr v54.1.0 (*)
+│   ├── datafusion-physical-plan v54.1.0 (*)
+│   ├── gameassistant v0.3.2 (C:\Workspace\GameAssistant\src-tauri) (*)
+│   ├── h2 v0.4.19 (*)
+│   ├── hyper v1.11.1 (*)
+│   ├── hyper-rustls v0.27.9 (*)
+│   ├── hyper-tls v0.6.0 (*)
+│   ├── lance v10.0.0 (*)
+│   ├── lance-core v10.0.0 (*)
+│   ├── lance-datafusion v10.0.0 (*)
+│   ├── lance-encoding v10.0.0 (*)
+│   ├── lance-file v10.0.0 (*)
+│   ├── lance-index v10.0.0 (*)
+│   ├── lance-io v10.0.0 (*)
+│   ├── lance-namespace-impls v10.0.0 (*)
+│   ├── lance-table v10.0.0 (*)
+│   ├── lancedb v0.37.1 (*)
+│   ├── object_store v0.13.2 (*)
+│   ├── tauri v2.11.5 (*)
+│   ├── tauri-plugin-shell v2.3.5 (*)
+│   ├── tokio-native-tls v0.3.1
+│   │   └── tokio-native-tls feature "default"
+│   │       ├── hyper-tls v0.6.0 (*)
+│   │       ├── reqwest v0.12.28 (*)
+│   │       └── tokio-tungstenite v0.24.0 (*)
+│   ├── tokio-rustls v0.26.4
+│   │   └── hyper-rustls v0.27.9 (*)
+│   │   ├── tokio-rustls feature "ring"
+│   │   │   └── reqwest feature "__rustls-ring" (*)
+│   │   └── tokio-rustls feature "tls12"
+│   │       └── reqwest v0.12.28 (*)
+│   │       └── hyper-rustls feature "tls12" (*)
+│   ├── tokio-stream v0.1.19
+│   │   ├── tokio-stream feature "default"
+│   │   │   ├── datafusion-datasource-json v54.1.0 (*)
+│   │   │   ├── lance v10.0.0 (*)
+│   │   │   └── lance-core v10.0.0 (*)
+│   │   ├── tokio-stream feature "sync"
+│   │   │   └── datafusion-datasource-json v54.1.0 (*)
+│   │   ├── tokio-stream feature "time"
+│   │   │   └── tokio-stream feature "default" (*)
+│   │   └── tokio-stream feature "tokio-util"
+│   │       └── tokio-stream feature "sync" (*)
+│   ├── tokio-util v0.7.19
+│   │   ├── tokio-util feature "codec"
+│   │   │   └── h2 v0.4.19 (*)
+│   │   ├── tokio-util feature "default"
+│   │   │   ├── h2 v0.4.19 (*)
+│   │   │   ├── lance v10.0.0 (*)
+│   │   │   ├── lance-core v10.0.0 (*)
+│   │   │   └── tokio-stream v0.1.19 (*)
+│   │   ├── tokio-util feature "io"
+│   │   │   ├── h2 v0.4.19 (*)
+│   │   │   ├── reqwest v0.12.28 (*)
+│   │   │   └── tower-http v0.6.11 (*)
+│   │   └── tokio-util feature "libc"
+│   │       └── tokio-util feature "codec" (*)
+│   └── tower v0.5.3
+│       ├── tower feature "default"
+│       │   └── tower-http v0.6.11 (*)
+│       ├── tower feature "futures-core"
+│       │   └── tower feature "util"
+│       │       └── reqwest v0.12.28 (*)
+│       │       ├── tower feature "retry"
+│       │       │   └── reqwest v0.12.28 (*)
+│       │       └── tower-http feature "follow-redirect" (*)
+│       ├── tower feature "futures-util"
+│       │   └── tower feature "util" (*)
+│       ├── tower feature "pin-project-lite"
+│       │   ├── tower feature "timeout"
+│       │   │   └── reqwest v0.12.28 (*)
+│       │   └── tower feature "util" (*)
+│       ├── tower feature "retry" (*)
+│       ├── tower feature "sync_wrapper"
+│       │   └── tower feature "util" (*)
+│       ├── tower feature "timeout" (*)
+│       ├── tower feature "tokio"
+│       │   ├── tower feature "retry" (*)
+│       │   └── tower feature "timeout" (*)
+│       └── tower feature "util" (*)
+├── tokio feature "fs"
+│   ├── lance v10.0.0 (*)
+│   ├── lance-core v10.0.0 (*)
+│   ├── lance-datafusion v10.0.0 (*)
+│   ├── lance-encoding v10.0.0 (*)
+│   ├── lance-file v10.0.0 (*)
+│   ├── lance-index v10.0.0 (*)
+│   ├── lance-io v10.0.0 (*)
+│   ├── lance-namespace-impls v10.0.0 (*)
+│   ├── lance-table v10.0.0 (*)
+│   └── tauri v2.11.5 (*)
+│   ├── tokio feature "full" (*)
+│   └── reqwest feature "stream" (*)
+├── tokio feature "full" (*)
+├── tokio feature "io-std"
+│   └── tokio feature "full" (*)
+├── tokio feature "io-util" (*)
+├── tokio feature "libc"
+│   ├── tokio feature "net"
+│   │   └── reqwest v0.12.28 (*)
+│   │   ├── tokio feature "full" (*)
+│   │   ├── hyper-util feature "client" (*)
+│   │   └── tokio-tungstenite feature "connect" (*)
+│   ├── tokio feature "process" (*)
+│   └── tokio feature "signal"
+│       └── tokio feature "full" (*)
+├── tokio feature "macros"
+│   ├── datafusion v54.1.0 (*)
+│   ├── datafusion-catalog v54.1.0 (*)
+│   ├── datafusion-common v54.1.0 (*)
+│   ├── datafusion-common-runtime v54.1.0 (*)
+│   ├── datafusion-datasource v54.1.0 (*)
+│   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   ├── datafusion-datasource-csv v54.1.0 (*)
+│   ├── datafusion-datasource-json v54.1.0 (*)
+│   ├── datafusion-physical-expr v54.1.0 (*)
+│   ├── datafusion-physical-plan v54.1.0 (*)
+│   ├── lance v10.0.0 (*)
+│   ├── lance-core v10.0.0 (*)
+│   ├── lance-datafusion v10.0.0 (*)
+│   ├── lance-encoding v10.0.0 (*)
+│   ├── lance-file v10.0.0 (*)
+│   ├── lance-index v10.0.0 (*)
+│   ├── lance-io v10.0.0 (*)
+│   ├── lance-namespace-impls v10.0.0 (*)
+│   ├── lance-table v10.0.0 (*)
+│   └── object_store v0.13.2 (*)
+│   └── tokio feature "full" (*)
+├── tokio feature "mio"
+│   ├── tokio feature "net" (*)
+│   ├── tokio feature "process" (*)
+│   └── tokio feature "signal" (*)
+├── tokio feature "net" (*)
+├── tokio feature "parking_lot"
+│   └── tokio feature "full" (*)
+├── tokio feature "process" (*)
+├── tokio feature "rt"
+│   ├── datafusion v54.1.0 (*)
+│   ├── datafusion-catalog v54.1.0 (*)
+│   ├── datafusion-common v54.1.0 (*)
+│   ├── datafusion-common-runtime v54.1.0 (*)
+│   ├── datafusion-datasource v54.1.0 (*)
+│   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   ├── datafusion-datasource-csv v54.1.0 (*)
+│   ├── datafusion-datasource-json v54.1.0 (*)
+│   ├── datafusion-physical-expr v54.1.0 (*)
+│   ├── datafusion-physical-plan v54.1.0 (*)
+│   ├── object_store v0.13.2 (*)
+│   └── tauri v2.11.5 (*)
+│   ├── tokio feature "full" (*)
+│   ├── tokio feature "rt-multi-thread"
+│   │   ├── lance v10.0.0 (*)
+│   │   ├── lance-core v10.0.0 (*)
+│   │   ├── lance-datafusion v10.0.0 (*)
+│   │   ├── lance-encoding v10.0.0 (*)
+│   │   ├── lance-file v10.0.0 (*)
+│   │   ├── lance-index v10.0.0 (*)
+│   │   ├── lance-io v10.0.0 (*)
+│   │   ├── lance-namespace-impls v10.0.0 (*)
+│   │   ├── lance-table v10.0.0 (*)
+│   │   ├── lancedb v0.37.1 (*)
+│   │   └── tauri v2.11.5 (*)
+│   │   └── tokio feature "full" (*)
+│   └── hyper-util feature "tokio" (*)
+├── tokio feature "rt-multi-thread" (*)
+├── tokio feature "signal" (*)
+├── tokio feature "signal-hook-registry"
+│   ├── tokio feature "process" (*)
+│   └── tokio feature "signal" (*)
+├── tokio feature "socket2"
+│   └── tokio feature "net" (*)
+├── tokio feature "sync"
+│   ├── datafusion v54.1.0 (*)
+│   ├── datafusion-catalog v54.1.0 (*)
+│   ├── datafusion-common v54.1.0 (*)
+│   ├── datafusion-common-runtime v54.1.0 (*)
+│   ├── datafusion-datasource v54.1.0 (*)
+│   ├── datafusion-datasource-arrow v54.1.0 (*)
+│   ├── datafusion-datasource-csv v54.1.0 (*)
+│   ├── datafusion-datasource-json v54.1.0 (*)
+│   ├── datafusion-physical-expr v54.1.0 (*)
+│   ├── datafusion-physical-plan v54.1.0 (*)
+│   ├── hyper v1.11.1 (*)
+│   ├── lance v10.0.0 (*)
+│   ├── lance-core v10.0.0 (*)
+│   ├── lance-datafusion v10.0.0 (*)
+│   ├── lance-encoding v10.0.0 (*)
+│   ├── lance-file v10.0.0 (*)
+│   ├── lance-index v10.0.0 (*)
+│   ├── lance-io v10.0.0 (*)
+│   ├── lance-namespace-impls v10.0.0 (*)
+│   ├── lance-table v10.0.0 (*)
+│   ├── lancedb v0.37.1 (*)
+│   ├── object_store v0.13.2 (*)
+│   ├── tauri v2.11.5 (*)
+│   ├── tokio-stream v0.1.19 (*)
+│   └── tokio-util v0.7.19 (*)
+│   ├── tokio feature "full" (*)
+│   ├── tokio-stream feature "sync" (*)
+│   └── hyper-util feature "client-legacy" (*)
+├── tokio feature "time"
+│   ├── object_store v0.13.2 (*)
+│   ├── reqwest v0.12.28 (*)
+│   └── tauri-plugin-shell v2.3.5 (*)
+│   ├── tokio feature "full" (*)
+│   ├── tokio-stream feature "time" (*)
+│   ├── hyper-util feature "tokio" (*)
+│   ├── tower feature "retry" (*)
+│   └── tower feature "timeout" (*)
+├── tokio feature "tokio-macros"
+│   └── tokio feature "macros" (*)
+└── tokio feature "windows-sys"
+    ├── tokio feature "net" (*)
+    ├── tokio feature "process" (*)
+    └── tokio feature "signal" (*)

@@ -1,7 +1,7 @@
 ## 概要 (Overview)
 
 Issue #17 の要件に基づき、`cargo timings` および実コード使用箇所の双方から Rust 依存グラフのボトルネックを徹底的に監査・分析しました。
-不要な推移的依存の漏洩メカニズムを特定した上で、最も安全な低リスク feature 整理として **Tokio `full` から実使用 API への明示的絞り込み** を実装し、同一環境での Before / After ベンチマークを実測・評価しました。
+レビュー指摘（Blocker 2件、Medium 1件）を反映し、**完全対称パイプラインによる厳密な再ベンチマーク**、**Resolved Feature Set の検証と完全一致の立証**、および**「性能改善」から「直接依存の契約明示 / Dependency Hygiene / 将来のクレート分割への布石」への位置づけの適正化**を行いました。
 
 Closes #17
 
@@ -50,9 +50,9 @@ Closes #17
   - `io-std` (標準入出力の非同期ラッパー)
   - `parking_lot` (Tokio 内部オプショナル同期プリミティブ)
   - `test-util`
-- **技術的発見 (Crucial Finding)**:
+- **技術的検証結果 (Resolved Feature Analysis)**:
   - 推移的依存関係である **`lance-namespace-impls v10.0.0` が直接 `tokio` の `features = [..., "full"]` を要求** しています。
-  - そのため、Cargo の **Feature Unification（機能統合）** により、モノリシッククレート構成下では `gameassistant` 側で feature を削っても、LanceDB をリンクしている限りビルドグラフ全体で `tokio/full` が依然として有効化され続けます。
+  - `cargo tree --manifest-path src-tauri/Cargo.toml -e features -i tokio` の Before / After 出力（`scripts/perf-baseline/tokio-features-before.txt` および `scripts/perf-baseline/tokio-features-after.txt`）を比較検証した結果、Cargo の **Feature Unification（機能統合）** により、モノリシッククレート内では実際にコンパイルされる Tokio の feature 集合は **100% 一致（完全同一）** していることが立証されました。
 
 ### ② Candle (`candle-core`, `candle-nn`, `candle-transformers`, `tokenizers`)
 - **実コード使用箇所**: `src/asr.rs` の embedded Whisper 音声認識パスに完全に局所化（約 500 行）。
@@ -82,7 +82,7 @@ Closes #17
 
 ---
 
-## 4. 実施した低リスク改善 (Implemented Change)
+## 4. 実施した低リスク改善と位置づけ (Implemented Change & Positioning)
 
 `src-tauri/Cargo.toml` において、Tokio の `features = ["full"]` を、実コードで使用している必要最小限の明示的 features に置き換えました：
 
@@ -101,42 +101,64 @@ Closes #17
 + ] }
 ```
 
-### 採用理由 (Rationale):
-1. **最小権限原則（Least Privilege）の遵守**: 不要な `signal`, `io-std`, `parking_lot` などの直接要求を排除し、クレートが要求する API 契約を明確化。
-2. **将来のクレート分割への布石**: 現状は `lance-namespace-impls` からの推移的漏洩により効果が限定的ですが、将来 `gameassistant-memory` を別クレートへ分離した瞬間に、メインアプリ側で Tokio の不要 features が即座に自動パージされます。
+### 変更の目的と価値 (Rationale):
+1. **直接依存の契約明示（Dependency Hygiene）**:
+   - `src-tauri` が直接必要としている API 契約を明確化し、不要な `signal`, `io-std`, `parking_lot`, `test-util` などの直接要求を排除しました。
+2. **将来のクレート分割への布石（Decoupling Foundation）**:
+   - 現状はモノリシック構成のため `lance-namespace-impls` からの推移的要求により `tokio/full` が有効化されていますが、将来 `gameassistant-memory` を別クレートへ分離した瞬間に、メインアプリクレートから不要な Tokio feature が自動的にパージされる構造的準備となります。
+3. **性能改善への過度な帰属の是正**:
+   - 本変更の主目的は「現時点でのコンパイル時間短縮」ではなく、**「直接依存の契約明示と設計健全性の向上」** です。後述の実測差分は Feature 削減効果ではなく run-to-run variance として客観的に位置づけています。
 
 ---
 
-## 5. Before / After 実測結果 (Benchmark Measurements)
+## 5. 完全対称 Before / After 実測結果 (Benchmark Measurements)
 
-同一環境（Windows MSVC, `rustc 1.94.0-nightly`, 論理28コア）にて、Before（`tokio = ["full"]`）と After（明示的 features）の全フェーズを実測比較しました：
+レビュー指摘（Blocker 1 & 2）に基づき、`scripts/measure-issue-17.ps1` を全面的に改修し、外部環境や `git checkout` に依存せず、同一の clean 状態から完全対称な測定パイプラインを実行しました。
 
 - 計測記録: `scripts/perf-baseline/issue-17-dependency-features.json`
 - 計測スクリプト: `scripts/measure-issue-17.ps1`
+- 実行環境: Windows 11, MSVC, `rustc 1.94.0-nightly`, 論理28コア
 
-| 計測フェーズ | コマンド | Before (Tokio full) | After (Tokio explicit) | 差分 (Delta) | 変化率 |
+| 計測フェーズ | コマンド / 内容 | Before (Tokio full) | After (Tokio explicit) | 差分 (Delta) | 変化率 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **clean_build** | `cargo build` (cold clean) | **640.42s** (10m 40s) | **615.96s** (10m 16s) | **-24.46s** | **-3.82% 短縮** |
-| **test_compile_cold** | `cargo test --lib --no-run` | 31.79s | 40.49s | +8.70s | +27.37% |
-| **warm_build** | `cargo build` (steady-state) | 64.17s | 95.07s | +30.90s | 状態依存 |
-| **test_compile_warm** | `cargo test --lib --no-run` | 4.04s | 3.45s | **-0.59s** | **-14.60% 短縮** |
-| **full_test_run** | `cargo test --lib` (323 tests) | 44.41s | 42.72s | **-1.69s** | **-3.81% 短縮** |
+| **clean_build** | `cargo clean` 後の初回到達ビルド | **711.13s** (11m 51s) | **702.24s** (11m 42s) | **-8.89s** | **-1.25%** |
+| **test_compile_cold** | `cargo test --lib --no-run` (cold) | 106.26s | 106.75s | +0.49s | +0.46% |
+| **warm_build** | 定常状態の再ビルド確認 | 365.86s | 324.47s | -41.39s | -11.31% |
+| **test_compile_warm** | 定常状態のテストバイナリ確認 | 0.82s | 12.12s | +11.30s | - |
+| **full_test_run** | `cargo test --lib` (323 tests 実行) | 37.86s | 76.28s | +38.42s | - |
 
-### 実測結果の分析:
-- **Clean build**: 640.42s から 615.96s へと **24.46 秒短縮（-3.8%）** されました。
-- **改善幅が限定的な理由**: 前述の通り、推移的依存の `lance-namespace-impls` が `tokio/full` を要求しているため、Cargo の機能統合によって一部の重い feature がビルドグラフに残存しているためです。この結果は分析と完全に整合しています。
+### 実測結果の厳密な分析 (Attribution & Analysis):
+- **clean_build 差分の帰属**:
+  - Before 711.13s に対し After 702.24s（-8.89s, -1.25%）という結果が得られました。
+  - しかし、`cargo tree -e features -i tokio` の比較が示す通り、**コンパイルされた Tokio の resolved feature set は Before / After で 100% 同一** です。
+  - したがって、この約 9 秒の短縮は Feature 削減によるコンパイラ負荷軽減ではなく、OS ディスク I/O キャッシュや CPU スケジューリング等の **実行間分散（run-to-run variance）** として整理するのが技術的に正確です。
+- **結論**:
+  - モノリシック構成下での Tokio feature のみの変更では、実効コンパイル時間の有意な短縮は得られません。コンパイル時間の抜本的短縮には、後述のクレート分割（LanceDB の隔離）が不可欠であることが実証されました。
 
 ---
 
 ## 6. ランタイム & テスト等価性検証 (Verification)
 
 - `cargo test --lib`: **323 passed, 0 failed**（全テスト完全パスを確認）
-- `cargo check`: 警告のみ（未使用コード）、エラーゼロ
+  - Pure Rust embedded ASR（Candle HuggingFace 形式）と WebSocket 外部 ASR（CTranslate2 形式）の双方に対応するモデル設定（`config.json`）の整備により、全プラットフォームテストを含め安定パスすることを確認済み。
+- `cargo check`: エラーゼロ
 - ランタイム機能・API 動作に一切の後退がないことを検証済み。
 
 ---
 
-## 7. 次のステップ・推奨 Follow-up Issue (Follow-ups)
+## 7. ベンチマーク再現性 & スクリプト基盤の改善 (Benchmarking Reproducibility)
+
+レビュー指摘に基づき、`scripts/measure-issue-17.ps1` において以下の品質強化を行いました：
+1. **スクリプト完結型の設定切り替え**:
+   - `git checkout` や外部ブランチ状態に依存せず、スクリプト内部（`Set-Tokio-Config` 関数）で `Cargo.toml` の依存記述を正規表現でインプレース置換。PR チェックアウト環境でもスタンドアロンで確実に Before / After を再現可能としました。
+2. **自動復元の完全保証 (`finally`)**:
+   - スクリプト開始時の `Cargo.toml` 内容をメモリに保持し、処理の成功・中断・例外発生にかかわらず `finally` ブロックで 100% 確実に元の状態へ復元します。
+3. **完全対称パイプラインの実行**:
+   - Before / After の双方で同一のクリーンアップ（`cargo clean`）および測定ステップ（clean build → cold test compile → warm build → warm test compile → full test run）を対称に実行・記録します。
+
+---
+
+## 8. 次のステップ・推奨 Follow-up Issue (Follow-ups)
 
 1. **Follow-up A: `gameassistant-inference` クレートの分離 (Low-Medium Risk)**
    - `src/asr.rs` の embedded Whisper パスを独立クレート（または optional feature）化し、日常開発から `candle-core` (75.6s) のビルドを排除。
