@@ -4,18 +4,48 @@ ASR Streaming Pipeline Accuracy, Buffering, VAD Endpointing, and Latency Optimiz
 """
 
 import ast
+import asyncio
 import json
+import logging
 import os
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import numpy as np
 
 SERVER_SOURCE_PATH = Path(__file__).with_name("asr_server.py")
 
 
-class AsrPipelineRegressionTests(unittest.TestCase):
+class MockWebSocket:
+    """Mock WebSocket supporting async iteration and sending messages."""
+
+    def __init__(self, messages):
+        self._messages = list(messages)
+        self.sent = []
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._messages:
+            if not self._closed:
+                self._closed = True
+                await asyncio.sleep(0.05)
+            raise StopAsyncIteration
+        await asyncio.sleep(0.01)
+        return self._messages.pop(0)
+
+    async def send(self, msg):
+        self.sent.append(msg)
+
+
+class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = SERVER_SOURCE_PATH.read_text(encoding="utf-8")
@@ -30,6 +60,102 @@ class AsrPipelineRegressionTests(unittest.TestCase):
                     node.value, ast.Constant
                 ):
                     cls.constants[target.id] = node.value.value
+
+        # Build sandboxed namespace with shared VAD / state functions
+        cls.server_ns: dict[str, Any] = {
+            "asyncio": asyncio,
+            "json": json,
+            "logging": logging,
+            "logger": logging.getLogger("test-asr-pipeline"),
+            "time": time,
+            "np": np,
+            "current_device": "cpu",
+            "current_model_name": "test-model",
+            "current_compute_type": "int8",
+            "whisper_model": SimpleNamespace(
+                transcribe=lambda *args, **kwargs: ([], None)
+            ),
+            "_device_switch_lock": threading.Lock(),
+            "note_in_flight_gate": lambda: False,
+            "clear_in_flight_gate": lambda: None,
+            "note_in_flight_skip_log": lambda: False,
+            "record_switch_diagnostic": lambda *args, **kwargs: None,
+            "record_inference_stall": lambda *args: 0,
+            "reset_inference_stall_streak": lambda: None,
+            "vram_status_text": lambda: "n/a",
+            "last_switch_reason": None,
+            "REASON_INFERENCE_TIMEOUT": "inference_timeout",
+            "REASON_CUDA_ERROR": "cuda_error",
+            "REASON_GPU_OOM": "gpu_oom",
+            "INFERENCE_IN_FLIGHT_EXIT_SECONDS": 10.0,
+            "INFERENCE_STALL_EXIT_THRESHOLD": 3,
+            "_CpuFallbackRequest": type("_CpuFallbackRequest", (Exception,), {}),
+            "_perform_cpu_switch": lambda *args, **kwargs: None,
+            "_fault_injection_hang": lambda *args: None,
+            "SAMPLE_RATE": cls.constants.get("SAMPLE_RATE", 16000),
+            "MIN_AUDIO_SECONDS": cls.constants.get("MIN_AUDIO_SECONDS", 0.25),
+            "PRE_ROLL_SECONDS": cls.constants.get("PRE_ROLL_SECONDS", 0.20),
+            "SPEECH_START_CONSECUTIVE_FRAMES": cls.constants.get(
+                "SPEECH_START_CONSECUTIVE_FRAMES", 3
+            ),
+            "SPEECH_END_SILENCE_SECONDS": cls.constants.get(
+                "SPEECH_END_SILENCE_SECONDS", 0.65
+            ),
+            "MAX_UTTERANCE_SECONDS": cls.constants.get("MAX_UTTERANCE_SECONDS", 30.0),
+            "VAD_ENERGY_THRESHOLD": cls.constants.get("VAD_ENERGY_THRESHOLD", 0.012),
+            "VAD_FRAME_SIZE": cls.constants.get("VAD_FRAME_SIZE", 320),
+            "PARTIAL_POLL_INTERVAL_SECONDS": cls.constants.get(
+                "PARTIAL_POLL_INTERVAL_SECONDS", 0.08
+            ),
+            "PARTIAL_INTERVAL_GPU_SECONDS": cls.constants.get(
+                "PARTIAL_INTERVAL_GPU_SECONDS", 0.35
+            ),
+            "PARTIAL_INTERVAL_CPU_SECONDS": cls.constants.get(
+                "PARTIAL_INTERVAL_CPU_SECONDS", 0.65
+            ),
+            "MIN_PARTIAL_INCREMENT_SECONDS": cls.constants.get(
+                "MIN_PARTIAL_INCREMENT_SECONDS", 0.20
+            ),
+            "SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS": cls.constants.get(
+                "SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS", 0.75
+            ),
+            "get_embedding_model": lambda: None,
+            "set_vram_preallocation": lambda x: True,
+            "websockets": SimpleNamespace(
+                exceptions=SimpleNamespace(ConnectionClosed=Exception)
+            ),
+            "sys": SimpleNamespace(argv=[]),
+            "os": SimpleNamespace(environ={}),
+        }
+
+        # Extract functions directly from asr_server.py AST
+        target_funcs = (
+            "remember_transcript",
+            "new_stream_state",
+            "reset_stream_state",
+            "update_vad_and_buffers",
+            "asr_handler",
+        )
+        for node in cls.tree.body:
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name in target_funcs
+            ):
+                exec(
+                    compile(
+                        ast.Module(body=[node], type_ignores=[]),
+                        str(SERVER_SOURCE_PATH),
+                        "exec",
+                    ),
+                    cls.server_ns,
+                )
+
+        cls.new_stream_state = staticmethod(cls.server_ns["new_stream_state"])
+        cls.reset_stream_state = staticmethod(cls.server_ns["reset_stream_state"])
+        cls.update_vad_and_buffers = staticmethod(
+            cls.server_ns["update_vad_and_buffers"]
+        )
+        cls.asr_handler = staticmethod(cls.server_ns["asr_handler"])
 
     def test_pipeline_constants_satisfy_issue_30_spec(self):
         """Verify that Issue #30 constants are correctly configured."""
@@ -61,7 +187,6 @@ class AsrPipelineRegressionTests(unittest.TestCase):
 
     def test_model_preset_resolution(self):
         """Verify quality and fast model preset resolution."""
-        # Compile get_model_spec in a sandboxed namespace
         ns = {
             "MODELS_DIR": "C:\\fake\\models",
             "whisper_model_source": "C:\\fake\\models\\kotoba-whisper-v2.0-faster",
@@ -89,89 +214,66 @@ class AsrPipelineRegressionTests(unittest.TestCase):
 
         path_cpu, name_cpu = get_model_spec("quality", "cpu")
         self.assertEqual(name_cpu, "kotoba-whisper-v2.0-faster")
-        # Quality preset ensures identical model comparison between CPU and GPU
         self.assertEqual(path, path_cpu)
 
     def test_speech_end_based_on_silence_not_transcript_stillness(self):
         """Verify speech-end endpointing is based on real audio silence time, not transcript stillness."""
-        # In asr_server.py:
-        # Check that silence_timeout uses last_voice_at and SPEECH_END_SILENCE_SECONDS
-        self.assertIn('now - state["last_voice_at"]) >= SPEECH_END_SILENCE_SECONDS', self.source)
-        # Ensure we do not use transcript stillness (e.g. silence_start_time from text match) for finalization
+        self.assertIn(
+            'now - state["last_voice_at"]) >= SPEECH_END_SILENCE_SECONDS',
+            self.source,
+        )
         self.assertNotIn('now - silence_start_time) >= timeout', self.source)
 
-    def test_full_utterance_preservation_for_short_medium_long(self):
-        """Simulate VAD pipeline with short (<1s), medium (4s), and long (12s) utterances
-        and verify PCM is never clipped to 3 seconds."""
+    def test_shared_vad_logic_updates_state_correctly(self):
+        """Verify update_vad_and_buffers updates speech state, pre-roll, and full PCM accurately."""
         sample_rate = 16000
-        frame_size = 320  # 20ms
-        energy_threshold = 0.012
+        state = self.new_stream_state()
+
+        # Send 100ms of silence
+        silence = np.zeros(int(sample_rate * 0.1), dtype=np.float32)
+        self.update_vad_and_buffers(state, silence, now=0.1, sample_rate=sample_rate)
+        self.assertFalse(state["is_speaking"])
+        self.assertEqual(len(state["pre_roll_pcm"]), len(silence))
+        self.assertEqual(len(state["full_utterance_pcm"]), 0)
+
+        # Send 80ms of loud speech (4 x 20ms frames >= 3 frames required)
+        speech = 0.1 * np.sin(
+            2 * np.pi * 300 * np.linspace(0, 0.08, int(sample_rate * 0.08), dtype=np.float32)
+        )
+        self.update_vad_and_buffers(state, speech, now=0.18, sample_rate=sample_rate)
+        self.assertTrue(state["is_speaking"])
+        # full_utterance_pcm must contain pre-roll plus incoming speech
+        self.assertGreaterEqual(
+            len(state["full_utterance_pcm"]),
+            len(silence) + len(speech),
+        )
+
+    def test_full_utterance_preservation_for_short_medium_long(self):
+        """Simulate VAD pipeline using real update_vad_and_buffers from asr_server.py
+        with short (<1s), medium (4s), and long (12s) utterances and verify PCM is never clipped to 3s."""
+        sample_rate = 16000
 
         for duration_s in [0.8, 4.0, 12.0]:
             total_samples = int(sample_rate * duration_s)
             t = np.linspace(0, duration_s, total_samples, dtype=np.float32)
-            # Simulated speech: sine wave with 0.1 amplitude (well above 0.012 threshold)
             speech_pcm = 0.1 * np.sin(2 * np.pi * 300 * t)
 
-            # Pre-roll silence (300ms)
             pre_silence = np.zeros(int(sample_rate * 0.3), dtype=np.float32)
-            # Post speech silence (800ms to trigger endpointing)
             post_silence = np.zeros(int(sample_rate * 0.8), dtype=np.float32)
-
             full_audio = np.concatenate([pre_silence, speech_pcm, post_silence])
 
-            # Simulate state machine
-            state = {
-                "full_utterance_pcm": np.array([], dtype=np.float32),
-                "pre_roll_pcm": np.array([], dtype=np.float32),
-                "is_speaking": False,
-                "speech_frame_count": 0,
-                "silence_frame_count": 0,
-                "last_voice_at": None,
-                "force_endpoint": False,
-            }
-
-            pre_roll_max = int(sample_rate * 0.20)
+            state = self.new_stream_state()
             now = 0.0
             chunk_size = 640  # 40ms packets
-
             finalized_pcm = None
 
             for i in range(0, len(full_audio), chunk_size):
                 samples = full_audio[i : i + chunk_size]
                 now += len(samples) / sample_rate
 
-                for f_idx in range(0, len(samples), frame_size):
-                    frame = samples[f_idx : f_idx + frame_size]
-                    if len(frame) < frame_size:
-                        break
-                    rms = float(np.sqrt(np.mean(frame**2)))
+                self.update_vad_and_buffers(state, samples, now, sample_rate)
 
-                    if rms >= energy_threshold:
-                        state["speech_frame_count"] += 1
-                        state["silence_frame_count"] = 0
-                        state["last_voice_at"] = now
-
-                        if not state["is_speaking"]:
-                            if state["speech_frame_count"] >= 3:
-                                state["is_speaking"] = True
-                                state["full_utterance_pcm"] = state["pre_roll_pcm"].copy()
-                    else:
-                        state["silence_frame_count"] += 1
-                        state["speech_frame_count"] = 0
-
-                if state["is_speaking"]:
-                    state["full_utterance_pcm"] = np.concatenate(
-                        [state["full_utterance_pcm"], samples]
-                    )
-                else:
-                    state["pre_roll_pcm"] = np.concatenate(
-                        [state["pre_roll_pcm"], samples]
-                    )
-                    if len(state["pre_roll_pcm"]) > pre_roll_max:
-                        state["pre_roll_pcm"] = state["pre_roll_pcm"][-pre_roll_max:]
-
-                # Check endpoint
+                # Check speech-end silence timeout
                 if state["is_speaking"] and state["last_voice_at"] is not None:
                     if (now - state["last_voice_at"]) >= 0.65:
                         finalized_pcm = state["full_utterance_pcm"].copy()
@@ -182,14 +284,12 @@ class AsrPipelineRegressionTests(unittest.TestCase):
                 finalized_pcm,
                 f"Failed to finalize utterance of duration {duration_s}s",
             )
-            # The finalized PCM must include the full speech AND the pre-roll (no 3s cutoff!)
             finalized_duration = len(finalized_pcm) / sample_rate
             self.assertGreaterEqual(
                 finalized_duration,
                 duration_s,
                 f"Utterance of {duration_s}s was truncated to {finalized_duration}s!",
             )
-            # Check that it did NOT truncate to 3.0 seconds
             if duration_s > 3.0:
                 self.assertGreater(
                     finalized_duration,
@@ -200,69 +300,63 @@ class AsrPipelineRegressionTests(unittest.TestCase):
     def test_intra_utterance_pause_does_not_prematurely_finalize(self):
         """A 350ms pause during speaking must not finalize or reset the buffer."""
         sample_rate = 16000
-        # Speech part 1 (1.5s)
-        s1 = 0.1 * np.sin(2 * np.pi * 300 * np.linspace(0, 1.5, int(sample_rate * 1.5), dtype=np.float32))
-        # Short pause (350ms, less than 650ms endpoint)
+        s1 = 0.1 * np.sin(
+            2 * np.pi * 300 * np.linspace(0, 1.5, int(sample_rate * 1.5), dtype=np.float32)
+        )
         pause = np.zeros(int(sample_rate * 0.35), dtype=np.float32)
-        # Speech part 2 (1.5s)
-        s2 = 0.1 * np.sin(2 * np.pi * 300 * np.linspace(0, 1.5, int(sample_rate * 1.5), dtype=np.float32))
-        # Final silence (800ms to end)
+        s2 = 0.1 * np.sin(
+            2 * np.pi * 300 * np.linspace(0, 1.5, int(sample_rate * 1.5), dtype=np.float32)
+        )
         post = np.zeros(int(sample_rate * 0.8), dtype=np.float32)
 
         full_audio = np.concatenate([s1, pause, s2, post])
-
-        state = {
-            "full_utterance_pcm": np.array([], dtype=np.float32),
-            "pre_roll_pcm": np.array([], dtype=np.float32),
-            "is_speaking": False,
-            "speech_frame_count": 0,
-            "silence_frame_count": 0,
-            "last_voice_at": None,
-        }
+        state = self.new_stream_state()
 
         now = 0.0
         chunk_size = 640
-        frame_size = 320
         finalized_count = 0
 
         for i in range(0, len(full_audio), chunk_size):
             samples = full_audio[i : i + chunk_size]
             now += len(samples) / sample_rate
 
-            for f_idx in range(0, len(samples), frame_size):
-                frame = samples[f_idx : f_idx + frame_size]
-                if len(frame) < frame_size:
-                    break
-                rms = float(np.sqrt(np.mean(frame**2)))
-                if rms >= 0.012:
-                    state["speech_frame_count"] += 1
-                    state["silence_frame_count"] = 0
-                    state["last_voice_at"] = now
-                    if not state["is_speaking"] and state["speech_frame_count"] >= 3:
-                        state["is_speaking"] = True
-                        state["full_utterance_pcm"] = state["pre_roll_pcm"].copy()
-                else:
-                    state["silence_frame_count"] += 1
-                    state["speech_frame_count"] = 0
-
-            if state["is_speaking"]:
-                state["full_utterance_pcm"] = np.concatenate(
-                    [state["full_utterance_pcm"], samples]
-                )
+            self.update_vad_and_buffers(state, samples, now, sample_rate)
 
             # Endpoint check
             if state["is_speaking"] and state["last_voice_at"] is not None:
                 if (now - state["last_voice_at"]) >= 0.65:
                     finalized_count += 1
                     state["is_speaking"] = False
-                    state["full_utterance_pcm"] = np.array([], dtype=np.float32)
+                    self.reset_stream_state(state)
 
-        # Must finalize exactly ONCE at the end, not during the 350ms pause!
+        # Must finalize exactly ONCE at the end, not during the 350ms pause
         self.assertEqual(
             finalized_count,
             1,
             f"Expected exactly 1 finalization, but got {finalized_count} (prematurely finalized during pause)",
         )
+
+    async def test_asr_handler_processes_binary_audio_without_name_errors(self):
+        """Verify real asr_handler coroutine processes binary PCM without NameError or runtime failure."""
+        pcm_chunk = np.zeros(640, dtype=np.float32).tobytes()
+
+        messages = [
+            pcm_chunk,
+            json.dumps({"cmd": "audio_stream", "stream": "discord"}),
+            pcm_chunk,
+            json.dumps({"cmd": "ping"}),
+        ]
+
+        ws = MockWebSocket(messages)
+        # Execute the real asr_handler with mock websocket
+        await asyncio.wait_for(self.asr_handler(ws), timeout=3.0)
+
+        # Verify device status and pong were emitted to client
+        sent_types = [json.loads(m).get("type") for m in ws.sent if "type" in json.loads(m)]
+        sent_statuses = [json.loads(m).get("status") for m in ws.sent if "status" in json.loads(m)]
+
+        self.assertIn("device_status", sent_types)
+        self.assertIn("pong", sent_statuses)
 
 
 if __name__ == "__main__":

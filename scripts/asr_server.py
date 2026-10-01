@@ -532,34 +532,112 @@ def set_vram_preallocation(enable: bool) -> bool:
     return True
 
 
+def new_stream_state():
+    return {
+        # Audio Buffers: full utterance PCM for complete final transcription
+        "full_utterance_pcm": np.array([], dtype=np.float32),
+        "pre_roll_pcm": np.array([], dtype=np.float32),
+        "audio_buffer": np.array([], dtype=np.float32),
+        "last_partial_text": "",
+        "last_partial_pcm_len": 0,
+        "last_partial_time": 0.0,
+        # VAD & Endpointing State
+        "is_speaking": False,
+        "speech_start_time": None,
+        "last_voice_at": None,
+        "speech_frame_count": 0,
+        "silence_frame_count": 0,
+        "force_endpoint": False,
+        # Diagnostic Metrics
+        "partial_count": 0,
+        "partial_latencies": [],
+        "utterance_started_monotonic": None,
+        "audio_started_at": None,
+        "last_audio_at": None,
+    }
+
+
+def reset_stream_state(state):
+    state["full_utterance_pcm"] = np.array([], dtype=np.float32)
+    state["audio_buffer"] = np.array([], dtype=np.float32)
+    state["last_partial_text"] = ""
+    state["last_partial_pcm_len"] = 0
+    state["last_partial_time"] = 0.0
+    state["is_speaking"] = False
+    state["speech_start_time"] = None
+    state["last_voice_at"] = None
+    state["speech_frame_count"] = 0
+    state["silence_frame_count"] = 0
+    state["force_endpoint"] = False
+    state["partial_count"] = 0
+    state["partial_latencies"] = []
+    state["utterance_started_monotonic"] = None
+    state["audio_started_at"] = None
+    state["last_audio_at"] = None
+
+
+def update_vad_and_buffers(
+    state,
+    samples,
+    now,
+    sample_rate=SAMPLE_RATE,
+    monotonic_time=None,
+):
+    """Update VAD state, voice timestamps, and PCM buffers with new audio samples."""
+    if len(samples) == 0:
+        return
+
+    if monotonic_time is None:
+        monotonic_time = time.monotonic()
+
+    # 20ms フレームごとに RMS を計算して VAD 状態を更新
+    frame_size = VAD_FRAME_SIZE
+    for i in range(0, len(samples), frame_size):
+        frame = samples[i : i + frame_size]
+        if len(frame) < frame_size:
+            break
+        rms = float(np.sqrt(np.mean(frame**2)))
+
+        if rms >= VAD_ENERGY_THRESHOLD:
+            state["speech_frame_count"] += 1
+            state["silence_frame_count"] = 0
+            state["last_voice_at"] = now
+
+            if not state["is_speaking"]:
+                if state["speech_frame_count"] >= SPEECH_START_CONSECUTIVE_FRAMES:
+                    state["is_speaking"] = True
+                    state["speech_start_time"] = now
+                    state["utterance_started_monotonic"] = monotonic_time
+                    state["partial_count"] = 0
+                    state["partial_latencies"] = []
+                    # pre-roll (直前200ms) を発話全体バッファの先頭に付加して文頭欠落を防止
+                    state["full_utterance_pcm"] = state["pre_roll_pcm"].copy()
+                    state["last_partial_pcm_len"] = 0
+        else:
+            state["silence_frame_count"] += 1
+            state["speech_frame_count"] = 0
+
+    # PCM 蓄積
+    if state["is_speaking"]:
+        state["full_utterance_pcm"] = np.concatenate(
+            [state["full_utterance_pcm"], samples]
+        )
+        state["audio_buffer"] = state["full_utterance_pcm"]
+        max_samples = int(sample_rate * MAX_UTTERANCE_SECONDS)
+        if len(state["full_utterance_pcm"]) > max_samples:
+            state["force_endpoint"] = True
+    else:
+        state["pre_roll_pcm"] = np.concatenate([state["pre_roll_pcm"], samples])
+        pre_roll_max = int(sample_rate * PRE_ROLL_SECONDS)
+        if len(state["pre_roll_pcm"]) > pre_roll_max:
+            state["pre_roll_pcm"] = state["pre_roll_pcm"][-pre_roll_max:]
+        state["audio_buffer"] = state["pre_roll_pcm"]
+
+
 async def asr_handler(websocket):
     sample_rate = 16000
     loop = asyncio.get_running_loop()
     active_stream = "mic"
-
-    def new_stream_state():
-        return {
-            # Audio Buffers: full utterance PCM for complete final transcription
-            "full_utterance_pcm": np.array([], dtype=np.float32),
-            "pre_roll_pcm": np.array([], dtype=np.float32),
-            "audio_buffer": np.array([], dtype=np.float32),
-            "last_partial_text": "",
-            "last_partial_pcm_len": 0,
-            "last_partial_time": 0.0,
-            # VAD & Endpointing State
-            "is_speaking": False,
-            "speech_start_time": None,
-            "last_voice_at": None,
-            "speech_frame_count": 0,
-            "silence_frame_count": 0,
-            "force_endpoint": False,
-            # Diagnostic Metrics
-            "partial_count": 0,
-            "partial_latencies": [],
-            "utterance_started_monotonic": None,
-            "audio_started_at": None,
-            "last_audio_at": None,
-        }
 
     # Each input stream gets an independent VAD transcript and silence clock.
     # Legacy clients that send raw binary frames without an audio_stream
@@ -772,24 +850,6 @@ async def asr_handler(websocket):
 
         return current_text, (loop.time() - t0) * 1000.0
 
-    def reset_stream_state(state):
-        state["full_utterance_pcm"] = np.array([], dtype=np.float32)
-        state["audio_buffer"] = np.array([], dtype=np.float32)
-        state["last_partial_text"] = ""
-        state["last_partial_pcm_len"] = 0
-        state["last_partial_time"] = 0.0
-        state["is_speaking"] = False
-        state["speech_start_time"] = None
-        state["last_voice_at"] = None
-        state["speech_frame_count"] = 0
-        state["silence_frame_count"] = 0
-        state["force_endpoint"] = False
-        state["partial_count"] = 0
-        state["partial_latencies"] = []
-        state["utterance_started_monotonic"] = None
-        state["audio_started_at"] = None
-        state["last_audio_at"] = None
-
     async def inference_loop():
         while True:
             try:
@@ -970,6 +1030,8 @@ async def asr_handler(websocket):
     try:
         async for message in websocket:
             if isinstance(message, bytes):
+                state = stream_states.setdefault(active_stream, new_stream_state())
+                now = loop.time()
                 samples = np.frombuffer(message, dtype=np.float32)
                 if len(samples) == 0:
                     continue
@@ -978,48 +1040,7 @@ async def asr_handler(websocket):
                 if len(samples) > 0:
                     state["last_audio_at"] = loop.time()
 
-                # 20ms フレームごとに RMS を計算して VAD 状態を更新
-                frame_size = VAD_FRAME_SIZE
-                for i in range(0, len(samples), frame_size):
-                    frame = samples[i : i + frame_size]
-                    if len(frame) < frame_size:
-                        break
-                    rms = float(np.sqrt(np.mean(frame**2)))
-
-                    if rms >= VAD_ENERGY_THRESHOLD:
-                        state["speech_frame_count"] += 1
-                        state["silence_frame_count"] = 0
-                        state["last_voice_at"] = now
-
-                        if not state["is_speaking"]:
-                            if state["speech_frame_count"] >= SPEECH_START_CONSECUTIVE_FRAMES:
-                                state["is_speaking"] = True
-                                state["speech_start_time"] = now
-                                state["utterance_started_monotonic"] = time.monotonic()
-                                state["partial_count"] = 0
-                                state["partial_latencies"] = []
-                                # pre-roll (直前200ms) を発話全体バッファの先頭に付加して文頭欠落を防止
-                                state["full_utterance_pcm"] = state["pre_roll_pcm"].copy()
-                                state["last_partial_pcm_len"] = 0
-                    else:
-                        state["silence_frame_count"] += 1
-                        state["speech_frame_count"] = 0
-
-                # PCM 蓄積
-                if state["is_speaking"]:
-                    state["full_utterance_pcm"] = np.concatenate(
-                        [state["full_utterance_pcm"], samples]
-                    )
-                    state["audio_buffer"] = state["full_utterance_pcm"]
-                    max_samples = int(SAMPLE_RATE * MAX_UTTERANCE_SECONDS)
-                    if len(state["full_utterance_pcm"]) > max_samples:
-                        state["force_endpoint"] = True
-                else:
-                    state["pre_roll_pcm"] = np.concatenate([state["pre_roll_pcm"], samples])
-                    pre_roll_max = int(SAMPLE_RATE * PRE_ROLL_SECONDS)
-                    if len(state["pre_roll_pcm"]) > pre_roll_max:
-                        state["pre_roll_pcm"] = state["pre_roll_pcm"][-pre_roll_max:]
-                    state["audio_buffer"] = state["pre_roll_pcm"]
+                update_vad_and_buffers(state, samples, now, sample_rate)
 
             elif isinstance(message, str):
                 try:
