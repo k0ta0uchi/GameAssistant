@@ -2332,7 +2332,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_missing_dependency_files_invalidate_each_runtime_layer_even_with_stale_probe_flags() {
+    fn storage_missing_dependency_files_invalidate_each_runtime_layer_even_with_stale_probe_flags()
+    {
         let root = std::env::temp_dir().join(format!(
             "gameassistant-runtime-dependency-loss-{}-{}",
             std::process::id(),

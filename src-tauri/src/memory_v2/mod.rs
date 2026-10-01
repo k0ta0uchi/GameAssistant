@@ -701,7 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_journal_ignores_only_an_incomplete_final_line_but_rejects_malformed_complete_lines() {
+    fn storage_journal_ignores_only_an_incomplete_final_line_but_rejects_malformed_complete_lines()
+    {
         let root = temp_root("tails");
         let paths = MemoryPaths::from_runtime_root(&root).unwrap();
         let journal = journal::Journal::open_with_lock(paths.journal(), paths.lock()).unwrap();
