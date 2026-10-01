@@ -189,10 +189,15 @@ fn file_logger_worker(
             }
         }
         if let Some(handle) = file.as_mut() {
-            let _ = writeln!(handle, "{line}");
-            // Flush here, on the worker thread: crash windows stay tiny
-            // without ever blocking the logging call sites.
-            let _ = handle.flush();
+            let write_result = writeln!(handle, "{line}").and_then(|()| handle.flush());
+            if write_result.is_err() {
+                // write/flush 失敗 (disk full、一時的 I/O エラー、無効化等):
+                // handle を破棄して次の受信行で create_dir_all + open から
+                // 再オープンする。そうしないと同じ壊れた handle へ失敗し
+                // 続ける。本体は panic せず、一時障害からも自動回復する。
+                file = None;
+                current_day = None;
+            }
         }
         written.fetch_add(1, Ordering::Relaxed);
     }
@@ -406,6 +411,57 @@ mod tests {
         logger.wait_until_file_flushed();
         // panic せずここまで到達し、GUI 側のリングには記録されている
         assert_eq!(logger.get_logs().len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn worker_reopens_the_log_file_after_a_failure() {
+        let root = unique_root("reopen");
+        let logs_dir = root.join("logs");
+        // logs/ をファイルで潰して open 失敗状態から開始する
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&logs_dir, "not a directory").unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let written = Arc::new(AtomicU64::new(0));
+        let worker_written = Arc::clone(&written);
+        let worker = std::thread::spawn(move || {
+            super::file_logger_worker(logs_dir.clone(), rx, worker_written)
+        });
+
+        // open 失敗: 行は drop され、カウンタだけが進む
+        tx.send("dropped line".to_string()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while written.load(Ordering::SeqCst) < 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not process the dropped line"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // 回復: 潰していた logs/ を取り除いて再作成し、次の受信行で
+        // create_dir_all + open から再オープンできることを検証する。
+        // write/flush 失敗時も同じ file=None 経路で再オープンされる。
+        fs::remove_file(&logs_dir).unwrap();
+        fs::create_dir_all(&logs_dir).unwrap();
+        tx.send("recovered line".to_string()).unwrap();
+        while written.load(Ordering::SeqCst) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not reopen the log file"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        drop(tx);
+        worker.join().expect("worker thread");
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        let path = logs_dir.join(format!("GameAssistant-{today}.log"));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("recovered line"));
+        assert!(!content.contains("dropped line"));
         let _ = fs::remove_dir_all(root);
     }
 }
