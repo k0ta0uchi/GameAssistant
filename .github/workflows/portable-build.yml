@@ -54,7 +54,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
-          shared-key: "windows-ci"
+          shared-key: "windows-portable-release"
           key: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'src-tauri/.cargo/config.toml') }}
           cache-all-crates: "true"
 
