@@ -42,6 +42,66 @@ pub struct TwitchTokenResponse {
     pub token_type: Option<String>,
 }
 
+/// リフレッシュトークン永続化の結果を表す構造体
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenPersistOutcome {
+    pub access_token_saved: bool,
+    pub refresh_token_saved: bool,
+    pub errors: Vec<String>,
+}
+
+impl TokenPersistOutcome {
+    pub fn is_success(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
+/// リフレッシュされた Twitch トークン（access / refresh）を設定ディレクトリの資格情報ストアへ永続化する。
+/// エラーを握りつぶさず、各トークン保存の成否（部分成功を含む）とエラー一覧を記録して返却する。
+pub fn persist_refreshed_tokens(
+    root_dir: Option<&std::path::Path>,
+    new_tok: &TwitchTokenResponse,
+) -> TokenPersistOutcome {
+    let mut outcome = TokenPersistOutcome {
+        access_token_saved: false,
+        refresh_token_saved: false,
+        errors: Vec::new(),
+    };
+
+    let Some(rdir) = root_dir else {
+        outcome
+            .errors
+            .push("Root directory is not configured for TwitchService".to_string());
+        return outcome;
+    };
+
+    match crate::settings::save_setting_key(
+        rdir,
+        "twitch_access_token",
+        serde_json::Value::String(new_tok.access_token.clone()),
+    ) {
+        Ok(_) => outcome.access_token_saved = true,
+        Err(e) => outcome
+            .errors
+            .push(format!("Failed to persist twitch_access_token: {}", e)),
+    }
+
+    if let Some(ref new_r) = new_tok.refresh_token {
+        match crate::settings::save_setting_key(
+            rdir,
+            "twitch_refresh_token",
+            serde_json::Value::String(new_r.clone()),
+        ) {
+            Ok(_) => outcome.refresh_token_saved = true,
+            Err(e) => outcome
+                .errors
+                .push(format!("Failed to persist twitch_refresh_token: {}", e)),
+        }
+    }
+
+    outcome
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwitchValidateResponse {
     pub client_id: String,
@@ -449,32 +509,59 @@ impl TwitchService {
                                         resolved_nick = v2.login.to_lowercase();
                                     }
                                     refreshed = true;
-                                    if let Some(log) = self.log_mgr.lock().as_ref() {
-                                        log.info(
-                                            "Twitch",
-                                            &format!(
-                                                "Twitch token refreshed successfully! Authenticated as '{}'",
-                                                resolved_nick
-                                            ),
-                                        );
-                                    }
-                                    // settings.json に最新アクセストークンを自動永続化
-                                    if let Some(ref rdir) = *self.root_dir.lock() {
-                                        let _ = crate::settings::save_setting_key(
-                                            rdir,
-                                            "twitch_access_token",
-                                            serde_json::Value::String(new_tok.access_token.clone()),
-                                        );
-                                        if let Some(ref new_r) = new_tok.refresh_token {
-                                            let _ = crate::settings::save_setting_key(
-                                                rdir,
-                                                "twitch_refresh_token",
-                                                serde_json::Value::String(new_r.clone()),
+
+                                    // settings.json / credential store に最新トークンを自動永続化
+                                    let outcome = persist_refreshed_tokens(
+                                        self.root_dir.lock().as_deref(),
+                                        &new_tok,
+                                    );
+
+                                    if outcome.is_success() {
+                                        if let Some(log) = self.log_mgr.lock().as_ref() {
+                                            log.info(
+                                                "Twitch",
+                                                &format!(
+                                                    "Twitch token refreshed and persisted to credential store successfully! Authenticated as '{}'",
+                                                    resolved_nick
+                                                ),
+                                            );
+                                        }
+                                    } else {
+                                        let summary = if outcome.access_token_saved
+                                            && !outcome.refresh_token_saved
+                                        {
+                                            "partial persistence: access token saved, but refresh token failed"
+                                        } else if !outcome.access_token_saved
+                                            && outcome.refresh_token_saved
+                                        {
+                                            "partial persistence: refresh token saved, but access token failed"
+                                        } else {
+                                            "all token persistence failed"
+                                        };
+                                        if let Some(log) = self.log_mgr.lock().as_ref() {
+                                            log.error(
+                                                "Twitch",
+                                                &format!(
+                                                    "Twitch token refreshed via API but credential persistence failed ({}) [{}]. Connection continuing for current session.",
+                                                    summary,
+                                                    outcome.errors.join("; ")
+                                                ),
                                             );
                                         }
                                     }
+
                                     if let Some(ref handle) = app_handle {
                                         let _ = handle.emit("twitch_token_refreshed", &new_tok);
+                                        if !outcome.is_success() {
+                                            let _ = handle.emit(
+                                                "twitch_token_persist_error",
+                                                serde_json::json!({
+                                                    "access_token_saved": outcome.access_token_saved,
+                                                    "refresh_token_saved": outcome.refresh_token_saved,
+                                                    "errors": outcome.errors,
+                                                }),
+                                            );
+                                        }
                                     }
                                 }
                                 Err(ref_err) => {
@@ -942,5 +1029,89 @@ mod tests {
         let (c5, s5) = parse_code_and_state("abcxyz_only", None);
         assert_eq!(c5, "abcxyz_only");
         assert_eq!(s5, None);
+    }
+
+    #[test]
+    fn test_persist_refreshed_tokens_success() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_persist_token_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let new_tok = TwitchTokenResponse {
+            access_token: "dummy_test_refreshed_access_token_abc".to_string(),
+            refresh_token: Some("dummy_test_refreshed_refresh_token_xyz".to_string()),
+            expires_in: Some(3600),
+            token_type: Some("bearer".to_string()),
+        };
+
+        let outcome = persist_refreshed_tokens(Some(&temp_dir), &new_tok);
+        assert!(outcome.is_success());
+        assert!(outcome.access_token_saved);
+        assert!(outcome.refresh_token_saved);
+        assert!(outcome.errors.is_empty());
+
+        // credential store に保存されていることを確認
+        let saved_access = crate::credentials::get_secret(&temp_dir, "twitch_access_token");
+        assert_eq!(
+            saved_access.as_deref(),
+            Some("dummy_test_refreshed_access_token_abc")
+        );
+
+        let saved_refresh = crate::credentials::get_secret(&temp_dir, "twitch_refresh_token");
+        assert_eq!(
+            saved_refresh.as_deref(),
+            Some("dummy_test_refreshed_refresh_token_xyz")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_persist_refreshed_tokens_without_refresh_token_succeeds() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_persist_token_no_refresh_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let new_tok = TwitchTokenResponse {
+            access_token: "dummy_test_refreshed_access_token_only".to_string(),
+            refresh_token: None,
+            expires_in: Some(3600),
+            token_type: Some("bearer".to_string()),
+        };
+
+        let outcome = persist_refreshed_tokens(Some(&temp_dir), &new_tok);
+        assert!(outcome.is_success());
+        assert!(outcome.access_token_saved);
+        assert!(!outcome.refresh_token_saved);
+        assert!(outcome.errors.is_empty());
+
+        let saved_access = crate::credentials::get_secret(&temp_dir, "twitch_access_token");
+        assert_eq!(
+            saved_access.as_deref(),
+            Some("dummy_test_refreshed_access_token_only")
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_persist_refreshed_tokens_missing_root_dir_reports_error() {
+        let new_tok = TwitchTokenResponse {
+            access_token: "dummy_test_refreshed_access_token_abc".to_string(),
+            refresh_token: Some("dummy_test_refreshed_refresh_token_xyz".to_string()),
+            expires_in: Some(3600),
+            token_type: Some("bearer".to_string()),
+        };
+
+        let outcome = persist_refreshed_tokens(None, &new_tok);
+        assert!(!outcome.is_success());
+        assert!(!outcome.access_token_saved);
+        assert!(!outcome.refresh_token_saved);
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("Root directory is not configured"));
     }
 }

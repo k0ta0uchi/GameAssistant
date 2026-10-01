@@ -169,7 +169,13 @@ impl DpapiCredentialStore {
         let path = self.credentials_path();
         if map.is_empty() {
             if path.exists() {
-                let _ = fs::remove_file(&path);
+                fs::remove_file(&path).map_err(|e| {
+                    format!(
+                        "Failed to remove credentials file {}: {}",
+                        path.display(),
+                        e
+                    )
+                })?;
             }
             return Ok(());
         }
@@ -848,5 +854,40 @@ mod tests {
             !err.contains(sensitive),
             "Error message must never contain sensitive tokens"
         );
+    }
+
+    #[test]
+    fn test_delete_fails_when_credentials_file_cannot_be_removed() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_dpapi_delete_fail_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = DpapiCredentialStore::new(&temp_dir);
+        store
+            .set("gemini_api_key", "dummy_test_gemini_key_1")
+            .unwrap();
+
+        let cred_path = temp_dir.join("credentials.enc");
+        assert!(cred_path.exists());
+
+        // credentials.enc を読み取り専用にして削除を失敗させる
+        let mut perms = fs::metadata(&cred_path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&cred_path, perms).unwrap();
+
+        // 唯一のキーを削除しようとする -> map が空になり remove_file が呼ばれる -> エラーが返ること
+        let res = store.delete("gemini_api_key");
+        assert!(
+            res.is_err(),
+            "delete should fail when credentials.enc cannot be removed"
+        );
+
+        // 読み取り専用を解除してクリーンアップ
+        let mut perms = fs::metadata(&cred_path).unwrap().permissions();
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(&cred_path, perms);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
