@@ -41,7 +41,16 @@ windows = { version = "0.58", features = [
 ] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "process",
+    "net",
+    "io-util",
+    "fs",
+] }
 cpal = "0.15"
 chrono = "0.4"
 lancedb = "0.37.1"
@@ -69,4 +78,3 @@ opt-level = 1
 
 [profile.test.package."*"]
 opt-level = 1
-
