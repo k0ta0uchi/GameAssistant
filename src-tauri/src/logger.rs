@@ -425,8 +425,9 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let written = Arc::new(AtomicU64::new(0));
         let worker_written = Arc::clone(&written);
+        let worker_logs_dir = logs_dir.clone();
         let worker = std::thread::spawn(move || {
-            super::file_logger_worker(logs_dir.clone(), rx, worker_written)
+            super::file_logger_worker(worker_logs_dir, rx, worker_written)
         });
 
         // open 失敗: 行は drop され、カウンタだけが進む
@@ -446,9 +447,10 @@ mod tests {
         fs::remove_file(&logs_dir).unwrap();
         fs::create_dir_all(&logs_dir).unwrap();
         tx.send("recovered line".to_string()).unwrap();
+        let reopen_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while written.load(Ordering::SeqCst) < 2 {
             assert!(
-                std::time::Instant::now() < deadline,
+                std::time::Instant::now() < reopen_deadline,
                 "worker did not reopen the log file"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
