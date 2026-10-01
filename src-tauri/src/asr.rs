@@ -1175,6 +1175,15 @@ impl WhisperWsClient {
         if let Some(ref dev) = device {
             cmd.arg("--force-device").arg(dev);
         }
+        if let Ok(preset) = std::env::var("ASR_MODEL_PRESET") {
+            cmd.arg("--model-preset").arg(preset);
+        }
+        if let Ok(compute_type) = std::env::var("ASR_COMPUTE_TYPE") {
+            cmd.arg("--compute-type").arg(compute_type);
+        }
+        if let Ok(threads) = std::env::var("ASR_CPU_THREADS") {
+            cmd.arg("--cpu-threads").arg(threads);
+        }
         cmd.current_dir(&root_dir)
             .env("RUNTIME_ROOT", root_dir.to_string_lossy().to_string())
             .env(
