@@ -1,12 +1,18 @@
 use futures::{SinkExt, StreamExt};
 use parking_lot::Mutex;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
+
+pub const OAUTH_STATE_TTL_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TwitchChatMessage {
@@ -51,6 +57,7 @@ pub struct TwitchService {
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     log_mgr: Arc<Mutex<Option<Arc<crate::logger::LogManager>>>>,
     root_dir: Arc<Mutex<Option<std::path::PathBuf>>>,
+    pending_auth_states: Arc<Mutex<HashMap<String, Instant>>>,
 }
 
 impl Default for TwitchService {
@@ -71,6 +78,7 @@ impl TwitchService {
             app_handle: Arc::new(Mutex::new(None)),
             log_mgr: Arc::new(Mutex::new(None)),
             root_dir: Arc::new(Mutex::new(None)),
+            pending_auth_states: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -82,16 +90,139 @@ impl TwitchService {
         *self.root_dir.lock() = Some(root_dir);
     }
 
-    /// Twitch OAuth 認可 URL を生成 (Authorization Code フロー)
-    pub fn get_auth_url(client_id: &str, redirect_uri: &str) -> String {
+    /// 認証開始ごとに暗号論的に安全なランダム state を生成・一時保存
+    pub fn generate_auth_state(&self) -> String {
+        let state: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
+        let mut states = self.pending_auth_states.lock();
+        let now = Instant::now();
+        // 期限切れのエントリをパージ
+        states.retain(|_, created_at| now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS);
+        states.insert(state.clone(), now);
+        state
+    }
+
+    /// Twitch OAuth 認可 URL を生成 (Authorization Code フロー, 新規 state 付与)
+    pub fn get_auth_url(&self, client_id: &str, redirect_uri: &str) -> String {
+        let state = self.generate_auth_state();
+        Self::format_auth_url(client_id, redirect_uri, &state)
+    }
+
+    /// Twitch OAuth 認可 URL をフォーマット
+    pub fn format_auth_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
         let scopes = "chat:read chat:edit moderator:read:followers user:read:chat user:write:chat user:bot channel:bot";
         format!(
-            "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}",
+            "https://id.twitch.tv/oauth2/authorize?client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
             client_id,
             urlencoding::encode(redirect_uri),
-            urlencoding::encode(scopes)
+            urlencoding::encode(scopes),
+            urlencoding::encode(state)
         )
     }
+
+    /// OAuth state を検証して消費（ワンタイム使用・再利用不可）
+    pub fn verify_and_consume_state(&self, state: Option<&str>) -> Result<(), String> {
+        let state_val = match state {
+            Some(s) if !s.trim().is_empty() => s.trim(),
+            _ => return Err("OAuth state is missing".to_string()),
+        };
+
+        let mut states = self.pending_auth_states.lock();
+        let now = Instant::now();
+
+        // 期限切れのエントリをパージ
+        states.retain(|_, created_at| now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS);
+
+        if let Some(created_at) = states.remove(state_val) {
+            if now.duration_since(created_at).as_secs() >= OAUTH_STATE_TTL_SECS {
+                return Err("OAuth state has expired. Please restart authorization.".to_string());
+            }
+            Ok(())
+        } else {
+            Err("OAuth state is invalid, expired, or already used".to_string())
+        }
+    }
+
+    #[cfg(test)]
+    pub fn insert_pending_state_for_test(&self, state: String, created_at: Instant) {
+        let mut states = self.pending_auth_states.lock();
+        states.insert(state, created_at);
+    }
+}
+
+/// 入力文字列 (code または URL、または code#state / code:state) と明示的な state オプションから
+/// 有効な code と state を抽出する
+pub fn parse_code_and_state(
+    code_input: &str,
+    explicit_state: Option<String>,
+) -> (String, Option<String>) {
+    let trimmed = code_input.trim();
+
+    // 1. explicit_state が指定されている場合はそれを優先
+    if let Some(s) = explicit_state {
+        let s_trimmed = s.trim();
+        if !s_trimmed.is_empty() {
+            let clean_code = if let Some((c, _)) = trimmed.split_once('#') {
+                c.trim().to_string()
+            } else if let Some((c, _)) = trimmed.split_once(':') {
+                c.trim().to_string()
+            } else {
+                trimmed.to_string()
+            };
+            return (clean_code, Some(s_trimmed.to_string()));
+        }
+    }
+
+    // 2. URL 形式の場合 (https://... または ?code=...)
+    if (trimmed.starts_with("http://") || trimmed.starts_with("https://")) && trimmed.contains('?')
+    {
+        if let Some((_, query)) = trimmed.split_once('?') {
+            let mut extracted_code = String::new();
+            let mut extracted_state = None;
+            for pair in query.split('&') {
+                if let Some((k, v)) = pair.split_once('=') {
+                    if k == "code" {
+                        extracted_code =
+                            urlencoding::decode(v).unwrap_or_else(|_| v.into()).to_string();
+                    } else if k == "state" {
+                        extracted_state =
+                            Some(urlencoding::decode(v).unwrap_or_else(|_| v.into()).to_string());
+                    }
+                }
+            }
+            if !extracted_code.is_empty() {
+                return (extracted_code, extracted_state);
+            }
+        }
+    }
+
+    // 3. code#state 形式
+    if let Some((c, s)) = trimmed.split_once('#') {
+        let clean_c = c.trim();
+        let clean_s = s.trim();
+        if !clean_c.is_empty() && !clean_s.is_empty() {
+            return (clean_c.to_string(), Some(clean_s.to_string()));
+        }
+    }
+
+    // 4. code:state 形式
+    if let Some((c, s)) = trimmed.split_once(':') {
+        let clean_c = c.trim();
+        let clean_s = s.trim();
+        if !clean_c.is_empty() && !clean_s.is_empty() {
+            return (clean_c.to_string(), Some(clean_s.to_string()));
+        }
+    }
+
+    // 5. 単一コード
+    (trimmed.to_string(), None)
+}
+
+impl TwitchService {
 
     /// アクセストークンの検証
     pub async fn validate_token(
@@ -152,14 +283,18 @@ impl TwitchService {
         }
     }
 
-    /// 認可コード (code) からアクセストークンを取得
+    /// 認可コード (code) からアクセストークンを取得 (OAuth state 検証付き)
     pub async fn exchange_code(
         &self,
         client_id: &str,
         client_secret: &str,
         code: &str,
+        state: Option<&str>,
         redirect_uri: &str,
     ) -> Result<TwitchTokenResponse, String> {
+        // 先に state 検証を実行。不一致・欠落・期限切れ時は HTTP リクエストを送信せずに即座に拒否
+        self.verify_and_consume_state(state)?;
+
         let params = [
             ("client_id", client_id),
             ("client_secret", client_secret),
@@ -668,4 +803,129 @@ mod tests {
         println!("is_connected: {}", svc.is_connected());
         svc.disconnect();
     }
+
+    #[test]
+    fn test_generate_auth_state_is_unique_and_embedded_in_auth_url() {
+        let svc = TwitchService::new();
+        let url1 = svc.get_auth_url("my_client_id", "https://localhost/auth");
+        let url2 = svc.get_auth_url("my_client_id", "https://localhost/auth");
+
+        assert!(url1.contains("state="));
+        assert!(url2.contains("state="));
+        assert_ne!(url1, url2, "Each auth URL must contain a unique state");
+    }
+
+    #[test]
+    fn test_oauth_state_success_verification() {
+        let svc = TwitchService::new();
+        let state = svc.generate_auth_state();
+
+        // 正常一致
+        let res = svc.verify_and_consume_state(Some(&state));
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_oauth_state_missing_rejected() {
+        let svc = TwitchService::new();
+        let _ = svc.generate_auth_state();
+
+        // None
+        let res_none = svc.verify_and_consume_state(None);
+        assert!(res_none.is_err());
+        assert!(res_none.unwrap_err().contains("missing"));
+
+        // 空文字列
+        let res_empty = svc.verify_and_consume_state(Some("   "));
+        assert!(res_empty.is_err());
+        assert!(res_empty.unwrap_err().contains("missing"));
+    }
+
+    #[test]
+    fn test_oauth_state_mismatch_rejected() {
+        let svc = TwitchService::new();
+        let _valid_state = svc.generate_auth_state();
+
+        // 不一致の state
+        let res = svc.verify_and_consume_state(Some("attacker_forged_state"));
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("invalid"));
+    }
+
+    #[test]
+    fn test_oauth_state_single_use_only() {
+        let svc = TwitchService::new();
+        let state = svc.generate_auth_state();
+
+        // 1回目の検証は成功
+        let first_res = svc.verify_and_consume_state(Some(&state));
+        assert!(first_res.is_ok());
+
+        // 同じ state での2回目の検証は失敗（再利用不可）
+        let second_res = svc.verify_and_consume_state(Some(&state));
+        assert!(second_res.is_err());
+    }
+
+    #[test]
+    fn test_oauth_state_expired_rejected() {
+        let svc = TwitchService::new();
+        let expired_state = "expired_test_state".to_string();
+
+        // TTL(600s) より古いタイムスタンプで挿入
+        let past_time = Instant::now() - std::time::Duration::from_secs(OAUTH_STATE_TTL_SECS + 60);
+        svc.insert_pending_state_for_test(expired_state.clone(), past_time);
+
+        let res = svc.verify_and_consume_state(Some(&expired_state));
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_exchange_code_fails_without_http_request_on_invalid_state() {
+        let svc = TwitchService::new();
+        // 存在しない / 不正な state を渡した場合、無効なダミーエンドポイントでも即座に弾かれる
+        let res = svc
+            .exchange_code(
+                "dummy_id",
+                "dummy_secret",
+                "dummy_code",
+                Some("wrong_state"),
+                "https://localhost/auth",
+            )
+            .await;
+
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("invalid"));
+    }
+
+    #[test]
+    fn test_parse_code_and_state_variations() {
+        // Case 1: explicit state provided
+        let (c1, s1) = parse_code_and_state("mycode123", Some("mystate456".to_string()));
+        assert_eq!(c1, "mycode123");
+        assert_eq!(s1, Some("mystate456".to_string()));
+
+        // Case 2: URL with code and state query params
+        let (c2, s2) = parse_code_and_state(
+            "https://k0ta0uchi.github.io/GameAssistant/auth.html?code=abcxyz&state=state789",
+            None,
+        );
+        assert_eq!(c2, "abcxyz");
+        assert_eq!(s2, Some("state789".to_string()));
+
+        // Case 3: code#state format
+        let (c3, s3) = parse_code_and_state("abcxyz#state789", None);
+        assert_eq!(c3, "abcxyz");
+        assert_eq!(s3, Some("state789".to_string()));
+
+        // Case 4: code:state format
+        let (c4, s4) = parse_code_and_state("abcxyz:state789", None);
+        assert_eq!(c4, "abcxyz");
+        assert_eq!(s4, Some("state789".to_string()));
+
+        // Case 5: code only without state
+        let (c5, s5) = parse_code_and_state("abcxyz_only", None);
+        assert_eq!(c5, "abcxyz_only");
+        assert_eq!(s5, None);
+    }
 }
+

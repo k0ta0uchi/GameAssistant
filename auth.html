@@ -401,6 +401,7 @@
         window.onload = function() {
             const params = new URLSearchParams(window.location.search);
             const code = params.get('code');
+            const state = params.get('state');
             const error = params.get('error');
             const errorDesc = params.get('error_description');
 
@@ -431,10 +432,12 @@
                 // 成功時
                 setStatus('success', '認証成功 — コード取得完了');
                 successView.style.display = 'block';
-                authCodeText.textContent = code;
+
+                const payload = state ? `${code}#${state}` : code;
+                authCodeText.textContent = payload;
 
                 // 自動コピー試行
-                navigator.clipboard.writeText(code).then(() => {
+                navigator.clipboard.writeText(payload).then(() => {
                     showToast('認証コードを自動コピーしました！');
                     btnLabel.textContent = 'コピー完了 (Copied)';
                 }).catch(() => {
@@ -442,7 +445,7 @@
                 });
 
                 copyBtn.addEventListener('click', () => {
-                    navigator.clipboard.writeText(code).then(() => {
+                    navigator.clipboard.writeText(payload).then(() => {
                         showToast('クリップボードにコピーしました！');
                         btnLabel.textContent = 'コピー完了 (Copied)';
                         setTimeout(() => {

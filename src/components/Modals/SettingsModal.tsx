@@ -1721,7 +1721,8 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
   };
 
   const handleRegisterCode = async () => {
-    if (!authCode.trim()) {
+    const rawInput = authCode.trim();
+    if (!rawInput) {
       setMessage({ text: "認証コードを入力してください。", type: "error" });
       return;
     }
@@ -1735,13 +1736,36 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
       return;
     }
 
+    // code と state の抽出（URL、code#state、code:state、または code 単体）
+    let parsedCode = rawInput;
+    let parsedState: string | undefined = undefined;
+
+    if (rawInput.startsWith("http://") || rawInput.startsWith("https://")) {
+      try {
+        const url = new URL(rawInput);
+        parsedCode = url.searchParams.get("code") || rawInput;
+        parsedState = url.searchParams.get("state") || undefined;
+      } catch {
+        // fallback
+      }
+    } else if (rawInput.includes("#")) {
+      const [c, s] = rawInput.split("#", 2);
+      parsedCode = c.trim();
+      parsedState = s.trim() || undefined;
+    } else if (rawInput.includes(":")) {
+      const [c, s] = rawInput.split(":", 2);
+      parsedCode = c.trim();
+      parsedState = s.trim() || undefined;
+    }
+
     setIsRegistering(true);
     setMessage(null);
     try {
       const tokenRes: any = await invoke("twitch_register_code", {
         clientId,
         clientSecret,
-        code: authCode.trim(),
+        code: parsedCode,
+        state: parsedState,
       });
       if (tokenRes && tokenRes.access_token) {
         // トークン検証
