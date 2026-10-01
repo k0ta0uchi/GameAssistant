@@ -29,6 +29,14 @@ jobs:
           toolchain: nightly-2026-01-14
           components: rustfmt
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          shared-key: "windows-ci"
+          key: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'src-tauri/.cargo/config.toml') }}
+          cache-all-crates: "true"
+
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
         with:
