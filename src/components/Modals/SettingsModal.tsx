@@ -1631,8 +1631,13 @@ interface TwitchTabProps {
 const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
   const [authCode, setAuthCode] = useState<string>("");
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
+  const [clientSecretInput, setClientSecretInput] = useState<string>("");
   const [isRegistering, setIsRegistering] = useState<boolean>(false);
   const [isToggling, setIsToggling] = useState<boolean>(false);
+  const hasSavedSecret =
+    !!settings.has_twitch_client_secret ||
+    !!settings.has_client_secret ||
+    !!settings.twitch_client_secret;
   const [twitchStatus, setTwitchStatus] = useState<{
     connected: boolean;
     bot_username: string;
@@ -1644,7 +1649,7 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
     bot_username: String(settings.twitch_bot_username || ""),
     bot_id: String(settings.twitch_bot_id || ""),
     has_client_id: !!settings.twitch_client_id,
-    has_client_secret: !!settings.twitch_client_secret,
+    has_client_secret: hasSavedSecret,
   });
   const [message, setMessage] = useState<{
     text: string;
@@ -1660,7 +1665,10 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
         bot_username: String(settings.twitch_bot_username || ""),
         bot_id: String(settings.twitch_bot_id || ""),
         has_client_id: !!settings.twitch_client_id,
-        has_client_secret: !!settings.twitch_client_secret,
+        has_client_secret:
+          !!settings.has_twitch_client_secret ||
+          !!settings.has_client_secret ||
+          !!settings.twitch_client_secret,
       }));
     } catch {
       // ignore
@@ -1727,8 +1735,8 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
       return;
     }
     const clientId = String(settings.twitch_client_id || "").trim();
-    const clientSecret = String(settings.twitch_client_secret || "").trim();
-    if (!clientId || !clientSecret) {
+    const clientSecret = clientSecretInput.trim();
+    if (!clientId || (!clientSecret && !hasSavedSecret)) {
       setMessage({
         text: "Client ID と Client Secret の両方を入力してください。",
         type: "error",
@@ -1988,17 +1996,27 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
           </div>
 
           <div>
-            <label className="block text-[#8a8f98] mb-1 font-medium">
-              Client Secret
+            <label className="block text-[#8a8f98] mb-1 font-medium flex items-center justify-between">
+              <span>Client Secret</span>
+              {hasSavedSecret && (
+                <span className="text-[#27a644] text-[10px] font-normal">
+                  ✓ OS資格情報ストアに安全に保存済み
+                </span>
+              )}
             </label>
             <input
               type="password"
-              value={String(settings.twitch_client_secret || "")}
-              onChange={(e) =>
-                onUpdateSetting("twitch_client_secret", e.target.value)
-              }
+              value={clientSecretInput}
+              onChange={(e) => {
+                setClientSecretInput(e.target.value);
+                onUpdateSetting("twitch_client_secret", e.target.value);
+              }}
               className="w-full linear-input py-1.5 px-2 bg-[#0f1011] text-[#d0d6e0] font-mono"
-              placeholder="Twitch Developer Console Secret"
+              placeholder={
+                hasSavedSecret
+                  ? "•••••••• (安全に保存済み・変更時のみ入力)"
+                  : "Twitch Developer Console Secret"
+              }
             />
           </div>
         </div>

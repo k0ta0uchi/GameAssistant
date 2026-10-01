@@ -31,7 +31,38 @@ pub fn load_settings_file(root_dir: &Path) -> Value {
     serde_json::json!({})
 }
 
+/// フロントエンドに返却するための安全化された設定 snapshot をロードする。
+/// - 初回や未マイグレーション時は自動的に平文クレデンシャルを OS credential store (DPAPI) へ移行
+/// - 平文シークレットは完全に除去
+/// - 設定済みフラグ（`has_gemini_api_key`, `has_twitch_client_secret` 等）を付与
+pub fn load_frontend_settings(root_dir: &Path) -> Result<Value, String> {
+    let mut current = load_settings_file(root_dir);
+    let store = crate::credentials::DpapiCredentialStore::new(root_dir);
+    crate::credentials::sanitize_settings_for_frontend(root_dir, &mut current, &store)?;
+    Ok(current)
+}
+
 pub fn save_setting_key(root_dir: &Path, key: &str, value: Value) -> Result<Value, String> {
+    if crate::credentials::is_secret_key(key) {
+        match value {
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    crate::credentials::delete_secret(root_dir, key)?;
+                } else {
+                    crate::credentials::set_secret(root_dir, key, trimmed)?;
+                }
+            }
+            Value::Null => {
+                crate::credentials::delete_secret(root_dir, key)?;
+            }
+            _ => {
+                return Err(format!("Secret setting '{}' must be a string or null", key));
+            }
+        }
+        return load_frontend_settings(root_dir);
+    }
+
     let settings_path = root_dir.join("settings.json");
     let mut current_json = load_settings_file(root_dir);
 
@@ -46,7 +77,7 @@ pub fn save_setting_key(root_dir: &Path, key: &str, value: Value) -> Result<Valu
     let pretty_str = serde_json::to_string_pretty(&current_json).map_err(|e| e.to_string())?;
 
     fs::write(&settings_path, pretty_str).map_err(|e| e.to_string())?;
-    Ok(current_json)
+    load_frontend_settings(root_dir)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,6 +394,71 @@ mod tests {
         assert_eq!(
             response.settings.get("preallocate_vram"),
             Some(&serde_json::json!(false))
+        );
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_save_setting_key_for_secret_does_not_persist_in_plain_settings_json() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_settings_secret_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let secret_val = "super-secret-twitch-key-999";
+        let res = save_setting_key(
+            &temp_dir,
+            "twitch_client_secret",
+            serde_json::Value::String(secret_val.to_string()),
+        )
+        .expect("save_setting_key for secret should succeed");
+
+        // 1. settings.json ファイルそのものを生テキストとして読み込み、平文 secret が含まれないことを検証
+        let settings_path = temp_dir.join("settings.json");
+        if settings_path.exists() {
+            let content = fs::read_to_string(&settings_path).unwrap();
+            assert!(
+                !content.contains(secret_val),
+                "settings.json must NOT contain plaintext secret value"
+            );
+        }
+
+        // 2. 返却された settings オブジェクトに平文がなく、設定済みフラグが含まれることを検証
+        let res_str = serde_json::to_string(&res).unwrap();
+        assert!(
+            !res_str.contains(secret_val),
+            "Frontend settings snapshot must NOT contain plaintext secret value"
+        );
+        assert_eq!(
+            res.get("has_twitch_client_secret"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(res.get("has_client_secret"), Some(&serde_json::json!(true)));
+
+        // 3. credential store から復号取得できることを検証
+        let loaded_secret = crate::credentials::get_secret(&temp_dir, "twitch_client_secret");
+        assert_eq!(loaded_secret.as_deref(), Some(secret_val));
+
+        // 4. 空文字列で更新した場合は安全に削除されることを検証
+        let res2 = save_setting_key(
+            &temp_dir,
+            "twitch_client_secret",
+            serde_json::Value::String("   ".to_string()),
+        )
+        .expect("empty secret should delete");
+        assert_eq!(
+            res2.get("has_twitch_client_secret"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            crate::credentials::get_secret(&temp_dir, "twitch_client_secret"),
+            None
         );
 
         // クリーンアップ

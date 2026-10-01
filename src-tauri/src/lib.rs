@@ -5,6 +5,7 @@ pub mod asr;
 pub mod audio;
 pub mod audio_input;
 pub mod bootstrap;
+pub mod credentials;
 pub mod lance_memory;
 pub mod local_summary;
 pub mod logger;
@@ -203,8 +204,8 @@ fn capture_window_preview(state: State<AppState>, title: String) -> Option<Strin
 }
 
 #[tauri::command]
-fn load_settings(state: State<AppState>) -> Value {
-    settings::load_settings_file(&state.root_dir)
+fn load_settings(state: State<AppState>) -> Result<Value, String> {
+    settings::load_frontend_settings(&state.root_dir)
 }
 
 pub use settings::SaveSettingResponse;
@@ -235,7 +236,7 @@ fn save_setting(
             Value::String(model_manager::GEMMA_TERMS_SOURCE.to_string()),
         )?;
         bootstrap::clear_setup_error(&state.root_dir)?;
-        let settings = settings::load_settings_file(&state.root_dir);
+        let settings = settings::load_frontend_settings(&state.root_dir)?;
         Ok(SaveSettingResponse {
             settings,
             warning: None,
@@ -497,6 +498,16 @@ async fn twitch_register_code(
     state: Option<String>,
     redirect_uri: Option<String>,
 ) -> Result<twitch::TwitchTokenResponse, String> {
+    let effective_secret = if !client_secret.trim().is_empty() {
+        credentials::set_secret(
+            &app_state.root_dir,
+            "twitch_client_secret",
+            client_secret.trim(),
+        )?;
+        client_secret.trim().to_string()
+    } else {
+        credentials::get_secret(&app_state.root_dir, "twitch_client_secret").unwrap_or_default()
+    };
     let redir = redirect_uri
         .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
     let (clean_code, effective_state) = twitch::parse_code_and_state(&code, state);
@@ -504,7 +515,7 @@ async fn twitch_register_code(
         .twitch_service
         .exchange_code(
             &client_id,
-            &client_secret,
+            &effective_secret,
             &clean_code,
             effective_state.as_deref(),
             &redir,
@@ -538,9 +549,19 @@ async fn twitch_refresh_token(
     client_secret: String,
     refresh_token: String,
 ) -> Result<twitch::TwitchTokenResponse, String> {
+    let effective_secret = if !client_secret.trim().is_empty() {
+        client_secret
+    } else {
+        credentials::get_secret(&state.root_dir, "twitch_client_secret").unwrap_or_default()
+    };
+    let effective_refresh = if !refresh_token.trim().is_empty() {
+        refresh_token
+    } else {
+        credentials::get_secret(&state.root_dir, "twitch_refresh_token").unwrap_or_default()
+    };
     state
         .twitch_service
-        .refresh_token(&client_id, &client_secret, &refresh_token)
+        .refresh_token(&client_id, &effective_secret, &effective_refresh)
         .await
 }
 
@@ -551,7 +572,10 @@ async fn web_search_query(
     query: String,
     brave_api_key: Option<String>,
 ) -> Result<WebSearchResponse, String> {
-    let key = brave_api_key.unwrap_or_default();
+    let key = brave_api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| credentials::get_secret(&state.root_dir, "brave_api_key"))
+        .unwrap_or_default();
     Ok(state
         .web_search_client
         .search_and_format(&query, &key)
@@ -568,6 +592,11 @@ async fn ai_generate(
     system_prompt: Option<String>,
     image_base64: Option<String>,
 ) -> Result<String, String> {
+    let effective_key = if !gemini_api_key.trim().is_empty() {
+        gemini_api_key
+    } else {
+        credentials::get_secret(&state.root_dir, "gemini_api_key").unwrap_or_default()
+    };
     let model_name = model.unwrap_or_else(|| "latest".to_string());
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -590,7 +619,7 @@ async fn ai_generate(
     };
     state
         .ai_client
-        .generate_gemini(&gemini_api_key, &model_name, &messages, &options)
+        .generate_gemini(&effective_key, &model_name, &messages, &options)
         .await
 }
 
@@ -1229,7 +1258,15 @@ async fn session_process_input(
     system_prompt: Option<String>,
     tts_settings: Option<TtsSettings>,
 ) -> Result<String, String> {
-    let brave_key = brave_api_key.unwrap_or_default();
+    let effective_gemini_key = if !gemini_api_key.trim().is_empty() {
+        gemini_api_key
+    } else {
+        credentials::get_secret(&state.root_dir, "gemini_api_key").unwrap_or_default()
+    };
+    let brave_key = brave_api_key
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| credentials::get_secret(&state.root_dir, "brave_api_key"))
+        .unwrap_or_default();
     let model = gemini_model.unwrap_or_else(|| "latest".to_string());
     let sys_prompt = system_prompt.unwrap_or_default();
     let tts_cfg = tts_settings.unwrap_or_default();
@@ -1240,7 +1277,7 @@ async fn session_process_input(
             &author,
             &text,
             &input_type,
-            &gemini_api_key,
+            &effective_gemini_key,
             &brave_key,
             &model,
             &sys_prompt,
@@ -1257,11 +1294,16 @@ async fn session_generate_blog(
     gemini_model: Option<String>,
     blog_system_prompt: Option<String>,
 ) -> Result<String, String> {
+    let effective_gemini_key = if !gemini_api_key.trim().is_empty() {
+        gemini_api_key
+    } else {
+        credentials::get_secret(&state.root_dir, "gemini_api_key").unwrap_or_default()
+    };
     let model = gemini_model.unwrap_or_else(|| "latest".to_string());
     let prompt = blog_system_prompt.unwrap_or_default();
     state
         .session_mgr
-        .generate_blog_article(&gemini_api_key, &model, &prompt)
+        .generate_blog_article(&effective_gemini_key, &model, &prompt)
         .await
 }
 

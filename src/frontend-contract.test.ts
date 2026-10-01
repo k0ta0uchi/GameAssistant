@@ -2684,6 +2684,41 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// When saving secrets (such as twitch_client_secret), save_setting is called to persist to OS credential store.
+{
+  const { harness } = makeHarness();
+  harness.settings.has_twitch_client_secret = false;
+  harness.settings.has_client_secret = false;
+
+  const { renderer, snapshot } = await mountHook(harness);
+  assert.equal(
+    snapshot.current!.settings.has_twitch_client_secret,
+    false,
+    "Initial has_twitch_client_secret should be false",
+  );
+
+  await act(async () => {
+    await snapshot.current!.updateSetting(
+      "twitch_client_secret",
+      "secret_twitch_token_12345",
+    );
+  });
+
+  const saveCalls = harness.invocations.filter(
+    (c) =>
+      c.command === "save_setting" &&
+      (c.args as any)?.key === "twitch_client_secret",
+  );
+  assert.equal(
+    saveCalls.length,
+    1,
+    "save_setting should be invoked once for twitch_client_secret",
+  );
+
+  renderer.unmount();
+  await settleEffects();
+}
+
 // Let any deferred setup effects settle while the final Tauri harness is still
 // installed, keeping npm test output deterministic.
 makeHarness();
