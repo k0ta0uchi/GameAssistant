@@ -130,6 +130,8 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
 
         # Extract functions directly from asr_server.py AST
         target_funcs = (
+            "get_arg_or_env",
+            "resolve_compute_types",
             "remember_transcript",
             "new_stream_state",
             "reset_stream_state",
@@ -150,6 +152,10 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
                     cls.server_ns,
                 )
 
+        cls.get_arg_or_env = staticmethod(cls.server_ns["get_arg_or_env"])
+        cls.resolve_compute_types = staticmethod(
+            cls.server_ns["resolve_compute_types"]
+        )
         cls.new_stream_state = staticmethod(cls.server_ns["new_stream_state"])
         cls.reset_stream_state = staticmethod(cls.server_ns["reset_stream_state"])
         cls.update_vad_and_buffers = staticmethod(
@@ -215,6 +221,71 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
         path_cpu, name_cpu = get_model_spec("quality", "cpu")
         self.assertEqual(name_cpu, "kotoba-whisper-v2.0-faster")
         self.assertEqual(path, path_cpu)
+
+    def test_compute_type_resolution_and_cpu_reflection(self):
+        """Verify --compute-type / ASR_COMPUTE_TYPE is respected as common fallback for CPU and GPU,
+        and device-specific overrides take precedence."""
+        # 1. Default (no args / env) -> GPU: int8, CPU: int8_float32
+        gpu, cpu = self.resolve_compute_types(argv=[], environ={})
+        self.assertEqual(gpu, "int8")
+        self.assertEqual(cpu, "int8_float32")
+
+        # 2. Rust passes --compute-type float32 (or ASR_COMPUTE_TYPE=float32) -> GPU and CPU both float32
+        gpu_arg, cpu_arg = self.resolve_compute_types(
+            argv=["dummy.py", "--compute-type", "float32"], environ={}
+        )
+        self.assertEqual(gpu_arg, "float32")
+        self.assertEqual(cpu_arg, "float32")
+
+        gpu_env, cpu_env = self.resolve_compute_types(
+            argv=[], environ={"ASR_COMPUTE_TYPE": "float32"}
+        )
+        self.assertEqual(gpu_env, "float32")
+        self.assertEqual(cpu_env, "float32")
+
+        # 3. Device-specific override takes precedence
+        gpu_ovr, cpu_ovr = self.resolve_compute_types(
+            argv=["dummy.py", "--compute-type", "int8", "--cpu-compute-type", "float32"],
+            environ={},
+        )
+        self.assertEqual(gpu_ovr, "int8")
+        self.assertEqual(cpu_ovr, "float32")
+
+        # 4. Verify create_cpu_whisper_model reflects the resolved compute_type
+        created_models = []
+        ns = {
+            "MODELS_DIR": "C:\\fake\\models",
+            "whisper_model_source": "C:\\fake\\models\\kotoba-whisper-v2.0-faster",
+            "logger": type(
+                "FakeLogger", (), {"warning": lambda *a: None, "info": lambda *a: None}
+            )(),
+            "os": os,
+            "model_preset": None,
+            "current_cpu_threads": 4,
+            "cpu_compute_type": cpu_arg,  # "float32" resolved from --compute-type float32
+            "current_model_name": "",
+            "current_compute_type": "",
+            "WhisperModel": lambda *args, **kwargs: created_models.append(kwargs)
+            or SimpleNamespace(),
+        }
+        for node in self.tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in (
+                "get_model_spec",
+                "create_cpu_whisper_model",
+            ):
+                exec(
+                    compile(
+                        ast.Module(body=[node], type_ignores=[]),
+                        str(SERVER_SOURCE_PATH),
+                        "exec",
+                    ),
+                    ns,
+                )
+
+        ns["create_cpu_whisper_model"]()
+        self.assertEqual(len(created_models), 1)
+        self.assertEqual(created_models[0]["compute_type"], "float32")
+        self.assertEqual(ns["current_compute_type"], "float32")
 
     def test_speech_end_based_on_silence_not_transcript_stillness(self):
         """Verify speech-end endpointing is based on real audio silence time, not transcript stillness."""

@@ -128,15 +128,19 @@ else:
         "complete first-launch setup before starting ASR."
     )
 
-def get_arg_or_env(arg_names, env_names, default=None):
+def get_arg_or_env(arg_names, env_names, default=None, argv=None, environ=None):
+    if argv is None:
+        argv = sys.argv
+    if environ is None:
+        environ = os.environ
     for arg in arg_names:
-        if arg in sys.argv:
-            idx = sys.argv.index(arg)
-            if idx + 1 < len(sys.argv):
-                return sys.argv[idx + 1]
+        if arg in argv:
+            idx = argv.index(arg)
+            if idx + 1 < len(argv):
+                return argv[idx + 1]
     for env in env_names:
-        if env in os.environ:
-            return os.environ[env]
+        if env in environ:
+            return environ[env]
     return default
 
 
@@ -154,14 +158,34 @@ model_preset = get_arg_or_env(
 if model_preset:
     model_preset = model_preset.lower()
 
-gpu_compute_type = get_arg_or_env(
-    ["--compute-type", "--gpu-compute-type"],
-    ["ASR_GPU_COMPUTE_TYPE", "ASR_COMPUTE_TYPE"],
-    default="int8",
-)
-cpu_compute_type = get_arg_or_env(
-    ["--cpu-compute-type"], ["ASR_CPU_COMPUTE_TYPE"], default="int8_float32"
-)
+
+def resolve_compute_types(argv=None, environ=None) -> tuple[str, str]:
+    """Resolve (gpu_compute_type, cpu_compute_type) respecting device overrides and common fallback."""
+    common = get_arg_or_env(
+        ["--compute-type"],
+        ["ASR_COMPUTE_TYPE"],
+        default=None,
+        argv=argv,
+        environ=environ,
+    )
+    gpu = get_arg_or_env(
+        ["--gpu-compute-type"],
+        ["ASR_GPU_COMPUTE_TYPE"],
+        default=common or "int8",
+        argv=argv,
+        environ=environ,
+    )
+    cpu = get_arg_or_env(
+        ["--cpu-compute-type"],
+        ["ASR_CPU_COMPUTE_TYPE"],
+        default=common or "int8_float32",
+        argv=argv,
+        environ=environ,
+    )
+    return gpu, cpu
+
+
+gpu_compute_type, cpu_compute_type = resolve_compute_types()
 
 cpu_threads_raw = get_arg_or_env(["--cpu-threads"], ["ASR_CPU_THREADS"], default=None)
 current_cpu_threads = (
