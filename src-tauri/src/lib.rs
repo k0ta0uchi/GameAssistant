@@ -471,25 +471,37 @@ fn twitch_get_status(state: State<AppState>) -> serde_json::Value {
 
 #[tauri::command]
 async fn twitch_register_code(
-    state: State<'_, AppState>,
+    app_state: State<'_, AppState>,
     client_id: String,
     client_secret: String,
     code: String,
+    state: Option<String>,
     redirect_uri: Option<String>,
 ) -> Result<twitch::TwitchTokenResponse, String> {
     let redir = redirect_uri
         .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
-    state
+    let (clean_code, effective_state) = twitch::parse_code_and_state(&code, state);
+    app_state
         .twitch_service
-        .exchange_code(&client_id, &client_secret, &code, &redir)
+        .exchange_code(
+            &client_id,
+            &client_secret,
+            &clean_code,
+            effective_state.as_deref(),
+            &redir,
+        )
         .await
 }
 
 #[tauri::command]
-fn twitch_get_auth_url(client_id: String, redirect_uri: Option<String>) -> String {
+fn twitch_get_auth_url(
+    state: State<'_, AppState>,
+    client_id: String,
+    redirect_uri: Option<String>,
+) -> String {
     let redir = redirect_uri
         .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
-    TwitchService::get_auth_url(&client_id, &redir)
+    state.twitch_service.get_auth_url(&client_id, &redir)
 }
 
 #[tauri::command]
