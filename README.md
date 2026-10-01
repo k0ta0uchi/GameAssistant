@@ -129,6 +129,14 @@ Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップ�
    .\scripts\test-rust.ps1 -Suite Full
    ```
 
+7. **ポータブル実行可能ファイル (Portable EXE) のビルド:**
+   配布用のスタンドアロン Portable EXE を生成する標準スクリプトです。フロントエンドのビルド、Tauri リリースバイナリのコンパイル、および `dist_release/` への出力・ハッシュ検証を一括して実行します：
+   ```powershell
+   .\scripts\build-portable.ps1
+   ```
+   ビルドが完了すると、`dist_release/GameAssistant-v<version>-portable.exe` に成果物が配置されます。
+   ※ GitHub Actions では、タグ push (`v*`) または手動トリガー (`workflow_dispatch`) により自動生成され、Artifact / GitHub Release asset として取得できます。
+
 ---
 
 ## 🛠️ 技術スタック (Technology Stack)
