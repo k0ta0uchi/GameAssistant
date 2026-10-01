@@ -101,7 +101,9 @@ impl TwitchService {
         let mut states = self.pending_auth_states.lock();
         let now = Instant::now();
         // 期限切れのエントリをパージ
-        states.retain(|_, created_at| now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS);
+        states.retain(|_, created_at| {
+            now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS
+        });
         states.insert(state.clone(), now);
         state
     }
@@ -135,7 +137,9 @@ impl TwitchService {
         let now = Instant::now();
 
         // 期限切れのエントリをパージ
-        states.retain(|_, created_at| now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS);
+        states.retain(|_, created_at| {
+            now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS
+        });
 
         if let Some(created_at) = states.remove(state_val) {
             if now.duration_since(created_at).as_secs() >= OAUTH_STATE_TTL_SECS {
@@ -186,11 +190,15 @@ pub fn parse_code_and_state(
             for pair in query.split('&') {
                 if let Some((k, v)) = pair.split_once('=') {
                     if k == "code" {
-                        extracted_code =
-                            urlencoding::decode(v).unwrap_or_else(|_| v.into()).to_string();
+                        extracted_code = urlencoding::decode(v)
+                            .unwrap_or_else(|_| v.into())
+                            .to_string();
                     } else if k == "state" {
-                        extracted_state =
-                            Some(urlencoding::decode(v).unwrap_or_else(|_| v.into()).to_string());
+                        extracted_state = Some(
+                            urlencoding::decode(v)
+                                .unwrap_or_else(|_| v.into())
+                                .to_string(),
+                        );
                     }
                 }
             }
@@ -223,7 +231,6 @@ pub fn parse_code_and_state(
 }
 
 impl TwitchService {
-
     /// アクセストークンの検証
     pub async fn validate_token(
         &self,
@@ -928,4 +935,3 @@ mod tests {
         assert_eq!(s5, None);
     }
 }
-
