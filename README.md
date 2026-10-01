@@ -140,3 +140,4 @@ Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップ�
 - **AI & Multimodal**: Google Gemini 2.0 Flash / Pro API, Brave Search API
 - **TTS Engine**: VOICEVOX Engine (Local HTTP REST) / Style-Bert-VITS2
 - **Twitch Integration**: Pure Rust WebSocket IRC Client (`tokio-tungstenite`)
+<!-- cache-inheritance-test -->
