@@ -18,13 +18,18 @@
 .PARAMETER OutputDir
     Custom output directory for the portable executable (defaults to dist_release).
 
+.PARAMETER ExpectedVersion
+    Expected version string (e.g. '0.3.2' or 'v0.3.2') to validate against the project version.
+
 .EXAMPLE
     .\scripts\build-portable.ps1
+    .\scripts\build-portable.ps1 -ExpectedVersion 0.3.2
     .\scripts\build-portable.ps1 -SkipFrontend
 #>
 param(
     [switch]$SkipFrontend = $false,
-    [string]$OutputDir = ""
+    [string]$OutputDir = "",
+    [string]$ExpectedVersion = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,6 +64,15 @@ if ($verPkg -ne $verCargo -or $verPkg -ne $verTauri) {
 }
 
 $version = $verPkg
+
+if ($ExpectedVersion) {
+    $cleanExpected = $ExpectedVersion.TrimStart('v')
+    if ($cleanExpected -ne $version) {
+        throw "Expected version mismatch! -ExpectedVersion was '$ExpectedVersion' (normalized: '$cleanExpected'), but project version is '$version'."
+    }
+    Write-Host "  Expected version match verified: $ExpectedVersion" -ForegroundColor Green
+}
+
 Write-Host "  Project version confirmed: v$version" -ForegroundColor Green
 
 # 2. Prepare prerequisites
