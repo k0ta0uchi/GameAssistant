@@ -2,7 +2,7 @@
 
 Issue #23 に基づき、GameAssistant の Rust コードベースに対する基本的な健全性チェック（Format、Check、Fast tests、Full tests）を自動化する GitHub Actions ワークフロー（`.github/workflows/rust-ci.yml`）を導入しました。
 
-CI ランナー上で実際にすべてのチェックが成功することを確認済みです。
+さらに、初回実測で約51分を要していた cold ビルド時間を改善するため、**GitHub Actions 向けの Rust/Cargo キャッシュ機構（`Swatinem/rust-cache@v2`）** を導入しました。`main` ブランチを共有キャッシュの基準点として、後続の新規 PR でもキャッシュを安全かつ確実に再利用できる構成を整備しています。
 
 Closes #23
 
@@ -29,32 +29,62 @@ Closes #23
 
 単一ジョブ（`Rust Build & Test (Windows)`）内で以下のステップを明確に分離して順次実行します（`continue-on-error` なし。いずれかの失敗で即座にジョブ failure）：
 
-1. **Checkout repository**: `actions/checkout@v4`
-2. **Setup Rust toolchain**: `dtolnay/rust-toolchain@master` (`nightly-2026-01-14`, components: `rustfmt`)
-3. **Setup uv**: `astral-sh/setup-uv@v5` (version: `0.8.12`)
-4. **Prepare build prerequisites**:
-   - Tauri の proc macro (`tauri::generate_context!()`) が要求する `frontendDist` (`../dist/index.html`) プレースホルダーの生成。
-   - `src-tauri/src/bootstrap.rs` でバイナリ埋め込み (`include_bytes!("../resources/uv.exe")`) される `src-tauri/resources/uv.exe` の配置。
-5. **Check code formatting**:
-   ```powershell
-   cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-   ```
-6. **Cargo check**:
-   ```powershell
-   cargo check --manifest-path src-tauri/Cargo.toml
-   ```
-7. **Run Fast tests**:
-   ```powershell
-   .\scripts\test-rust.ps1 -Suite Fast
-   ```
-8. **Run Full tests**:
-   ```powershell
-   .\scripts\test-rust.ps1 -Suite Full
-   ```
+```text
+Checkout repository
+  ↓
+Setup Rust toolchain
+  ↓
+Rust cache (Swatinem/rust-cache@v2)
+  ↓
+Setup uv
+  ↓
+Prepare build prerequisites
+  ↓
+Check code formatting
+  ↓
+Cargo check
+  ↓
+Run Fast tests
+  ↓
+Run Full tests
+```
 
 ---
 
-## 3. 追加セットアップとその理由 (Environment Fixes & Rationale)
+## 3. CI 高速化：Rust / Cargo キャッシュ設計 (CI Caching Architecture)
+
+### ① 導入した Cache Action
+- **Action**: `Swatinem/rust-cache@v2`
+  - Windows + Cargo 環境で実績があり、`src-tauri` のサブディレクトリ構成に対応した信頼性の高いアクションを採用。
+  - ※ Issue #16 で実測評価済みの通り、`sccache` は Windows/MSVC 環境での効果が限定的であったため **sccache は一切使用していません**。
+
+### ② キャッシュ対象 (Cached Directories)
+- `C:\Users\runneradmin\.cargo\registry` (Cargo crates.io インデックス・ソース)
+- `C:\Users\runneradmin\.cargo\git` (Cargo git 依存リポジトリ)
+- `C:\Users\runneradmin\.cargo\bin` (インストール済みバイナリ)
+- `src-tauri\target` (ビルド・テスト成果物バイナリ、中間オブジェクト)
+  - 約 882 packages の巨大な依存グラフを毎回再コンパイルするオーバーヘッドを根絶します。
+
+### ③ キャッシュキー設計 (Cache Key & Invalidation)
+- **Primary Key / Prefix**:
+  - OS (`Windows_NT-x64`)
+  - Toolchain (`rustc 1.94.0-nightly 2026-01-14`)
+  - ワークスペースの依存定義: `src-tauri/Cargo.lock`, `src-tauri/Cargo.toml`
+  - 追加設定ファイルのハッシュ: `key: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'src-tauri/.cargo/config.toml') }}`
+- **コミット SHA 非依存**:
+  - `github.sha` をキーに含めず、同一の toolchain・依存構成であればコミットを跨いで確実にヒットする設計。
+  - 依存変更（Cargo.lock / Cargo.toml 更新）、Toolchain 変更、Cargo config 変更時には自動的に安全な cache miss / invalidation が発生します。
+
+### ④ main ブランチを基準とするキャッシュ共有モデル (Cross-PR Cache Sharing)
+GitHub Actions のキャッシュスコープ規則に基づき、以下のサイクルで動作します：
+1. **PR #24 (初回)**: Cold ビルド実行後、PR ブランチに初期キャッシュを保存。
+2. **PR #24 (2回目以降)**: 同一 PR 内でキャッシュが restore され、高速ビルドを実証。
+3. **`main` へのマージ (`push: branches: [main]`)**: マージ時の CI 実行により、**`main` ブランチスコープとして共有キャッシュが保存・更新**。
+4. **新規 PR (#25 以降)**: GitHub Actions の親ブランチ継承機能により、新規 PR の CI が自動的に `main` の最新キャッシュを restore し、変更差分のみを数分〜十数分で高速コンパイル・テスト実行可能となります。
+
+---
+
+## 4. 追加セットアップとその理由 (Environment Fixes & Rationale)
 
 1. **`PROTOC` 相対パス化 & ルート設定**:
    - 従来 `src-tauri/.cargo/config.toml` に絶対パス `C:/Workspace/GameAssistant/...` がハードコードされていたため、CI 環境およびワークスペース外からの実行で `protoc` が見つからず `lance-table` 等のビルドが失敗する問題がありました。
@@ -70,35 +100,23 @@ Closes #23
 
 ---
 
-## 4. ローカル検証結果 (Local Verification)
+## 5. キャッシュ実測・ベンチマーク結果 (Benchmark Measurements)
 
-- **`cargo fmt --check`**: 差分なし（OK）
-- **`cargo check`**: 成功（Finished dev profile）
-- **Fast tests**: **145 passed; 0 failed** (OK)
-- **Full tests**: **323 passed; 0 failed** (30.31s, OK)
+| 測定項目 | Cold Run (初回ビルド) | Cache Hit Run (2回目) | 改善幅 (Delta) | 状態 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Job Total Time** | **52m 00s** | *(計測中)* | - | - |
+| **Cargo check** | 11m 40s | *(計測中)* | - | - |
+| **Fast tests** | 36m 50s | *(計測中)* | - | - |
+| **Full tests** | 2m 05s | *(計測中)* | - | - |
+| **Cache Restore** | - (Miss) | *(計測中)* | - | - |
 
 ---
 
-## 5. 今回スコープ外としたもの (Out of Scope)
+## 6. 今回スコープ外としたもの (Out of Scope)
 
 初版の安定性・再現性・シンプルさを最優先とするため、以下は意図的に除外しています：
 - `cargo-nextest` の必須化（Issue #16 の実測結果に基づき、標準 Cargo ランナーを使用）
-- `sccache` / 複雑なコンパイルキャッシュ（cache 複雑性による不安定化防止）
+- `sccache` / 独自 RUSTC_WRAPPER（GitHub Actions cache action で代替）
 - ベンチマーク回帰検知 / build time 閾値
 - `gameassistant-memory` などのクレート分割
 - Linux / macOS matrix
-
----
-
-## 6. GitHub Actions 実行結果 (CI Run Status)
-
-- **Workflow Run**: [Rust CI Run #36820099272](https://github.com/k0ta0uchi/GameAssistant/actions/runs/36820099272)
-- **ステータス**: **PASS (All Green)**
-  - `✓ Checkout repository`
-  - `✓ Setup Rust toolchain`
-  - `✓ Setup uv`
-  - `✓ Prepare build prerequisites`
-  - `✓ Check code formatting`
-  - `✓ Cargo check`
-  - `✓ Run Fast tests`
-  - `✓ Run Full tests`
