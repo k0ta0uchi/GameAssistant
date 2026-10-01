@@ -2,7 +2,9 @@
 
 Issue #23 に基づき、GameAssistant の Rust コードベースに対する基本的な健全性チェック（Format、Check、Fast tests、Full tests）を自動化する GitHub Actions ワークフロー（`.github/workflows/rust-ci.yml`）を導入しました。
 
-さらに、初回実測で約51分を要していた cold ビルド時間を改善するため、**GitHub Actions 向けの Rust/Cargo キャッシュ機構（`Swatinem/rust-cache@v2`）** を導入しました。`main` ブランチを共有キャッシュの基準点として、後続の新規 PR でもキャッシュを安全かつ確実に再利用できる構成を整備しています。
+さらに、初回実測で約52分を要していた cold ビルド時間を抜本的に改善するため、**GitHub Actions 向けの Rust/Cargo キャッシュ機構（`Swatinem/rust-cache@v2`）** を導入しました。同一 PR 内の実測検証において、**CI 実行時間を 52分00秒 から 6分34秒（約87.4% 短縮）へ劇的に高速化**できることを実証済みです。
+
+`main` ブランチを共有キャッシュの基準点として、後続の新規 PR でもキャッシュを安全かつ確実に再利用できる構成を整備しています。
 
 Closes #23
 
@@ -77,8 +79,8 @@ Run Full tests
 
 ### ④ main ブランチを基準とするキャッシュ共有モデル (Cross-PR Cache Sharing)
 GitHub Actions のキャッシュスコープ規則に基づき、以下のサイクルで動作します：
-1. **PR #24 (初回)**: Cold ビルド実行後、PR ブランチに初期キャッシュを保存。
-2. **PR #24 (2回目以降)**: 同一 PR 内でキャッシュが restore され、高速ビルドを実証。
+1. **PR #24 (初回)**: Cold ビルド実行後、PR ブランチに初期キャッシュ（2.13GB）を保存。
+2. **PR #24 (2回目以降)**: 同一 PR 内でキャッシュが restore され、**52分 → 6分34秒** の高速化を実証。
 3. **`main` へのマージ (`push: branches: [main]`)**: マージ時の CI 実行により、**`main` ブランチスコープとして共有キャッシュが保存・更新**。
 4. **新規 PR (#25 以降)**: GitHub Actions の親ブランチ継承機能により、新規 PR の CI が自動的に `main` の最新キャッシュを restore し、変更差分のみを数分〜十数分で高速コンパイル・テスト実行可能となります。
 
@@ -102,13 +104,20 @@ GitHub Actions のキャッシュスコープ規則に基づき、以下のサ�
 
 ## 5. キャッシュ実測・ベンチマーク結果 (Benchmark Measurements)
 
-| 測定項目 | Cold Run (初回ビルド) | Cache Hit Run (2回目) | 改善幅 (Delta) | 状態 |
+同一環境（`windows-latest`）における実測比較：
+
+- **Cold Run (Run #36830397018)**: [Job 110265435163](https://github.com/k0ta0uchi/GameAssistant/actions/runs/36830397018/job/110265435163)
+- **Cache Hit Run (Run #36835672517)**: [Job 110282381557](https://github.com/k0ta0uchi/GameAssistant/actions/runs/36835672517/job/110282381557)
+
+| 計測項目 / ステップ | Cold Run (初回ビルド) | Cache Hit Run (2回目) | 改善幅 (Delta) | 削減率 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Job Total Time** | **52m 00s** | *(計測中)* | - | - |
-| **Cargo check** | 11m 40s | *(計測中)* | - | - |
-| **Fast tests** | 36m 50s | *(計測中)* | - | - |
-| **Full tests** | 2m 05s | *(計測中)* | - | - |
-| **Cache Restore** | - (Miss) | *(計測中)* | - | - |
+| **Job Total Time** | **52m 00s** | **6m 34s** | **-45m 26s** | **-87.4%** |
+| **Rust cache (restore)** | 0s (Miss) | 1m 48s (2.13GB) | +1m 48s | - |
+| **Check code formatting** | 2s | 2s | ±0s | - |
+| **Cargo check** | 11m 40s (700s) | 37s | **-11m 03s** | **-94.7%** |
+| **Run Fast tests** | 36m 50s (2210s) | 1m 08s | **-35m 42s** | **-96.9%** |
+| **Run Full tests** | 2m 05s (125s) | 2m 27s | +22s | テスト実行実時間のみ |
+| **Post Rust cache (save)** | 6m 30s (圧縮保存) | 1s (No delta) | - | - |
 
 ---
 
