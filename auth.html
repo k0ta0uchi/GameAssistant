@@ -411,14 +411,25 @@
             const copyBtn = document.getElementById('copy-btn');
             const btnLabel = document.getElementById('btn-label');
 
+            function setStatus(type, message) {
+                statusContainer.replaceChildren();
+                const pill = document.createElement('div');
+                pill.className = `status-pill ${type}`;
+
+                const dot = document.createElement('span');
+                dot.className = 'pulse-dot';
+
+                const text = document.createElement('span');
+                text.textContent = message;
+
+                pill.appendChild(dot);
+                pill.appendChild(text);
+                statusContainer.appendChild(pill);
+            }
+
             if (code) {
                 // 成功時
-                statusContainer.innerHTML = `
-                    <div class="status-pill success">
-                        <span class="pulse-dot"></span>
-                        <span>認証成功 — コード取得完了</span>
-                    </div>
-                `;
+                setStatus('success', '認証成功 — コード取得完了');
                 successView.style.display = 'block';
                 authCodeText.textContent = code;
 
@@ -444,25 +455,27 @@
                 });
             } else if (error) {
                 // エラー時
-                statusContainer.innerHTML = `
-                    <div class="status-pill error">
-                        <span class="pulse-dot"></span>
-                        <span>認証エラー: ${error}</span>
-                    </div>
-                `;
+                setStatus('error', `認証エラー: ${error}`);
                 errorView.style.display = 'block';
-                document.getElementById('error-message-text').innerHTML = `
-                    <strong style="color: #f87171;">Twitch 認証に失敗しました。</strong><br>
-                    ${errorDesc ? errorDesc : '認証フローがキャンセルされたか、無効なリクエストです。'}
-                `;
+
+                const errorMsgEl = document.getElementById('error-message-text');
+                errorMsgEl.replaceChildren();
+
+                const titleStrong = document.createElement('strong');
+                titleStrong.style.color = '#f87171';
+                titleStrong.textContent = 'Twitch 認証に失敗しました。';
+
+                const br = document.createElement('br');
+
+                const descSpan = document.createElement('span');
+                descSpan.textContent = errorDesc ? errorDesc : '認証フローがキャンセルされたか、無効なリクエストです。';
+
+                errorMsgEl.appendChild(titleStrong);
+                errorMsgEl.appendChild(br);
+                errorMsgEl.appendChild(descSpan);
             } else {
                 // パラメータなし（直接アクセス）
-                statusContainer.innerHTML = `
-                    <div class="status-pill info">
-                        <span class="pulse-dot"></span>
-                        <span>リダイレクト待機中</span>
-                    </div>
-                `;
+                setStatus('info', 'リダイレクト待機中');
                 errorView.style.display = 'block';
             }
         };
