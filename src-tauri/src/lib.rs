@@ -207,11 +207,7 @@ fn load_settings(state: State<AppState>) -> Value {
     settings::load_settings_file(&state.root_dir)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SaveSettingResponse {
-    pub settings: Value,
-    pub warning: Option<String>,
-}
+pub use settings::SaveSettingResponse;
 
 #[tauri::command]
 fn save_setting(
@@ -219,27 +215,7 @@ fn save_setting(
     key: String,
     value: Value,
 ) -> Result<SaveSettingResponse, String> {
-    let mut warning = None;
-
-    if key == "preallocate_vram" {
-        if let Some(enable) = value.as_bool() {
-            if let Err(e) = state
-                .session_mgr
-                .asr_engine
-                .ws_client
-                .set_preallocate_vram(enable)
-            {
-                let warn_msg = format!("Failed to apply VRAM preallocation to ASR worker: {}", e);
-                state.log_mgr.warn("System", &warn_msg);
-                warning = Some(warn_msg);
-            } else {
-                state
-                    .log_mgr
-                    .info("System", &format!("VRAM Preallocation updated: {}", enable));
-            }
-        }
-    }
-    let settings = if key == "gemma_terms_accepted" && value.as_bool() == Some(true) {
+    if key == "gemma_terms_accepted" && value.as_bool() == Some(true) {
         // Keep the legacy boolean for compatibility, but only a complete
         // version/source/model-hash record authorizes Gemma setup and use.
         settings::save_setting_key(&state.root_dir, &key, Value::Bool(true))?;
@@ -259,12 +235,35 @@ fn save_setting(
             Value::String(model_manager::GEMMA_TERMS_SOURCE.to_string()),
         )?;
         bootstrap::clear_setup_error(&state.root_dir)?;
-        settings::load_settings_file(&state.root_dir)
+        let settings = settings::load_settings_file(&state.root_dir);
+        Ok(SaveSettingResponse {
+            settings,
+            warning: None,
+        })
     } else {
-        settings::save_setting_key(&state.root_dir, &key, value)?
-    };
-
-    Ok(SaveSettingResponse { settings, warning })
+        settings::save_setting_with_worker_sync(&state.root_dir, &key, &value, |k, v| {
+            if k == "preallocate_vram" {
+                if let Some(enable) = v.as_bool() {
+                    if let Err(e) = state
+                        .session_mgr
+                        .asr_engine
+                        .ws_client
+                        .set_preallocate_vram(enable)
+                    {
+                        let warn_msg =
+                            format!("Failed to apply VRAM preallocation to ASR worker: {}", e);
+                        state.log_mgr.warn("System", &warn_msg);
+                        return Err(warn_msg);
+                    } else {
+                        state
+                            .log_mgr
+                            .info("System", &format!("VRAM Preallocation updated: {}", enable));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 #[tauri::command]

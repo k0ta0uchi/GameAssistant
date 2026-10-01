@@ -49,6 +49,37 @@ pub fn save_setting_key(root_dir: &Path, key: &str, value: Value) -> Result<Valu
     Ok(current_json)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaveSettingResponse {
+    pub settings: Value,
+    pub warning: Option<String>,
+}
+
+/// 設定を永続化し、永続化が成功した場合にのみ worker_sync を実行する。
+/// - 永続化失敗時: worker_sync は呼ばれず、即時 Err を返す（状態分岐を防止）
+/// - 永続化成功 + worker反映失敗時: 設定は保持され、warning を返す
+/// - 永続化成功 + worker反映成功時: warning は None
+pub fn save_setting_with_worker_sync<F>(
+    root_dir: &Path,
+    key: &str,
+    value: &Value,
+    worker_sync: F,
+) -> Result<SaveSettingResponse, String>
+where
+    F: FnOnce(&str, &Value) -> Result<(), String>,
+{
+    // 1. Rust 永続化を先に実行（canonical settings を確定）
+    let settings = save_setting_key(root_dir, key, value.clone())?;
+
+    // 2. 永続化が成功した場合のみ、worker への動的反映を試行
+    let mut warning = None;
+    if let Err(e) = worker_sync(key, value) {
+        warning = Some(e);
+    }
+
+    Ok(SaveSettingResponse { settings, warning })
+}
+
 pub fn scan_skills(root_dir: &Path) -> SkillsResponse {
     let skills_dir = root_dir.join("skills");
     let mut skills = Vec::new();
@@ -224,4 +255,117 @@ fn parse_frontmatter(raw: &str, default_id: &str) -> (String, String, String) {
     }
 
     (name, description, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn test_save_setting_with_worker_sync_does_not_call_worker_on_persistence_failure() {
+        // 存在しない不正なパスを指定して永続化を意図的に失敗させる
+        let invalid_root = Path::new("Z:\\non_existent_directory_for_test_12345");
+        let worker_called = AtomicBool::new(false);
+
+        let res = save_setting_with_worker_sync(
+            invalid_root,
+            "preallocate_vram",
+            &serde_json::json!(true),
+            |_k, _v| {
+                worker_called.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(res.is_err(), "Persistence failure must return Err");
+        assert!(
+            !worker_called.load(Ordering::SeqCst),
+            "Worker sync must NOT be called when persistence fails"
+        );
+    }
+
+    #[test]
+    fn test_save_setting_with_worker_sync_returns_warning_on_worker_failure() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_settings_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let worker_called = AtomicBool::new(false);
+        let res = save_setting_with_worker_sync(
+            &temp_dir,
+            "preallocate_vram",
+            &serde_json::json!(true),
+            |_k, _v| {
+                worker_called.store(true, Ordering::SeqCst);
+                Err("WebSocket connection not active".to_string())
+            },
+        );
+
+        assert!(
+            res.is_ok(),
+            "Persistence succeeded, so overall result should be Ok"
+        );
+        let response = res.unwrap();
+        assert!(
+            worker_called.load(Ordering::SeqCst),
+            "Worker sync was attempted"
+        );
+        assert_eq!(
+            response.warning,
+            Some("WebSocket connection not active".to_string()),
+            "Worker failure must be reported as a warning"
+        );
+        assert_eq!(
+            response.settings.get("preallocate_vram"),
+            Some(&serde_json::json!(true)),
+            "Settings must be persisted despite worker warning"
+        );
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_save_setting_with_worker_sync_success() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_settings_test_success_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let worker_called = AtomicBool::new(false);
+        let res = save_setting_with_worker_sync(
+            &temp_dir,
+            "preallocate_vram",
+            &serde_json::json!(false),
+            |_k, _v| {
+                worker_called.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(res.is_ok());
+        let response = res.unwrap();
+        assert!(worker_called.load(Ordering::SeqCst));
+        assert_eq!(
+            response.warning, None,
+            "Warning must be None on clean success"
+        );
+        assert_eq!(
+            response.settings.get("preallocate_vram"),
+            Some(&serde_json::json!(false))
+        );
+
+        // クリーンアップ
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }
