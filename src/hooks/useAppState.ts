@@ -1153,6 +1153,17 @@ export function useAppState() {
             if (!snapshot) return;
             setRuntimeInitialization(snapshot);
           });
+          if (!isCancelled) {
+            import("@tauri-apps/api/core")
+              .then(({ invoke }) => invoke<unknown>("get_runtime_initialization_status"))
+              .then((raw) => {
+                if (!isCancelled) {
+                  const snap = normalizeRuntimeInitializationStatus(raw);
+                  if (snap) setRuntimeInitialization(snap);
+                }
+              })
+              .catch(() => {});
+          }
 
           await register<LogEntry>("app_log", (event) => {
             if (event.payload) {
@@ -2016,20 +2027,39 @@ export function useAppState() {
     });
   }, [initializeRuntime, runtimeInitialization.status, setupStatus]);
 
-  // Events are preferred, but polling closes the race where the main screen
-  // mounts while native listeners are still being registered and gives a
-  // visible update during long synchronous journal recovery.
+  // Events are the primary channel for runtime initialization progress.
+  // Mount-time snapshot and post-listen refresh close the registration race,
+  // while low-frequency fallback polling (3000ms) only runs while initialization
+  // is actively in-flight, freeing CPU from busy 500ms polling.
   useEffect(() => {
     if (
       !isTauriEnv() ||
       !isPortableRuntimeReadyForMainUi(setupStatus) ||
-      runtimeInitialization.status === "completed"
-    )
+      runtimeInitialization.status === "completed" ||
+      runtimeInitialization.status === "error"
+    ) {
+      if (runtimeInitializationPollRef.current !== null) {
+        window.clearInterval(runtimeInitializationPollRef.current);
+        runtimeInitializationPollRef.current = null;
+      }
       return;
+    }
+
+    // Always fetch latest snapshot upon readiness transition
     void fetchRuntimeInitializationStatus();
+
+    // Only run fallback polling while actively in-flight
+    if (runtimeInitialization.status !== "running") {
+      if (runtimeInitializationPollRef.current !== null) {
+        window.clearInterval(runtimeInitializationPollRef.current);
+        runtimeInitializationPollRef.current = null;
+      }
+      return;
+    }
+
     const timer = window.setInterval(() => {
       void fetchRuntimeInitializationStatus();
-    }, 500);
+    }, 3000);
     runtimeInitializationPollRef.current = timer;
     return () => {
       window.clearInterval(timer);
