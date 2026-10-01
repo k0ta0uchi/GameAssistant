@@ -498,6 +498,8 @@ class TauriHarness {
     if (command === "get_prompts") return [];
     if (command === "read_logs") return [];
     if (command === "twitch_get_status") return { connected: false };
+    if (command === "twitch_register_code")
+      return { success: true, user_id: "123", login: "saved_bot", has_access_token: true, has_refresh_token: true };
     if (command === "list_lance_memories")
       return { success: true, memories: this.memoryItems };
     if (command === "memory_manager_process_all") return this.backfillResult;
@@ -2680,6 +2682,67 @@ for (const [reason, expectedLabel, retryable] of [
     "Toast message should notify user of worker sync warning",
   );
 
+  renderer.unmount();
+  await settleEffects();
+}
+
+// When saving secrets (such as twitch_client_secret), save_setting is called to persist to OS credential store.
+{
+  const { harness } = makeHarness();
+  harness.settings.has_twitch_client_secret = false;
+  harness.settings.has_client_secret = false;
+
+  const { renderer, snapshot } = await mountHook(harness);
+  assert.equal(
+    snapshot.current!.settings.has_twitch_client_secret,
+    false,
+    "Initial has_twitch_client_secret should be false",
+  );
+
+  await act(async () => {
+    await snapshot.current!.updateSetting(
+      "twitch_client_secret",
+      "secret_twitch_token_12345",
+    );
+  });
+
+  const saveCalls = harness.invocations.filter(
+    (c) =>
+      c.command === "save_setting" &&
+      (c.args as any)?.key === "twitch_client_secret",
+  );
+  assert.equal(
+    saveCalls.length,
+    1,
+    "save_setting should be invoked once for twitch_client_secret",
+  );
+
+  renderer.unmount();
+  await settleEffects();
+}
+
+// OAuth registration must work with metadata only: secrets never cross IPC back to JS.
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+  const updates: string[] = [];
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(SettingsModal, {
+      isOpen: true, onClose: () => {}, initialTab: "twitch",
+      settings: { twitch_client_id: "client", has_twitch_client_secret: true, twitch_channel: "channel" },
+      onUpdateSetting: async (key: string) => { updates.push(key); }, discordDevices: [],
+    } as any));
+  });
+  const code = renderer.root.findAllByType("input").find(n => n.props.placeholder === "Paste authorization code here...");
+  assert.ok(code);
+  await act(async () => { code!.props.onChange({ target: { value: "code#state" } }); });
+  const register = renderer.root.findAllByType("button").find(n => nodeText(n).includes("Register"));
+  assert.ok(register);
+  await act(async () => { await register!.props.onClick(); });
+  assert.ok(JSON.stringify(renderer.toJSON()).includes("トークンの登録と検証に成功"));
+  assert.equal(harness.invocations.some(c => c.command === "twitch_validate_token"), false);
+  assert.equal(updates.some(key => key === "twitch_access_token" || key === "twitch_refresh_token"), false);
   renderer.unmount();
   await settleEffects();
 }

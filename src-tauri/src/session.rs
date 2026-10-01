@@ -60,7 +60,7 @@ fn automatic_blog_post_enabled(settings: &serde_json::Value) -> bool {
 /// Resolve the effective Twitch IRC channel to join.
 /// Checks explicit `twitch_channel` (or legacy `twitch_bot_channel`).
 /// If unset, falls back to `user_name` only when it contains valid ASCII alphanumeric/underscore characters.
-fn resolve_effective_twitch_channel(settings: &serde_json::Value) -> String {
+pub(crate) fn resolve_effective_twitch_channel(settings: &serde_json::Value) -> String {
     let explicit = settings
         .get("twitch_channel")
         .or_else(|| settings.get("twitch_bot_channel"))
@@ -2557,18 +2557,7 @@ impl SessionManager {
     }
 
     pub fn get_effective_gemini_key(&self) -> String {
-        let st = crate::settings::load_settings_file(&self.root_dir);
-        let mut key = st
-            .get("gemini_api_key")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        if key.trim().is_empty() {
-            key = std::env::var("GOOGLE_API_KEY")
-                .or_else(|_| std::env::var("GEMINI_API_KEY"))
-                .unwrap_or_default();
-        }
-        key.trim().to_string()
+        crate::credentials::get_secret(&self.root_dir, "gemini_api_key").unwrap_or_default()
     }
 
     /// 設定/環境から解決した有効キーで利用可能な Gemini モデル一覧を返す
@@ -3737,11 +3726,8 @@ impl SessionManager {
 
         let st_file = crate::settings::load_settings_file(&self.root_dir);
         let gemini_key = self.get_effective_gemini_key();
-        let brave_key = st_file
-            .get("brave_api_key")
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| std::env::var("BRAVE_API_KEY").unwrap_or_default());
+        let brave_key =
+            crate::credentials::get_secret(&self.root_dir, "brave_api_key").unwrap_or_default();
         let model = st_file
             .get("gemini_model")
             .and_then(|value| value.as_str())
@@ -3903,13 +3889,10 @@ impl SessionManager {
                 .trim()
                 .to_string();
 
-            let twitch_bot_token = settings
-                .get("twitch_access_token")
-                .or_else(|| settings.get("twitch_bot_token"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
+            let twitch_bot_token =
+                crate::credentials::get_secret(&self.root_dir, "twitch_access_token")
+                    .or_else(|| crate::credentials::get_secret(&self.root_dir, "twitch_bot_token"))
+                    .unwrap_or_default();
 
             if !twitch_channel.is_empty() {
                 let log_mgr_twitch = self.log_mgr.clone();
@@ -3934,14 +3917,10 @@ impl SessionManager {
                     .get("twitch_client_id")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                let twitch_client_secret = settings
-                    .get("twitch_client_secret")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let twitch_refresh_token = settings
-                    .get("twitch_refresh_token")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
+                let twitch_client_secret =
+                    crate::credentials::get_secret(&self.root_dir, "twitch_client_secret");
+                let twitch_refresh_token =
+                    crate::credentials::get_secret(&self.root_dir, "twitch_refresh_token");
 
                 tauri::async_runtime::spawn(async move {
                     let bot_settings = crate::twitch::TwitchBotSettings {
@@ -4030,11 +4009,9 @@ impl SessionManager {
                                 }
                             };
                             let gemini_key = sess.get_effective_gemini_key();
-                            let brave_key = st
-                                .get("brave_api_key")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
+                            let brave_key =
+                                crate::credentials::get_secret(&sess.root_dir, "brave_api_key")
+                                    .unwrap_or_default();
                             let model = st
                                 .get("gemini_model")
                                 .and_then(|v| v.as_str())
