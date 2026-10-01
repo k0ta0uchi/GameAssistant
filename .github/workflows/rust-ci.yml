@@ -29,6 +29,20 @@ jobs:
           toolchain: nightly-2026-01-14
           components: rustfmt
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.12"
+
+      - name: Prepare build prerequisites
+        run: |
+          # Tauri generate_context!() requires frontendDist (../dist) to exist
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType File -Force -Path dist/index.html | Out-Null
+          # bootstrap.rs embeds src-tauri/resources/uv.exe (gitignored)
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          Copy-Item -Path (Get-Command uv).Source -Destination src-tauri/resources/uv.exe -Force
+
       - name: Check code formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 
