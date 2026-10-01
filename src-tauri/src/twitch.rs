@@ -42,6 +42,87 @@ pub struct TwitchTokenResponse {
     pub token_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TwitchAuthStatus {
+    pub success: bool,
+    pub user_id: String,
+    pub login: String,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+}
+
+pub fn persist_validated_tokens(
+    root: &std::path::Path,
+    token: &TwitchTokenResponse,
+    account: &TwitchValidateResponse,
+) -> Result<TwitchAuthStatus, String> {
+    let outcome = persist_refreshed_tokens(Some(root), token);
+    if !outcome.is_success() {
+        return Err(outcome.errors.join("; "));
+    }
+    crate::settings::save_setting_key(root, "twitch_bot_id", serde_json::json!(account.user_id))?;
+    crate::settings::save_setting_key(
+        root,
+        "twitch_bot_username",
+        serde_json::json!(account.login),
+    )?;
+    Ok(TwitchAuthStatus {
+        success: true,
+        user_id: account.user_id.clone(),
+        login: account.login.clone(),
+        has_access_token: crate::credentials::is_secret_configured(root, "twitch_access_token"),
+        has_refresh_token: crate::credentials::is_secret_configured(root, "twitch_refresh_token"),
+    })
+}
+
+pub fn resolve_connection_settings(
+    root: &std::path::Path,
+    mut input: TwitchBotSettings,
+) -> Result<TwitchBotSettings, String> {
+    let saved = crate::settings::load_frontend_settings(root)?;
+    if input.channel.trim().is_empty() {
+        input.channel = crate::session::resolve_effective_twitch_channel(&saved);
+    }
+    if input.bot_nick.trim().is_empty() {
+        input.bot_nick = saved["twitch_bot_username"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+    }
+    if input.oauth_token.trim().is_empty() {
+        input.oauth_token =
+            crate::credentials::get_secret(root, "twitch_access_token").unwrap_or_default();
+    }
+    if input
+        .client_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        input.client_id = saved["twitch_client_id"].as_str().map(str::to_string);
+    }
+    if input
+        .client_secret
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        input.client_secret = crate::credentials::get_secret(root, "twitch_client_secret");
+    }
+    if input
+        .refresh_token
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .is_empty()
+    {
+        input.refresh_token = crate::credentials::get_secret(root, "twitch_refresh_token");
+    }
+    Ok(input)
+}
+
 /// リフレッシュトークン永続化の結果を表す構造体
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenPersistOutcome {
@@ -551,7 +632,7 @@ impl TwitchService {
                                     }
 
                                     if let Some(ref handle) = app_handle {
-                                        let _ = handle.emit("twitch_token_refreshed", &new_tok);
+                                        let _ = handle.emit("twitch_token_refreshed", serde_json::json!({ "success": outcome.is_success(), "login": resolved_nick, "access_token_saved": outcome.access_token_saved, "refresh_token_saved": outcome.refresh_token_saved }));
                                         if !outcome.is_success() {
                                             let _ = handle.emit(
                                                 "twitch_token_persist_error",
@@ -858,6 +939,65 @@ pub fn parse_irc_privmsg(raw: &str, default_channel: &str) -> Option<TwitchChatM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_registered_tokens_stay_in_backend_and_resolve_for_connection() {
+        let root = std::env::temp_dir().join(format!("ga_auth_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let token = TwitchTokenResponse {
+            access_token: "test-access-secret".into(),
+            refresh_token: Some("test-refresh-secret".into()),
+            expires_in: None,
+            token_type: None,
+        };
+        let account = TwitchValidateResponse {
+            client_id: "client".into(),
+            login: "bot".into(),
+            user_id: "123".into(),
+            expires_in: 3600,
+        };
+        let status = persist_validated_tokens(&root, &token, &account).unwrap();
+        let payload = serde_json::to_string(&status).unwrap();
+        assert!(!payload.contains("test-access-secret"));
+        assert!(!payload.contains("test-refresh-secret"));
+        assert!(status.has_access_token && status.has_refresh_token);
+        let resolved = resolve_connection_settings(&root, TwitchBotSettings::default()).unwrap();
+        assert_eq!(resolved.oauth_token, token.access_token);
+        assert_eq!(resolved.refresh_token, token.refresh_token);
+        assert_eq!(resolved.bot_nick, "bot");
+        let override_settings = TwitchBotSettings {
+            oauth_token: "explicit".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_connection_settings(&root, override_settings)
+                .unwrap()
+                .oauth_token,
+            "explicit"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn test_registration_reports_persistence_failure() {
+        let root = std::env::temp_dir().join(format!("ga_auth_fail_{}", uuid::Uuid::new_v4()));
+        std::fs::write(&root, b"not a directory").unwrap();
+        let token = TwitchTokenResponse {
+            access_token: "test-secret".into(),
+            refresh_token: None,
+            expires_in: None,
+            token_type: None,
+        };
+        let account = TwitchValidateResponse {
+            client_id: "client".into(),
+            login: "bot".into(),
+            user_id: "123".into(),
+            expires_in: 3600,
+        };
+        let error = persist_validated_tokens(&root, &token, &account).unwrap_err();
+        assert!(!error.contains("test-secret"));
+        std::fs::remove_file(root).unwrap();
+    }
 
     #[test]
     fn test_parse_irc_privmsg_with_tags() {

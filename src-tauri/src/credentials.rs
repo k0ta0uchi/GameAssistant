@@ -872,22 +872,23 @@ mod tests {
         let cred_path = temp_dir.join("credentials.enc");
         assert!(cred_path.exists());
 
-        // credentials.enc を読み取り専用にして削除を失敗させる
-        let mut perms = fs::metadata(&cred_path).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&cred_path, perms).unwrap();
+        // ファイルを開いてロックを保持することで、remove_file を共有違反で確実に失敗させる
+        use std::os::windows::fs::OpenOptionsExt;
+        let _locked_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(1 | 2) // FILE_SHARE_READ | FILE_SHARE_WRITE; exclude FILE_SHARE_DELETE
+            .open(&cred_path)
+            .unwrap();
 
         // 唯一のキーを削除しようとする -> map が空になり remove_file が呼ばれる -> エラーが返ること
         let res = store.delete("gemini_api_key");
         assert!(
             res.is_err(),
-            "delete should fail when credentials.enc cannot be removed"
+            "delete should fail when credentials.enc is locked and cannot be removed"
         );
 
-        // 読み取り専用を解除してクリーンアップ
-        let mut perms = fs::metadata(&cred_path).unwrap().permissions();
-        perms.set_readonly(false);
-        let _ = fs::set_permissions(&cred_path, perms);
+        drop(_locked_file);
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

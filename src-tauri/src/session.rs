@@ -60,7 +60,7 @@ fn automatic_blog_post_enabled(settings: &serde_json::Value) -> bool {
 /// Resolve the effective Twitch IRC channel to join.
 /// Checks explicit `twitch_channel` (or legacy `twitch_bot_channel`).
 /// If unset, falls back to `user_name` only when it contains valid ASCII alphanumeric/underscore characters.
-fn resolve_effective_twitch_channel(settings: &serde_json::Value) -> String {
+pub(crate) fn resolve_effective_twitch_channel(settings: &serde_json::Value) -> String {
     let explicit = settings
         .get("twitch_channel")
         .or_else(|| settings.get("twitch_bot_channel"))

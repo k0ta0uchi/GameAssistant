@@ -1775,21 +1775,9 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
         code: parsedCode,
         state: parsedState,
       });
-      if (tokenRes && tokenRes.access_token) {
-        // トークン検証
-        const valRes: any = await invoke("twitch_validate_token", {
-          accessToken: tokenRes.access_token,
-        });
-        if (valRes && valRes.user_id) {
-          await onUpdateSetting("twitch_bot_id", valRes.user_id);
-          if (valRes.login) {
-            await onUpdateSetting("twitch_bot_username", valRes.login);
-          }
-        }
-        await onUpdateSetting("twitch_access_token", tokenRes.access_token);
-        if (tokenRes.refresh_token) {
-          await onUpdateSetting("twitch_refresh_token", tokenRes.refresh_token);
-        }
+      if (tokenRes?.success && tokenRes.has_access_token) {
+        await onUpdateSetting("twitch_bot_id", tokenRes.user_id);
+        await onUpdateSetting("twitch_bot_username", tokenRes.login);
         setMessage({
           text: "✅ トークンの登録と検証に成功しました！",
           type: "success",
@@ -1819,7 +1807,7 @@ const TwitchTab: React.FC<TwitchTabProps> = ({ settings, onUpdateSetting }) => {
       const botNick = String(
         settings.twitch_bot_username || "justinfan12345",
       ).trim();
-      const oauthToken = String(settings.twitch_access_token || "").trim();
+      const oauthToken = "";
 
       await invoke("twitch_connect", {
         settings: {

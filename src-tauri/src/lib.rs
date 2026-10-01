@@ -466,6 +466,7 @@ async fn twitch_connect(
     state: State<'_, AppState>,
     settings: TwitchBotSettings,
 ) -> Result<(), String> {
+    let settings = twitch::resolve_connection_settings(&state.root_dir, settings)?;
     state
         .twitch_service
         .connect(settings, Some(app), None)
@@ -497,7 +498,7 @@ async fn twitch_register_code(
     code: String,
     state: Option<String>,
     redirect_uri: Option<String>,
-) -> Result<twitch::TwitchTokenResponse, String> {
+) -> Result<twitch::TwitchAuthStatus, String> {
     let effective_secret = if !client_secret.trim().is_empty() {
         credentials::set_secret(
             &app_state.root_dir,
@@ -511,7 +512,7 @@ async fn twitch_register_code(
     let redir = redirect_uri
         .unwrap_or_else(|| "https://k0ta0uchi.github.io/GameAssistant/auth.html".to_string());
     let (clean_code, effective_state) = twitch::parse_code_and_state(&code, state);
-    app_state
+    let token = app_state
         .twitch_service
         .exchange_code(
             &client_id,
@@ -520,7 +521,15 @@ async fn twitch_register_code(
             effective_state.as_deref(),
             &redir,
         )
-        .await
+        .await?;
+    let account = app_state
+        .twitch_service
+        .validate_token(&token.access_token)
+        .await?;
+    if account.client_id != client_id {
+        return Err("Twitch token client ID mismatch".to_string());
+    }
+    twitch::persist_validated_tokens(&app_state.root_dir, &token, &account)
 }
 
 #[tauri::command]
@@ -548,7 +557,7 @@ async fn twitch_refresh_token(
     client_id: String,
     client_secret: String,
     refresh_token: String,
-) -> Result<twitch::TwitchTokenResponse, String> {
+) -> Result<twitch::TwitchAuthStatus, String> {
     let effective_secret = if !client_secret.trim().is_empty() {
         client_secret
     } else {
@@ -559,10 +568,18 @@ async fn twitch_refresh_token(
     } else {
         credentials::get_secret(&state.root_dir, "twitch_refresh_token").unwrap_or_default()
     };
-    state
+    let token = state
         .twitch_service
         .refresh_token(&client_id, &effective_secret, &effective_refresh)
-        .await
+        .await?;
+    let account = state
+        .twitch_service
+        .validate_token(&token.access_token)
+        .await?;
+    if account.client_id != client_id {
+        return Err("Twitch token client ID mismatch".to_string());
+    }
+    twitch::persist_validated_tokens(&state.root_dir, &token, &account)
 }
 
 // --- Web 検索 ---
