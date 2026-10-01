@@ -3035,7 +3035,13 @@ mod tests {
         assert_eq!(entries[0].level, "ERROR");
         assert!(entries[0].message.contains("pkg_resources"));
         assert_eq!(entries[1].level, "INFO");
-        assert!(root.join("data").join("app.log").is_file());
+        // ログは logs/GameAssistant-YYYY-MM-DD.log へ永続化される (Issue #28)
+        log_mgr.wait_until_file_flushed();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert!(root
+            .join("logs")
+            .join(format!("GameAssistant-{today}.log"))
+            .is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 
