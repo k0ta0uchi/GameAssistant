@@ -57,10 +57,23 @@ PORT = 18088
 # revised transcripts as partials, and promote one stable transcript to final
 # after silence. Keep these values explicit so the portable server contract
 # can be checked without loading the optional ML stack.
+SAMPLE_RATE = 16000
 MIN_AUDIO_SECONDS = 0.25
+PRE_ROLL_SECONDS = 0.20
+SPEECH_START_CONSECUTIVE_FRAMES = 3  # 60ms of speech (3 x 20ms frames)
+SPEECH_END_SILENCE_SECONDS = 0.65  # 650ms of real audio silence for speech-end
+MAX_UTTERANCE_SECONDS = 30.0  # Full utterance safe bound (do not truncate at 3s)
+VAD_ENERGY_THRESHOLD = 0.012  # RMS threshold for speech/silence detection
+VAD_FRAME_SIZE = 320  # 20ms @ 16kHz
+
+# Partial inference optimization intervals
 PARTIAL_POLL_INTERVAL_SECONDS = 0.08
+PARTIAL_INTERVAL_GPU_SECONDS = 0.35  # GPU: 300-400ms (350ms)
+PARTIAL_INTERVAL_CPU_SECONDS = 0.65  # CPU: 500-800ms (650ms)
+MIN_PARTIAL_INCREMENT_SECONDS = 0.20  # Minimum new audio before re-inference
 SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS = 0.75
-MAX_AUDIO_BUFFER_SECONDS = 3.0
+MAX_AUDIO_BUFFER_SECONDS = 30.0  # Legacy compatibility constant
+
 
 
 def remember_transcript(previous: str, candidate: str) -> str:
@@ -115,38 +128,88 @@ else:
         "complete first-launch setup before starting ASR."
     )
 
-forced_device = None
-if "--device" in sys.argv:
-    idx = sys.argv.index("--device")
-    if idx + 1 < len(sys.argv):
-        forced_device = sys.argv[idx + 1].lower()
-elif "--force-device" in sys.argv:
-    idx = sys.argv.index("--force-device")
-    if idx + 1 < len(sys.argv):
-        forced_device = sys.argv[idx + 1].lower()
+def get_arg_or_env(arg_names, env_names, default=None):
+    for arg in arg_names:
+        if arg in sys.argv:
+            idx = sys.argv.index(arg)
+            if idx + 1 < len(sys.argv):
+                return sys.argv[idx + 1]
+    for env in env_names:
+        if env in os.environ:
+            return os.environ[env]
+    return default
+
+
+forced_device = get_arg_or_env(
+    ["--device", "--force-device"], ["ASR_DEVICE", "FORCE_DEVICE"]
+)
+if forced_device:
+    forced_device = forced_device.lower()
 
 current_device = "cpu" if forced_device == "cpu" else "cuda"
 
+model_preset = get_arg_or_env(
+    ["--model-preset", "--preset"], ["ASR_MODEL_PRESET", "MODEL_PRESET"]
+)
+if model_preset:
+    model_preset = model_preset.lower()
 
-def create_cpu_whisper_model():
-    """ゲームとCPUリソースが共存できるようスレッド数(4)と量子化型を最適化してCPUモデルを初期化。
-    faster-whisper-small が存在すれば優先してロード（約5倍高速・RTF 0.30）、なければ kotoba-whisper をフォールバック利用。
-    """
-    threads = min(4, os.cpu_count() or 4)
-    compute_type = "int8_float32"
+gpu_compute_type = get_arg_or_env(
+    ["--compute-type", "--gpu-compute-type"],
+    ["ASR_GPU_COMPUTE_TYPE", "ASR_COMPUTE_TYPE"],
+    default="int8",
+)
+cpu_compute_type = get_arg_or_env(
+    ["--cpu-compute-type"], ["ASR_CPU_COMPUTE_TYPE"], default="int8_float32"
+)
+
+cpu_threads_raw = get_arg_or_env(["--cpu-threads"], ["ASR_CPU_THREADS"], default=None)
+current_cpu_threads = (
+    int(cpu_threads_raw)
+    if (cpu_threads_raw and cpu_threads_raw.isdigit())
+    else min(4, os.cpu_count() or 4)
+)
+
+current_model_name = ""
+current_compute_type = gpu_compute_type if current_device == "cuda" else cpu_compute_type
+
+
+def get_model_spec(preset: str | None, device: str) -> tuple[str, str]:
     small_path = os.path.join(MODELS_DIR, "faster-whisper-small")
-    if os.path.exists(small_path) and (
+    has_small = os.path.exists(small_path) and (
         os.path.exists(os.path.join(small_path, "model.bin"))
         or os.path.exists(os.path.join(small_path, "model.safetensors"))
-    ):
-        model_source = small_path
-        model_desc = "faster-whisper-small (High-Speed CPU Fallback, ~5x faster)"
-    else:
-        model_source = whisper_model_source
-        model_desc = f"{os.path.basename(whisper_model_source)} (Standard ASR)"
+    )
+    if preset == "fast":
+        if has_small:
+            return small_path, "faster-whisper-small"
+        else:
+            logger.warning(
+                "Fast preset requested but faster-whisper-small not found; "
+                "falling back to Kotoba-Whisper."
+            )
+            return whisper_model_source, "kotoba-whisper-v2.0-faster"
+    if preset == "quality":
+        return whisper_model_source, "kotoba-whisper-v2.0-faster"
+
+    # preset未指定時: CPUでsmallがあれば既存動作互換でsmall、なければkotoba。GPUならkotoba
+    if device == "cpu" and has_small:
+        return small_path, "faster-whisper-small"
+    return whisper_model_source, "kotoba-whisper-v2.0-faster"
+
+
+def create_cpu_whisper_model(
+    preset=model_preset, threads=current_cpu_threads, compute_type=cpu_compute_type
+):
+    """CPU モデルを初期化。preset (quality / fast) や compute_type, threads を明示指定可能。"""
+    global current_model_name, current_compute_type, current_cpu_threads
+    model_source, model_name = get_model_spec(preset, "cpu")
+    current_model_name = model_name
+    current_compute_type = compute_type
+    current_cpu_threads = threads
 
     logger.info(
-        f"Initializing CPU Faster-Whisper model from {model_desc} "
+        f"Initializing CPU Faster-Whisper model from {model_name} "
         f"(compute_type={compute_type}, cpu_threads={threads})..."
     )
     try:
@@ -161,6 +224,7 @@ def create_cpu_whisper_model():
         logger.warning(
             f"Failed to load CPU model with {compute_type}: {e}. Retrying with float32..."
         )
+        current_compute_type = "float32"
         return WhisperModel(
             model_source,
             device="cpu",
@@ -171,22 +235,22 @@ def create_cpu_whisper_model():
 
 
 if current_device == "cuda":
+    model_source, model_name = get_model_spec(model_preset or "quality", "cuda")
+    current_model_name = model_name
+    current_compute_type = gpu_compute_type
     logger.info(
-        f"Loading local Faster-Whisper model from: {whisper_model_source} (CUDA INT8)..."
+        f"Loading local Faster-Whisper model from: {model_source} (CUDA {gpu_compute_type})..."
     )
     try:
         whisper_model = WhisperModel(
-            whisper_model_source, device="cuda", compute_type="int8"
+            model_source, device="cuda", compute_type=gpu_compute_type
         )
-        logger.info("Faster-Whisper model successfully loaded on CUDA (INT8)!")
+        logger.info(f"Faster-Whisper model successfully loaded on CUDA ({gpu_compute_type})!")
     except Exception as e:
         logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU...")
         whisper_model = create_cpu_whisper_model()
         current_device = "cpu"
 else:
-    logger.info(
-        f"Loading local Faster-Whisper model from: {whisper_model_source} on CPU as requested..."
-    )
     whisper_model = create_cpu_whisper_model()
     current_device = "cpu"
 
@@ -475,9 +539,24 @@ async def asr_handler(websocket):
 
     def new_stream_state():
         return {
+            # Audio Buffers: full utterance PCM for complete final transcription
+            "full_utterance_pcm": np.array([], dtype=np.float32),
+            "pre_roll_pcm": np.array([], dtype=np.float32),
             "audio_buffer": np.array([], dtype=np.float32),
             "last_partial_text": "",
-            "silence_start_time": None,
+            "last_partial_pcm_len": 0,
+            "last_partial_time": 0.0,
+            # VAD & Endpointing State
+            "is_speaking": False,
+            "speech_start_time": None,
+            "last_voice_at": None,
+            "speech_frame_count": 0,
+            "silence_frame_count": 0,
+            "force_endpoint": False,
+            # Diagnostic Metrics
+            "partial_count": 0,
+            "partial_latencies": [],
+            "utterance_started_monotonic": None,
             "audio_started_at": None,
             "last_audio_at": None,
         }
@@ -694,128 +773,48 @@ async def asr_handler(websocket):
         return current_text, (loop.time() - t0) * 1000.0
 
     def reset_stream_state(state):
+        state["full_utterance_pcm"] = np.array([], dtype=np.float32)
         state["audio_buffer"] = np.array([], dtype=np.float32)
         state["last_partial_text"] = ""
-        state["silence_start_time"] = None
+        state["last_partial_pcm_len"] = 0
+        state["last_partial_time"] = 0.0
+        state["is_speaking"] = False
+        state["speech_start_time"] = None
+        state["last_voice_at"] = None
+        state["speech_frame_count"] = 0
+        state["silence_frame_count"] = 0
+        state["force_endpoint"] = False
+        state["partial_count"] = 0
+        state["partial_latencies"] = []
+        state["utterance_started_monotonic"] = None
         state["audio_started_at"] = None
         state["last_audio_at"] = None
 
     async def inference_loop():
         while True:
             try:
-                await asyncio.sleep(PARTIAL_POLL_INTERVAL_SECONDS)
+                poll_interval = 0.05 if current_device == "cuda" else 0.08
+                await asyncio.sleep(poll_interval)
+                now = loop.time()
 
-                # Iterate over a snapshot because an explicit stream tag may
-                # add a new, non-mic stream while inference is suspended.
+                partial_interval = (
+                    PARTIAL_INTERVAL_GPU_SECONDS
+                    if current_device == "cuda"
+                    else PARTIAL_INTERVAL_CPU_SECONDS
+                )
+
                 for stream_name, state in list(stream_states.items()):
-                    audio_buffer = state["audio_buffer"]
-                    now = loop.time()
-                    if len(audio_buffer) == 0:
-                        continue
+                    pcm = state["full_utterance_pcm"]
+                    pcm_len = len(pcm)
+                    pcm_duration_s = pcm_len / SAMPLE_RATE
 
-                    # A short utterance can end before the normal polling
-                    # threshold. Once the input has been quiet for the same
-                    # short-utterance timeout, run one final-only inference
-                    # instead of leaving the buffer stranded forever.
+                    # 短時間発話のフォールバック (VAD未発火で音声入力停止時)
                     if (
-                        len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS
+                        len(state["audio_buffer"]) < sample_rate * MIN_AUDIO_SECONDS
                         and state["last_audio_at"] is not None
                         and now - state["last_audio_at"]
                         >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
-                    ):
-                        final_text, final_latency_ms = await transcribe_buffer(
-                            audio_buffer, allow_short=True
-                        )
-                        if final_text:
-                            await send_queue.put(
-                                {
-                                    "text": final_text,
-                                    "is_final": True,
-                                    "stream": stream_name,
-                                    "latency_ms": round(final_latency_ms, 1),
-                                }
-                            )
-                        else:
-                            logger.info(
-                                "VAD reset[%s]: partial=false final=false "
-                                "reason=no_transcript samples=%d",
-                                stream_name,
-                                len(audio_buffer),
-                            )
-                        reset_stream_state(state)
-                        continue
-
-                    if len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS:
-                        continue
-
-                    current_text, latency_ms = await transcribe_buffer(audio_buffer)
-
-                    last_partial_text = state["last_partial_text"]
-                    silence_start_time = state["silence_start_time"]
-                    now = loop.time()
-
-                    if current_text:
-                        # Whisper's moving VAD window can regress from a full
-                        # sentence to a tail once the utterance exceeds the
-                        # bounded audio window. Keep the most complete partial
-                        # as the candidate that will be promoted to final.
-                        stable_text = remember_transcript(
-                            last_partial_text, current_text
-                        )
-                        if stable_text != last_partial_text:
-                            await send_queue.put(
-                                {
-                                    "text": stable_text,
-                                    "is_final": False,
-                                    "stream": stream_name,
-                                    "latency_ms": round(latency_ms, 1),
-                                }
-                            )
-                            state["last_partial_text"] = stable_text
-                            state["silence_start_time"] = now
-                        elif silence_start_time is None:
-                            state["silence_start_time"] = now
-                    elif silence_start_time is None:
-                        state["silence_start_time"] = now
-
-                    # Bound each VAD stream independently. Keeping the newest
-                    # window lets a short wake word be recognized even when an
-                    # unrelated stream has a long-running buffer.
-                    max_samples = int(sample_rate * MAX_AUDIO_BUFFER_SECONDS)
-                    if len(state["audio_buffer"]) > max_samples:
-                        state["audio_buffer"] = state["audio_buffer"][-max_samples:]
-
-                    silence_start_time = state["silence_start_time"]
-                    if state["last_partial_text"] and silence_start_time:
-                        char_count = len(state["last_partial_text"])
-                        timeout = (
-                            SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
-                            if char_count <= 4
-                            else (1.0 if char_count <= 15 else 1.3)
-                        )
-
-                        if (now - silence_start_time) >= timeout:
-                            final_text = state["last_partial_text"]
-                            logger.info(
-                                f"Finalize[{stream_name}]: '{final_text}' "
-                                f"(latency: {latency_ms:.1f}ms)"
-                            )
-                            await send_queue.put(
-                                {
-                                    "text": final_text,
-                                    "is_final": True,
-                                    "stream": stream_name,
-                                    "latency_ms": round(latency_ms, 1),
-                                }
-                            )
-                            state["last_partial_text"] = ""
-                            reset_stream_state(state)
-                    elif (
-                        len(state["audio_buffer"]) > 0
-                        and not state["last_partial_text"]
-                        and state["last_audio_at"] is not None
-                        and now - state["last_audio_at"]
-                        >= SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS
+                        and len(state["audio_buffer"]) > 0
                     ):
                         final_text, final_latency_ms = await transcribe_buffer(
                             state["audio_buffer"], allow_short=True
@@ -837,18 +836,128 @@ async def asr_handler(websocket):
                                 len(state["audio_buffer"]),
                             )
                         reset_stream_state(state)
-                    elif (
-                        len(state["audio_buffer"]) > 0
-                        and state["audio_started_at"] is not None
-                        and now - state["audio_started_at"] >= MAX_AUDIO_BUFFER_SECONDS
-                    ):
-                        logger.info(
-                            "VAD reset[%s]: partial=false final=false "
-                            "reason=no_transcript samples=%d",
-                            stream_name,
-                            len(state["audio_buffer"]),
-                        )
+                        continue
+
+                    # 1. 発話終了 (Endpointing) 判定: 実音声の無音時間または最大発話長に基づく
+                    should_finalize = False
+                    finalize_reason = ""
+
+                    if state["is_speaking"]:
+                        if (
+                            state["last_voice_at"] is not None
+                            and (now - state["last_voice_at"]) >= SPEECH_END_SILENCE_SECONDS
+                        ):
+                            should_finalize = True
+                            finalize_reason = "silence_timeout"
+                        elif pcm_duration_s >= MAX_UTTERANCE_SECONDS or state["force_endpoint"]:
+                            should_finalize = True
+                            finalize_reason = "max_duration"
+
+                    if should_finalize:
+                        if pcm_len >= int(SAMPLE_RATE * MIN_AUDIO_SECONDS):
+                            # 発話全体PCMを使って1回final推論を実行
+                            final_text, final_latency_ms = await transcribe_buffer(
+                                pcm, allow_short=True
+                            )
+                            total_time_ms = (
+                                (time.monotonic() - state["utterance_started_monotonic"]) * 1000.0
+                                if state["utterance_started_monotonic"]
+                                else final_latency_ms
+                            )
+                            avg_partial_lat = (
+                                sum(state["partial_latencies"]) / len(state["partial_latencies"])
+                                if state["partial_latencies"]
+                                else 0.0
+                            )
+                            max_partial_lat = (
+                                max(state["partial_latencies"])
+                                if state["partial_latencies"]
+                                else 0.0
+                            )
+                            rtf = (final_latency_ms / 1000.0) / max(0.001, pcm_duration_s)
+
+                            diagnostic_summary = {
+                                "event": "asr_utterance_summary",
+                                "stream": stream_name,
+                                "reason": finalize_reason,
+                                "audio_duration_s": round(pcm_duration_s, 2),
+                                "speech_duration_s": round(
+                                    max(0.0, (state["last_voice_at"] or now) - (state["speech_start_time"] or now)), 2
+                                ),
+                                "partial_count": state["partial_count"],
+                                "avg_partial_latency_ms": round(avg_partial_lat, 1),
+                                "max_partial_latency_ms": round(max_partial_lat, 1),
+                                "final_latency_ms": round(final_latency_ms, 1),
+                                "total_latency_ms": round(total_time_ms, 1),
+                                "rtf": round(rtf, 3),
+                                "device": current_device,
+                                "model": current_model_name,
+                                "compute_type": current_compute_type,
+                                "text": final_text,
+                            }
+                            logger.info(
+                                f"ASR Utterance Finalized: {json.dumps(diagnostic_summary, ensure_ascii=False)}"
+                            )
+
+                            output_text = final_text or state["last_partial_text"]
+                            if output_text:
+                                await send_queue.put(
+                                    {
+                                        "text": output_text,
+                                        "is_final": True,
+                                        "stream": stream_name,
+                                        "latency_ms": round(final_latency_ms, 1),
+                                    }
+                                )
+                            else:
+                                logger.info(
+                                    "VAD reset[%s]: partial=false final=false "
+                                    "reason=no_transcript samples=%d",
+                                    stream_name,
+                                    pcm_len,
+                                )
                         reset_stream_state(state)
+                        continue
+
+                    # 2. Partial 推論: 発話中かつ十分な新規PCMが到着しインターバルを満たしている場合のみ実行
+                    if not state["is_speaking"]:
+                        continue
+
+                    if (now - state["last_partial_time"]) < partial_interval:
+                        continue
+
+                    added_samples = pcm_len - state["last_partial_pcm_len"]
+                    if added_samples < int(SAMPLE_RATE * MIN_PARTIAL_INCREMENT_SECONDS):
+                        continue
+
+                    if pcm_len < int(SAMPLE_RATE * MIN_AUDIO_SECONDS):
+                        continue
+
+                    # Bounded partial window (最大10秒で推論負荷を制限)
+                    partial_pcm = pcm
+                    if len(pcm) > int(SAMPLE_RATE * 10.0):
+                        partial_pcm = pcm[-int(SAMPLE_RATE * 10.0):]
+
+                    current_text, latency_ms = await transcribe_buffer(partial_pcm)
+                    state["last_partial_time"] = now
+                    state["last_partial_pcm_len"] = pcm_len
+                    state["partial_count"] += 1
+                    state["partial_latencies"].append(latency_ms)
+
+                    if current_text:
+                        stable_text = remember_transcript(
+                            state["last_partial_text"], current_text
+                        )
+                        if stable_text != state["last_partial_text"]:
+                            await send_queue.put(
+                                {
+                                    "text": stable_text,
+                                    "is_final": False,
+                                    "stream": stream_name,
+                                    "latency_ms": round(latency_ms, 1),
+                                }
+                            )
+                            state["last_partial_text"] = stable_text
 
             except asyncio.CancelledError:
                 break
@@ -862,16 +971,56 @@ async def asr_handler(websocket):
         async for message in websocket:
             if isinstance(message, bytes):
                 samples = np.frombuffer(message, dtype=np.float32)
-                state = stream_states.setdefault(active_stream, new_stream_state())
+                if len(samples) == 0:
+                    continue
                 if len(samples) > 0 and state["audio_started_at"] is None:
                     state["audio_started_at"] = loop.time()
                 if len(samples) > 0:
                     state["last_audio_at"] = loop.time()
-                state["audio_buffer"] = np.concatenate([state["audio_buffer"], samples])
-                # 有界化: 推論停止・遅延時のバッファ肥大化防止（最大5秒）
-                max_allowed_samples = int(sample_rate * 5.0)
-                if len(state["audio_buffer"]) > max_allowed_samples:
-                    state["audio_buffer"] = state["audio_buffer"][-max_allowed_samples:]
+
+                # 20ms フレームごとに RMS を計算して VAD 状態を更新
+                frame_size = VAD_FRAME_SIZE
+                for i in range(0, len(samples), frame_size):
+                    frame = samples[i : i + frame_size]
+                    if len(frame) < frame_size:
+                        break
+                    rms = float(np.sqrt(np.mean(frame**2)))
+
+                    if rms >= VAD_ENERGY_THRESHOLD:
+                        state["speech_frame_count"] += 1
+                        state["silence_frame_count"] = 0
+                        state["last_voice_at"] = now
+
+                        if not state["is_speaking"]:
+                            if state["speech_frame_count"] >= SPEECH_START_CONSECUTIVE_FRAMES:
+                                state["is_speaking"] = True
+                                state["speech_start_time"] = now
+                                state["utterance_started_monotonic"] = time.monotonic()
+                                state["partial_count"] = 0
+                                state["partial_latencies"] = []
+                                # pre-roll (直前200ms) を発話全体バッファの先頭に付加して文頭欠落を防止
+                                state["full_utterance_pcm"] = state["pre_roll_pcm"].copy()
+                                state["last_partial_pcm_len"] = 0
+                    else:
+                        state["silence_frame_count"] += 1
+                        state["speech_frame_count"] = 0
+
+                # PCM 蓄積
+                if state["is_speaking"]:
+                    state["full_utterance_pcm"] = np.concatenate(
+                        [state["full_utterance_pcm"], samples]
+                    )
+                    state["audio_buffer"] = state["full_utterance_pcm"]
+                    max_samples = int(SAMPLE_RATE * MAX_UTTERANCE_SECONDS)
+                    if len(state["full_utterance_pcm"]) > max_samples:
+                        state["force_endpoint"] = True
+                else:
+                    state["pre_roll_pcm"] = np.concatenate([state["pre_roll_pcm"], samples])
+                    pre_roll_max = int(SAMPLE_RATE * PRE_ROLL_SECONDS)
+                    if len(state["pre_roll_pcm"]) > pre_roll_max:
+                        state["pre_roll_pcm"] = state["pre_roll_pcm"][-pre_roll_max:]
+                    state["audio_buffer"] = state["pre_roll_pcm"]
+
             elif isinstance(message, str):
                 try:
                     data = json.loads(message)
@@ -886,11 +1035,7 @@ async def asr_handler(websocket):
                             active_stream = stream_name.strip()
                             stream_states.setdefault(active_stream, new_stream_state())
                     elif cmd == "flush":
-                        # A caller may have VAD audio but no partial delivery
-                        # (for example, a short buffer crossing a reconnect).
-                        # Expose an explicit finalization path so native code
-                        # can preserve the final-only contract instead of
-                        # dropping the buffered transcript.
+                        # 明示的フラッシュ時: 発話PCMが存在すればfinal推論を実行
                         stream_name = data.get("stream", active_stream)
                         if not isinstance(stream_name, str) or not stream_name.strip():
                             stream_name = active_stream
@@ -906,6 +1051,19 @@ async def asr_handler(websocket):
                                 final_text, final_latency_ms = await transcribe_buffer(
                                     state["audio_buffer"], allow_short=True
                                 )
+                            elif len(state["audio_buffer"]) > 0:
+                                full_pcm = (
+                                    state["full_utterance_pcm"]
+                                    if len(state["full_utterance_pcm"]) > 0
+                                    else state["audio_buffer"]
+                                )
+                                res_text, res_lat = await transcribe_buffer(
+                                    full_pcm, allow_short=True
+                                )
+                                if res_text:
+                                    final_text = res_text
+                                    final_latency_ms = res_lat
+
                             if final_text:
                                 await send_queue.put(
                                     {

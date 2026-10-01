@@ -29,6 +29,7 @@ struct DiscordCallbackContext {
     is_running: Arc<AtomicBool>,
     max_meter_val: Mutex<f64>,
     last_meter_emit: Mutex<Instant>,
+    resampler: Mutex<StreamingResampler>,
 }
 
 #[cfg(windows)]
@@ -85,7 +86,9 @@ extern "C" fn discord_audio_callback(
     // 音声データが検出された場合（有音時）、Whisper へ PCM 転送 (16kHz モノラル)
     if meter_val > 0.5 {
         if let Some(ref cb) = ctx.on_pcm_data {
-            let resampled = resample_linear(slice, sample_rate as u32, 16000, channels as usize);
+            let mut resampler = ctx.resampler.lock();
+            resampler.ensure_config(sample_rate as u32, 16000, channels as usize);
+            let resampled = resampler.resample(slice);
             if !resampled.is_empty() {
                 cb(resampled);
             }
@@ -203,6 +206,11 @@ impl AudioInputManager {
                         let is_running_cb = is_running_clone.clone();
                         let app_handle_meter = app_handle.clone();
                         let on_pcm_cb = on_pcm_data.clone();
+                        let resampler = Mutex::new(StreamingResampler::new(
+                            in_sample_rate,
+                            target_sample_rate,
+                            in_channels,
+                        ));
 
                         let stream_res = build_flexible_input_stream(
                             &dev,
@@ -221,14 +229,9 @@ impl AudioInputManager {
                                     }
                                 }
 
-                                // 2. 16kHz モノラルへリサンプリングし、コールバックがあれば転送
+                                // 2. 16kHz モノラルへステートフルリサンプリングし、コールバックがあれば転送
                                 if let Some(ref cb) = on_pcm_cb {
-                                    let resampled = resample_linear(
-                                        data,
-                                        in_sample_rate,
-                                        target_sample_rate,
-                                        in_channels,
-                                    );
+                                    let resampled = resampler.lock().resample(data);
                                     if !resampled.is_empty() {
                                         cb(resampled);
                                     }
@@ -270,6 +273,7 @@ impl AudioInputManager {
                                 is_running: is_running_clone.clone(),
                                 max_meter_val: Mutex::new(0.0),
                                 last_meter_emit: Mutex::new(Instant::now()),
+                                resampler: Mutex::new(StreamingResampler::new(48000, 16000, 2)),
                             });
                             let ctx_ptr = Box::into_raw(ctx);
 
@@ -459,39 +463,123 @@ where
     }
 }
 
+/// ステートフル・ストリーミングリサンプラー (Any Sample Rate / Channels -> 16kHz Mono)
+/// コールバックチャンク境界で位相 (phase) と前サンプルの状態を保持し、
+/// 44.1kHz / 48kHz 等からのリサンプリング時における境界歪み・位相ジッターを防止する。
+#[derive(Debug, Clone)]
+pub struct StreamingResampler {
+    in_rate: u32,
+    out_rate: u32,
+    channels: usize,
+    ratio: f64,
+    phase: f64,
+    last_sample: f32,
+    has_last_sample: bool,
+}
+
+impl StreamingResampler {
+    pub fn new(in_rate: u32, out_rate: u32, channels: usize) -> Self {
+        let channels = channels.max(1);
+        let ratio = if out_rate > 0 {
+            in_rate as f64 / out_rate as f64
+        } else {
+            1.0
+        };
+        Self {
+            in_rate,
+            out_rate,
+            channels,
+            ratio,
+            phase: 0.0,
+            last_sample: 0.0,
+            has_last_sample: false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.phase = 0.0;
+        self.last_sample = 0.0;
+        self.has_last_sample = false;
+    }
+
+    pub fn ensure_config(&mut self, in_rate: u32, out_rate: u32, channels: usize) {
+        let channels = channels.max(1);
+        if self.in_rate != in_rate || self.out_rate != out_rate || self.channels != channels {
+            self.in_rate = in_rate;
+            self.out_rate = out_rate;
+            self.channels = channels;
+            self.ratio = if out_rate > 0 {
+                in_rate as f64 / out_rate as f64
+            } else {
+                1.0
+            };
+            self.reset();
+        }
+    }
+
+    pub fn resample(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() || self.in_rate == 0 || self.out_rate == 0 || self.channels == 0 {
+            return Vec::new();
+        }
+
+        // 1. チャンネルダウンミックス (モノラル化)
+        let mono_len = input.len() / self.channels;
+        if mono_len == 0 {
+            return Vec::new();
+        }
+        let mut mono = Vec::with_capacity(mono_len);
+        for frame in input.chunks_exact(self.channels) {
+            let sum: f32 = frame.iter().sum();
+            mono.push(sum / self.channels as f32);
+        }
+
+        // 入力レートと出力レートが同一の場合
+        if self.in_rate == self.out_rate {
+            self.last_sample = *mono.last().unwrap();
+            self.has_last_sample = true;
+            return mono;
+        }
+
+        // 2. ステートフル線形補間
+        let mut output = Vec::new();
+        let mut t = self.phase;
+        let n = mono.len();
+
+        while t < n as f64 - 1.0 {
+            if t < 0.0 {
+                // 前チャンクの last_sample (t = -1.0) と mono[0] (t = 0.0) の間で補間
+                let s0 = if self.has_last_sample {
+                    self.last_sample
+                } else {
+                    mono[0]
+                };
+                let s1 = mono[0];
+                let frac = (t + 1.0).clamp(0.0, 1.0) as f32;
+                output.push(s0 + (s1 - s0) * frac);
+            } else {
+                let idx0 = t.floor() as usize;
+                let idx1 = idx0 + 1;
+                let frac = (t - idx0 as f64) as f32;
+                let s0 = mono[idx0];
+                let s1 = mono[idx1];
+                output.push(s0 + (s1 - s0) * frac);
+            }
+            t += self.ratio;
+        }
+
+        self.last_sample = *mono.last().unwrap();
+        self.has_last_sample = true;
+        self.phase = t - n as f64;
+
+        output
+    }
+}
+
 /// チャンネルダウンミックス & 線形補間リサンプリング (Any Sample Rate -> 16kHz Mono)
+/// ※ 後方互換性およびワンショット変換用。連続ストリーミングには StreamingResampler を推奨。
 pub fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32, channels: usize) -> Vec<f32> {
-    if input.is_empty() || in_rate == 0 || out_rate == 0 || channels == 0 {
-        return Vec::new();
-    }
-    // 1. チャンネルダウンミックス (モノラル化)
-    let mono_len = input.len() / channels;
-    let mut mono = Vec::with_capacity(mono_len);
-    for frame in input.chunks_exact(channels) {
-        let sum: f32 = frame.iter().sum();
-        mono.push(sum / channels as f32);
-    }
-
-    if in_rate == out_rate {
-        return mono;
-    }
-
-    // 2. 線形補間リサンプリング
-    let ratio = in_rate as f64 / out_rate as f64;
-    let out_len = (mono.len() as f64 / ratio) as usize;
-    let mut output = Vec::with_capacity(out_len);
-
-    for i in 0..out_len {
-        let src_idx = i as f64 * ratio;
-        let idx0 = src_idx.floor() as usize;
-        let idx1 = (idx0 + 1).min(mono.len() - 1);
-        let frac = (src_idx - idx0 as f64) as f32;
-        let s0 = mono[idx0];
-        let s1 = mono[idx1];
-        output.push(s0 + (s1 - s0) * frac);
-    }
-
-    output
+    let mut resampler = StreamingResampler::new(in_rate, out_rate, channels);
+    resampler.resample(input)
 }
 
 /// 全チャンネルの振幅（Peak & RMS ハイブリッド）からパーセンテージ（0.0 - 100.0, 小数点第1位）を算出する
@@ -609,4 +697,107 @@ pub fn build_keep_alive_render_stream(
         let _ = s.play();
     }
     stream
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_streaming_resampler_preserves_phase_and_length() {
+        let in_rate = 48000u32;
+        let out_rate = 16000u32;
+        let total_samples = 48000; // 1 second
+        let mut sine_wave = Vec::with_capacity(total_samples);
+        for i in 0..total_samples {
+            let t = i as f32 / in_rate as f32;
+            sine_wave.push((2.0 * std::f32::consts::PI * 440.0 * t).sin());
+        }
+
+        // 1. One-shot resample
+        let mut oneshot_resampler = StreamingResampler::new(in_rate, out_rate, 1);
+        let oneshot_output = oneshot_resampler.resample(&sine_wave);
+
+        // 2. Chunked streaming resample (chunk size = 480 samples = 10ms)
+        let mut streaming_resampler = StreamingResampler::new(in_rate, out_rate, 1);
+        let mut streaming_output = Vec::new();
+        for chunk in sine_wave.chunks(480) {
+            let out_chunk = streaming_resampler.resample(chunk);
+            streaming_output.extend(out_chunk);
+        }
+
+        // 出力サイズが一致すること（16000 samples 周辺）
+        assert_eq!(oneshot_output.len(), streaming_output.len());
+        assert!((oneshot_output.len() as i32 - 16000).abs() <= 2);
+
+        // 各サンプルの誤差が極小であること（位相飛びがないこと）
+        for (i, (&s1, &s2)) in oneshot_output
+            .iter()
+            .zip(streaming_output.iter())
+            .enumerate()
+        {
+            let diff = (s1 - s2).abs();
+            assert!(
+                diff < 1e-5,
+                "Sample {} diverged: oneshot={}, streaming={}, diff={}",
+                i,
+                s1,
+                s2,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_resampler_fractional_rate_44100() {
+        let in_rate = 44100u32;
+        let out_rate = 16000u32;
+        let total_samples = 44100;
+        let mut sine_wave = Vec::with_capacity(total_samples);
+        for i in 0..total_samples {
+            let t = i as f32 / in_rate as f32;
+            sine_wave.push((2.0 * std::f32::consts::PI * 300.0 * t).sin());
+        }
+
+        let mut oneshot_resampler = StreamingResampler::new(in_rate, out_rate, 1);
+        let oneshot_output = oneshot_resampler.resample(&sine_wave);
+
+        let mut streaming_resampler = StreamingResampler::new(in_rate, out_rate, 1);
+        let mut streaming_output = Vec::new();
+        for chunk in sine_wave.chunks(512) {
+            let out_chunk = streaming_resampler.resample(chunk);
+            streaming_output.extend(out_chunk);
+        }
+
+        assert_eq!(oneshot_output.len(), streaming_output.len());
+        for (i, (&s1, &s2)) in oneshot_output
+            .iter()
+            .zip(streaming_output.iter())
+            .enumerate()
+        {
+            let diff = (s1 - s2).abs();
+            assert!(
+                diff < 1e-4,
+                "Sample {} diverged: oneshot={}, streaming={}, diff={}",
+                i,
+                s1,
+                s2,
+                diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_streaming_resampler_stereo_downmix() {
+        let in_rate = 48000u32;
+        let out_rate = 16000u32;
+        let channels = 2;
+        // L = 1.0, R = 0.5 -> Mono = 0.75
+        let stereo: Vec<f32> = vec![1.0, 0.5, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5, 1.0, 0.5];
+        let mut resampler = StreamingResampler::new(in_rate, out_rate, channels);
+        let out = resampler.resample(&stereo);
+        for &s in &out {
+            assert!((s - 0.75).abs() < 1e-5);
+        }
+    }
 }
