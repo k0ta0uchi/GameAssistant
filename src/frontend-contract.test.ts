@@ -15,6 +15,12 @@ import {
   isTermsAcceptanceRequired,
   useAppState,
 } from "./hooks/useAppState";
+import { useSetupState } from "./hooks/useSetupState";
+import { useSessionController } from "./hooks/useSessionController";
+import { useAudioDevices } from "./hooks/useAudioDevices";
+import { useSettings } from "./hooks/useSettings";
+import { useRuntimeInitialization } from "./hooks/useRuntimeInitialization";
+import { useModelStatus } from "./hooks/useModelStatus";
 import {
   GEMMA_MODEL_ID,
   GEMMA_TERMS_MODEL_SHA256,
@@ -2776,6 +2782,110 @@ for (const [reason, expectedLabel, retryable] of [
   assert.ok(
     harness.unregistered.includes("plugin:event|unlisten"),
     "memory-migration-progress listener should be released on unmount",
+  );
+}
+
+// Issue #8: useAppState hook decomposition into domain-specific hooks and facade
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+
+  let appStateResult: ReturnType<typeof useAppState> | null = null;
+  function TestApp() {
+    appStateResult = useAppState();
+    return React.createElement("div", null, "test");
+  }
+
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(TestApp));
+  });
+  await settleEffects();
+
+  // Verify all required facade properties are present
+  assert.ok(appStateResult);
+  const requiredKeys = [
+    "isConnected",
+    "status",
+    "levelMeter",
+    "discordLevelMeter",
+    "currentAsr",
+    "asrHistory",
+    "factHistory",
+    "geminiResponse",
+    "vram",
+    "ram",
+    "commentaryTimer",
+    "sessionStarting",
+    "logs",
+    "inputDevices",
+    "discordDevices",
+    "selectedDevice",
+    "selectedDiscordDevice",
+    "enableDiscordCapture",
+    "windows",
+    "selectedWindow",
+    "previewImage",
+    "settings",
+    "prompts",
+    "startSession",
+    "stopSession",
+    "restartWhisper",
+    "updateSetting",
+    "fetchWindows",
+    "fetchPreview",
+    "fetchSettings",
+    "fetchPrompts",
+    "savePrompt",
+    "resetPrompt",
+    "clearLogs",
+    "toast",
+    "showToast",
+    "modelsStatus",
+    "missingRequiredModels",
+    "fetchModelsStatus",
+    "setupStatus",
+    "setupProgress",
+    "runtimeInitialization",
+    "initializeRuntime",
+    "fetchRuntimeInitializationStatus",
+    "isSetupRunning",
+    "setupError",
+    "isElevationRequesting",
+    "fetchSetupStatus",
+    "runSetup",
+    "acceptTermsAndRunSetup",
+    "requestSetupElevation",
+    "cancelSetup",
+  ];
+  for (const key of requiredKeys) {
+    assert.ok(key in appStateResult!, `Property ${key} should exist in useAppState facade`);
+  }
+
+  // Verify that event listeners were registered
+  assert.ok(
+    harness.registrations.includes("resource_status"),
+    "resource_status listener should be registered",
+  );
+  assert.ok(
+    harness.registrations.includes("asr_result"),
+    "asr_result listener should be registered",
+  );
+
+  // Verify individual domain hooks are exported and functional
+  assert.equal(typeof useSetupState, "function");
+  assert.equal(typeof useSessionController, "function");
+  assert.equal(typeof useAudioDevices, "function");
+  assert.equal(typeof useSettings, "function");
+  assert.equal(typeof useRuntimeInitialization, "function");
+  assert.equal(typeof useModelStatus, "function");
+
+  // Unmount and verify cleanup
+  renderer.unmount();
+  await settleEffects();
+  assert.ok(
+    harness.unregistered.includes("plugin:event|unlisten"),
+    "Tauri event listeners should be unlistened upon unmount",
   );
 }
 
