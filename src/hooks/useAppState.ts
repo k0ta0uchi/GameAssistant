@@ -27,6 +27,7 @@ import {
   hasValidGemmaTerms,
 } from "../types";
 import { useWebSocket } from "./useWebSocket";
+import { saveSettingAdapter } from "../services/settingsAdapter";
 
 const API_BASE = "http://127.0.0.1:18080";
 
@@ -2366,8 +2367,18 @@ export function useAppState() {
     value: any,
     options: SettingUpdateOptions = {},
   ) => {
-    // 1. ローカルステート即時更新（UIの遅延ゼロ）
-    setSettings((prev) => ({ ...prev, [key]: value }));
+    // 0. ロールバック用に直前のスナップショットを退避
+    let prevValue: any;
+    const prevDiscordCapture = enableDiscordCapture;
+    const prevAudioDevice = selectedDevice;
+    const prevDiscordAudioDevice = selectedDiscordDevice;
+    const prevWindow = selectedWindow;
+
+    // 1. ローカルステート即時更新（UIの遅延ゼロ: Optimistic update）
+    setSettings((prev) => {
+      prevValue = prev[key];
+      return { ...prev, [key]: value };
+    });
     if (key === "enable_discord_capture") setEnableDiscordCapture(value);
     if (key === "audio_device") setSelectedDevice(value);
     if (key === "discord_audio_device") setSelectedDiscordDevice(value);
@@ -2375,37 +2386,40 @@ export function useAppState() {
       setSelectedWindow(value);
     }
 
-    // 2. Tauri Rust 経由で settings.json へ即時書き込み
-    let tauriSaveSucceeded = false;
-    if (isTauriEnv()) {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("save_setting", { key, value });
-        tauriSaveSucceeded = true;
-      } catch (te) {
-        console.error("Tauri save_setting error:", te);
-        if (options.throwOnError) throw te;
-      }
-    }
-
-    // 3. Python サーバー経由で settings.json へ即時書き込み & サービス反映
+    // 2. 単一の永続化経路（Tauri環境では save_setting のみ、二重writeなし）
     try {
-      const response = await fetch(`${API_BASE}/api/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, value }),
-      });
-      if (!response.ok)
-        throw new Error(`settings request failed: ${response.status}`);
-      const result = await response.json();
-      if (result && result.success === false)
-        throw new Error(result.error || `failed to save setting ${key}`);
+      const res = await saveSettingAdapter(
+        key,
+        value,
+        isTauriEnv(),
+        API_BASE,
+      );
+      if (res.warning) {
+        console.warn(`Setting ${key} saved with worker warning:`, res.warning);
+        showToast(
+          `設定は保存されましたが、ワーカー反映警告: ${res.warning}`,
+          "warning",
+        );
+      }
+      if (res.settings && typeof res.settings === "object") {
+        setSettings(res.settings);
+      }
     } catch (e) {
       console.error(`Failed to update setting ${key}:`, e);
-      // The Rust command is authoritative in Tauri. Keep the HTTP endpoint as
-      // a compatibility/service-sync best effort, but never let its absence
-      // invalidate a successful local save (notably during first-run setup).
-      if (options.throwOnError && !tauriSaveSucceeded) throw e;
+
+      // 3. 永続化失敗時: UIを以前の値へ戻す (Rollback)
+      setSettings((prev) => ({ ...prev, [key]: prevValue }));
+      if (key === "enable_discord_capture")
+        setEnableDiscordCapture(prevDiscordCapture);
+      if (key === "audio_device") setSelectedDevice(prevAudioDevice);
+      if (key === "discord_audio_device")
+        setSelectedDiscordDevice(prevDiscordAudioDevice);
+      if (key === "window") setSelectedWindow(prevWindow);
+
+      const errText = e instanceof Error ? e.message : String(e);
+      showToast(`設定「${key}」の保存に失敗しました: ${errText}`, "warning");
+
+      if (options.throwOnError) throw e;
     }
   };
 

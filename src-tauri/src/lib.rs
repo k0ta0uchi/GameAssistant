@@ -207,20 +207,14 @@ fn load_settings(state: State<AppState>) -> Value {
     settings::load_settings_file(&state.root_dir)
 }
 
+pub use settings::SaveSettingResponse;
+
 #[tauri::command]
-fn save_setting(state: State<AppState>, key: String, value: Value) -> Result<Value, String> {
-    if key == "preallocate_vram" {
-        if let Some(enable) = value.as_bool() {
-            let _ = state
-                .session_mgr
-                .asr_engine
-                .ws_client
-                .set_preallocate_vram(enable);
-            state
-                .log_mgr
-                .info("System", &format!("VRAM Preallocation updated: {}", enable));
-        }
-    }
+fn save_setting(
+    state: State<AppState>,
+    key: String,
+    value: Value,
+) -> Result<SaveSettingResponse, String> {
     if key == "gemma_terms_accepted" && value.as_bool() == Some(true) {
         // Keep the legacy boolean for compatibility, but only a complete
         // version/source/model-hash record authorizes Gemma setup and use.
@@ -241,15 +235,40 @@ fn save_setting(state: State<AppState>, key: String, value: Value) -> Result<Val
             Value::String(model_manager::GEMMA_TERMS_SOURCE.to_string()),
         )?;
         bootstrap::clear_setup_error(&state.root_dir)?;
-        Ok(settings::load_settings_file(&state.root_dir))
+        let settings = settings::load_settings_file(&state.root_dir);
+        Ok(SaveSettingResponse {
+            settings,
+            warning: None,
+        })
     } else {
-        settings::save_setting_key(&state.root_dir, &key, value)
+        settings::save_setting_with_worker_sync(&state.root_dir, &key, &value, |k, v| {
+            if k == "preallocate_vram" {
+                if let Some(enable) = v.as_bool() {
+                    if let Err(e) = state
+                        .session_mgr
+                        .asr_engine
+                        .ws_client
+                        .set_preallocate_vram(enable)
+                    {
+                        let warn_msg =
+                            format!("Failed to apply VRAM preallocation to ASR worker: {}", e);
+                        state.log_mgr.warn("System", &warn_msg);
+                        return Err(warn_msg);
+                    } else {
+                        state
+                            .log_mgr
+                            .info("System", &format!("VRAM Preallocation updated: {}", enable));
+                    }
+                }
+            }
+            Ok(())
+        })
     }
 }
 
 #[tauri::command]
 fn accept_gemma_terms(state: State<AppState>) -> Result<Value, String> {
-    save_setting(state, "gemma_terms_accepted".to_string(), Value::Bool(true))
+    save_setting(state, "gemma_terms_accepted".to_string(), Value::Bool(true)).map(|r| r.settings)
 }
 
 #[tauri::command]
