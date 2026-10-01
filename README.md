@@ -113,6 +113,22 @@ Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップ�
    scripts\test-rust.ps1 -Suite Memory -Runner Nextest
    ```
 
+6. **CI チェック (Continuous Integration):**
+   Pull Request および `main` ブランチへの push 時に GitHub Actions で以下の Rust CI チェックが自動実行されます。ローカルで同等の健全性確認を行う場合のコマンド：
+   ```powershell
+   # コードフォーマット検証
+   cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+   # コンパイル・型チェック
+   cargo check --manifest-path src-tauri/Cargo.toml
+
+   # 高速ユニットテスト
+   .\scripts\test-rust.ps1 -Suite Fast
+
+   # 全テストスイート実行
+   .\scripts\test-rust.ps1 -Suite Full
+   ```
+
 ---
 
 ## 🛠️ 技術スタック (Technology Stack)

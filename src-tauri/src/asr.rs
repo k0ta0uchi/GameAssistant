@@ -2889,6 +2889,16 @@ mod tests {
 
     #[test]
     fn platform_test_whisper_ws_client() {
+        let root_dir = crate::resolve_project_root();
+        let python_path = root_dir.join("venv").join("Scripts").join("python.exe");
+        if !python_path.exists() {
+            println!(
+                "Python venv not found at {:?}, skipping live ws client test",
+                python_path
+            );
+            return;
+        }
+
         let client = WhisperWsClient::new();
         let (tx, rx) = std::sync::mpsc::channel();
 

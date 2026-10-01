@@ -1,0 +1,64 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  rust-check:
+    name: Rust Build & Test (Windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      PROTOC: ${{ github.workspace }}/tools/protoc/bin/protoc.exe
+      PROTOC_INCLUDE: ${{ github.workspace }}/tools/protoc/include
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-01-14
+          components: rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+          shared-key: "windows-ci"
+          key: ${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', 'src-tauri/.cargo/config.toml') }}
+          cache-all-crates: "true"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.12"
+
+      - name: Prepare build prerequisites
+        run: |
+          # Tauri generate_context!() requires frontendDist (../dist) to exist
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          New-Item -ItemType File -Force -Path dist/index.html | Out-Null
+          # bootstrap.rs embeds src-tauri/resources/uv.exe (gitignored)
+          New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+          Copy-Item -Path (Get-Command uv).Source -Destination src-tauri/resources/uv.exe -Force
+
+      - name: Check code formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      - name: Cargo check
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Run Fast tests
+        run: .\scripts\test-rust.ps1 -Suite Fast
+
+      - name: Run Full tests
+        run: .\scripts\test-rust.ps1 -Suite Full
