@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::SystemTime;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
@@ -57,7 +57,7 @@ pub struct TwitchService {
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     log_mgr: Arc<Mutex<Option<Arc<crate::logger::LogManager>>>>,
     root_dir: Arc<Mutex<Option<std::path::PathBuf>>>,
-    pending_auth_states: Arc<Mutex<HashMap<String, Instant>>>,
+    pending_auth_states: Arc<Mutex<HashMap<String, SystemTime>>>,
 }
 
 impl Default for TwitchService {
@@ -99,10 +99,12 @@ impl TwitchService {
             .collect();
 
         let mut states = self.pending_auth_states.lock();
-        let now = Instant::now();
+        let now = SystemTime::now();
         // 期限切れのエントリをパージ
         states.retain(|_, created_at| {
-            now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS
+            now.duration_since(*created_at)
+                .map(|d| d.as_secs() < OAUTH_STATE_TTL_SECS)
+                .unwrap_or(false)
         });
         states.insert(state.clone(), now);
         state
@@ -134,15 +136,21 @@ impl TwitchService {
         };
 
         let mut states = self.pending_auth_states.lock();
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         // 期限切れのエントリをパージ
         states.retain(|_, created_at| {
-            now.duration_since(*created_at).as_secs() < OAUTH_STATE_TTL_SECS
+            now.duration_since(*created_at)
+                .map(|d| d.as_secs() < OAUTH_STATE_TTL_SECS)
+                .unwrap_or(false)
         });
 
         if let Some(created_at) = states.remove(state_val) {
-            if now.duration_since(created_at).as_secs() >= OAUTH_STATE_TTL_SECS {
+            let is_valid = now
+                .duration_since(created_at)
+                .map(|d| d.as_secs() < OAUTH_STATE_TTL_SECS)
+                .unwrap_or(false);
+            if !is_valid {
                 return Err("OAuth state has expired. Please restart authorization.".to_string());
             }
             Ok(())
@@ -152,7 +160,7 @@ impl TwitchService {
     }
 
     #[cfg(test)]
-    pub fn insert_pending_state_for_test(&self, state: String, created_at: Instant) {
+    pub fn insert_pending_state_for_test(&self, state: String, created_at: SystemTime) {
         let mut states = self.pending_auth_states.lock();
         states.insert(state, created_at);
     }
@@ -879,7 +887,8 @@ mod tests {
         let expired_state = "expired_test_state".to_string();
 
         // TTL(600s) より古いタイムスタンプで挿入
-        let past_time = Instant::now() - std::time::Duration::from_secs(OAUTH_STATE_TTL_SECS + 60);
+        let past_time =
+            SystemTime::now() - std::time::Duration::from_secs(OAUTH_STATE_TTL_SECS + 60);
         svc.insert_pending_state_for_test(expired_state.clone(), past_time);
 
         let res = svc.verify_and_consume_state(Some(&expired_state));
