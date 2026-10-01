@@ -2243,33 +2243,79 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
     };
   }, [isOpen]);
 
-  // progress snapshot so a multi-minute import is visible instead of looking
-  // like a hung memory manager.
+  // Native progress events are the primary channel for migration progress.
+  // Mount-time snapshot and post-listen refresh close the registration race,
+  // while a low-frequency (3000ms) fallback polling ensures the UI never hangs
+  // even if an event is dropped.
   useEffect(() => {
     if (!isOpen) {
       setMigrationStatus(null);
       return;
     }
 
-    let cancelled = false;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let pollTimer: number | null = null;
+
+    const stopFallbackPoll = () => {
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+    };
+
+    const applyStatus = (status: MemoryMigrationStatus | null) => {
+      if (!disposed && status) {
+        setMigrationStatus(status);
+        if (status.status === "completed" || status.status === "error") {
+          stopFallbackPoll();
+        }
+      }
+    };
+
     const refreshMigrationStatus = async () => {
       try {
         const raw = await invoke("get_lance_migration_status");
         const status = normalizeMemoryMigrationStatus(raw);
-        if (!cancelled && status) {
-          setMigrationStatus(status);
-        }
+        applyStatus(status);
       } catch {
         // Older portable builds do not expose this advisory command. The
         // regular memory query still determines success or failure.
       }
     };
 
+    // 1. Initial snapshot on modal open
     void refreshMigrationStatus();
-    const timer = window.setInterval(refreshMigrationStatus, 500);
+
+    // 2. Primary event-driven progress updates
+    void listen(
+      "memory-migration-progress",
+      (event: { payload: unknown }) => {
+        if (disposed) return;
+        const status = normalizeMemoryMigrationStatus(event.payload);
+        applyStatus(status);
+      },
+    )
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+        } else {
+          unlisten = dispose;
+          // 3. Post-listen refresh to eliminate listener registration race
+          void refreshMigrationStatus();
+        }
+      })
+      .catch(() => {
+        // Older portable builds do not expose this advisory event.
+      });
+
+    // 4. Low-frequency fallback polling (3000ms) replaces busy 500ms polling
+    pollTimer = window.setInterval(refreshMigrationStatus, 3000);
+
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      disposed = true;
+      unlisten?.();
+      stopFallbackPoll();
     };
   }, [isOpen]);
 

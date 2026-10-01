@@ -1488,6 +1488,7 @@ pub fn run() {
     ));
     let model_mgr = Arc::new(ModelManager::new());
     let migration_progress = Arc::new(lance_memory::MemoryMigrationProgress::default());
+    let setup_migration_progress = migration_progress.clone();
 
     let app_state = AppState {
         root_dir: root_dir.clone(),
@@ -1588,6 +1589,10 @@ pub fn run() {
         ])
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            let mig_app_handle = app_handle.clone();
+            setup_migration_progress.set_listener(move |status| {
+                let _ = mig_app_handle.emit("memory-migration-progress", status);
+            });
             log_mgr.set_app_handle(app_handle.clone());
             session_mgr
                 .local_summary()

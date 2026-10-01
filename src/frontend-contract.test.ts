@@ -2747,6 +2747,38 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// Issue #10: MemoryModal migration status uses event-driven progress with low-frequency fallback and unlistens on unmount
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+  });
+  await settleEffects();
+
+  // Verify that the native event listener was registered
+  assert.ok(
+    harness.registrations.includes("memory-migration-progress"),
+    "memory-migration-progress event listener should be registered on mount",
+  );
+  // Verify snapshot invoke was issued on open
+  assert.ok(
+    harness.invocations.some((c) => c.command === "get_lance_migration_status"),
+    "get_lance_migration_status should be invoked on mount",
+  );
+
+  // Unmount and verify cleanup
+  renderer.unmount();
+  await settleEffects();
+  assert.ok(
+    harness.unregistered.includes("plugin:event|unlisten"),
+    "memory-migration-progress listener should be released on unmount",
+  );
+}
+
 // Let any deferred setup effects settle while the final Tauri harness is still
 // installed, keeping npm test output deterministic.
 makeHarness();

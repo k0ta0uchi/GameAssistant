@@ -67,9 +67,18 @@ impl Default for MemoryMigrationStatus {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MemoryMigrationProgress {
     status: Mutex<MemoryMigrationStatus>,
+    listener: Mutex<Option<Arc<dyn Fn(&MemoryMigrationStatus) + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for MemoryMigrationProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryMigrationProgress")
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
 }
 
 pub type MigrationProgressHandle = Arc<MemoryMigrationProgress>;
@@ -82,49 +91,86 @@ impl MemoryMigrationProgress {
             .clone()
     }
 
-    fn begin(&self, total: usize) {
-        let mut status = self
-            .status
+    pub fn set_listener<F>(&self, listener: F)
+    where
+        F: Fn(&MemoryMigrationStatus) + Send + Sync + 'static,
+    {
+        *self
+            .listener
             .lock()
-            .expect("memory migration progress mutex poisoned");
-        status.status = "running".to_string();
-        status.processed = 0;
-        status.total = Some(total);
-        status.message = "Migrating legacy LanceDB memories...".to_string();
-        status.error = None;
+            .expect("memory migration listener mutex poisoned") = Some(Arc::new(listener));
+    }
+
+    fn notify(&self, status: &MemoryMigrationStatus) {
+        let listener = self
+            .listener
+            .lock()
+            .expect("memory migration listener mutex poisoned")
+            .clone();
+        if let Some(cb) = listener {
+            cb(status);
+        }
+    }
+
+    fn begin(&self, total: usize) {
+        let snapshot = {
+            let mut status = self
+                .status
+                .lock()
+                .expect("memory migration progress mutex poisoned");
+            status.status = "running".to_string();
+            status.processed = 0;
+            status.total = Some(total);
+            status.message = "Migrating legacy LanceDB memories...".to_string();
+            status.error = None;
+            status.clone()
+        };
+        self.notify(&snapshot);
     }
 
     fn update(&self, processed: usize) {
-        let mut status = self
-            .status
-            .lock()
-            .expect("memory migration progress mutex poisoned");
-        status.processed = status
-            .total
-            .map(|total| processed.min(total))
-            .unwrap_or(processed);
+        let snapshot = {
+            let mut status = self
+                .status
+                .lock()
+                .expect("memory migration progress mutex poisoned");
+            status.processed = status
+                .total
+                .map(|total| processed.min(total))
+                .unwrap_or(processed);
+            status.clone()
+        };
+        self.notify(&snapshot);
     }
 
     fn complete(&self, total: usize) {
-        let mut status = self
-            .status
-            .lock()
-            .expect("memory migration progress mutex poisoned");
-        status.status = "completed".to_string();
-        status.processed = total;
-        status.total = Some(total);
-        status.message = "Legacy LanceDB memories migrated.".to_string();
-        status.error = None;
+        let snapshot = {
+            let mut status = self
+                .status
+                .lock()
+                .expect("memory migration progress mutex poisoned");
+            status.status = "completed".to_string();
+            status.processed = total;
+            status.total = Some(total);
+            status.message = "Legacy LanceDB memories migrated.".to_string();
+            status.error = None;
+            status.clone()
+        };
+        self.notify(&snapshot);
     }
 
     fn fail(&self, error: &str) {
-        let mut status = self
-            .status
-            .lock()
-            .expect("memory migration progress mutex poisoned");
-        status.status = "error".to_string();
-        status.message = "Legacy LanceDB migration failed.".to_string();
-        status.error = Some(error.to_string());
+        let snapshot = {
+            let mut status = self
+                .status
+                .lock()
+                .expect("memory migration progress mutex poisoned");
+            status.status = "error".to_string();
+            status.message = "Legacy LanceDB migration failed.".to_string();
+            status.error = Some(error.to_string());
+            status.clone()
+        };
+        self.notify(&snapshot);
     }
 }
 
@@ -3779,6 +3825,37 @@ mod tests {
         let failed = progress.snapshot();
         assert_eq!(failed.status, "error");
         assert_eq!(failed.error.as_deref(), Some("test failure"));
+    }
+
+    #[test]
+    fn migration_progress_notifies_listener_on_transitions() {
+        let progress = MemoryMigrationProgress::default();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = events.clone();
+
+        progress.set_listener(move |status| {
+            events_clone.lock().unwrap().push(status.clone());
+        });
+
+        progress.begin(5);
+        progress.update(2);
+        progress.complete(5);
+        progress.fail("fail test");
+
+        let recorded = events.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 4);
+        assert_eq!(recorded[0].status, "running");
+        assert_eq!(recorded[0].processed, 0);
+        assert_eq!(recorded[0].total, Some(5));
+
+        assert_eq!(recorded[1].status, "running");
+        assert_eq!(recorded[1].processed, 2);
+
+        assert_eq!(recorded[2].status, "completed");
+        assert_eq!(recorded[2].processed, 5);
+
+        assert_eq!(recorded[3].status, "error");
+        assert_eq!(recorded[3].error.as_deref(), Some("fail test"));
     }
 
     #[test]
