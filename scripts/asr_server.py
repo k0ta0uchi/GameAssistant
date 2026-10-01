@@ -537,6 +537,7 @@ def new_stream_state():
         # Audio Buffers: full utterance PCM for complete final transcription
         "full_utterance_pcm": np.array([], dtype=np.float32),
         "pre_roll_pcm": np.array([], dtype=np.float32),
+        "vad_pending_pcm": np.array([], dtype=np.float32),
         "audio_buffer": np.array([], dtype=np.float32),
         "last_partial_text": "",
         "last_partial_pcm_len": 0,
@@ -559,6 +560,8 @@ def new_stream_state():
 
 def reset_stream_state(state):
     state["full_utterance_pcm"] = np.array([], dtype=np.float32)
+    state["pre_roll_pcm"] = np.array([], dtype=np.float32)
+    state["vad_pending_pcm"] = np.array([], dtype=np.float32)
     state["audio_buffer"] = np.array([], dtype=np.float32)
     state["last_partial_text"] = ""
     state["last_partial_pcm_len"] = 0
@@ -590,12 +593,20 @@ def update_vad_and_buffers(
     if monotonic_time is None:
         monotonic_time = time.monotonic()
 
-    # 20ms フレームごとに RMS を計算して VAD 状態を更新
+    # 前回の20ms未満の端数PCMと結合して320 samples (20ms) 単位でVAD判定を実行
+    pending = state.get("vad_pending_pcm")
+    if pending is not None and len(pending) > 0:
+        combined = np.concatenate([pending, samples])
+    else:
+        combined = samples
+
     frame_size = VAD_FRAME_SIZE
-    for i in range(0, len(samples), frame_size):
-        frame = samples[i : i + frame_size]
-        if len(frame) < frame_size:
-            break
+    num_frames = len(combined) // frame_size
+    consumed_samples = num_frames * frame_size
+
+    # 20ms フレームごとに RMS を計算して VAD 状態を更新
+    for i in range(num_frames):
+        frame = combined[i * frame_size : (i + 1) * frame_size]
         rms = float(np.sqrt(np.mean(frame**2)))
 
         if rms >= VAD_ENERGY_THRESHOLD:
@@ -617,7 +628,10 @@ def update_vad_and_buffers(
             state["silence_frame_count"] += 1
             state["speech_frame_count"] = 0
 
-    # PCM 蓄積
+    # 20ms未満の残余サンプルを次回へ持ち越す（任意のchunk boundary耐性を保証）
+    state["vad_pending_pcm"] = combined[consumed_samples:]
+
+    # PCM 蓄積 (全サンプルを確実にバッファへ蓄積)
     if state["is_speaking"]:
         state["full_utterance_pcm"] = np.concatenate(
             [state["full_utterance_pcm"], samples]

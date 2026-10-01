@@ -336,6 +336,111 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
             f"Expected exactly 1 finalization, but got {finalized_count} (prematurely finalized during pause)",
         )
 
+    def test_vad_handles_10ms_sub_frame_chunks_without_dropping(self):
+        """Verify 160 samples (10ms) packets carry over in vad_pending_pcm and trigger VAD."""
+        sample_rate = 16000
+        state = self.new_stream_state()
+
+        # Send 10ms chunks of loud speech (160 samples each)
+        speech_10ms = 0.1 * np.sin(
+            2 * np.pi * 300 * np.linspace(0, 0.01, 160, dtype=np.float32)
+        )
+
+        now = 0.0
+        # Chunk 1: 160 samples -> 0 complete frames (needs 320), 160 pending
+        self.update_vad_and_buffers(state, speech_10ms, now=0.01, sample_rate=sample_rate)
+        self.assertFalse(state["is_speaking"])
+        self.assertEqual(len(state["vad_pending_pcm"]), 160)
+
+        # Chunk 2: +160 samples -> 320 total -> 1 frame processed, 0 pending
+        self.update_vad_and_buffers(state, speech_10ms, now=0.02, sample_rate=sample_rate)
+        self.assertEqual(state["speech_frame_count"], 1)
+        self.assertEqual(len(state["vad_pending_pcm"]), 0)
+
+        # Chunks 3-6: 4 more 10ms chunks -> 2 more frames processed -> speech_frame_count reaches 3!
+        for i in range(4):
+            self.update_vad_and_buffers(
+                state, speech_10ms, now=0.03 + i * 0.01, sample_rate=sample_rate
+            )
+
+        self.assertTrue(
+            state["is_speaking"], "VAD failed to detect speech across 10ms chunk boundaries!"
+        )
+        self.assertGreaterEqual(state["speech_frame_count"], 3)
+
+    def test_chunk_boundary_invariance_for_speech_detection(self):
+        """Verify identical speech audio produces identical VAD start/end detection regardless of chunk boundaries:
+        - 640 samples (40ms)
+        - 320 samples (20ms)
+        - 160 samples (10ms)
+        - uneven fractional chunks (simulating 44.1kHz -> 16kHz resampling)
+        """
+        sample_rate = 16000
+        # Audio: 0.3s silence + 1.2s speech + 0.8s silence
+        pre = np.zeros(int(sample_rate * 0.3), dtype=np.float32)
+        t = np.linspace(0, 1.2, int(sample_rate * 1.2), dtype=np.float32)
+        speech = 0.1 * np.sin(2 * np.pi * 300 * t)
+        post = np.zeros(int(sample_rate * 0.8), dtype=np.float32)
+        full_audio = np.concatenate([pre, speech, post])
+
+        # Define chunk partitioning strategies
+        chunk_patterns = {
+            "40ms_fixed": [640] * (len(full_audio) // 640),
+            "20ms_fixed": [320] * (len(full_audio) // 320),
+            "10ms_fixed": [160] * (len(full_audio) // 160),
+            "fractional_uneven": [],
+        }
+        for key in ("40ms_fixed", "20ms_fixed", "10ms_fixed"):
+            rem = len(full_audio) - sum(chunk_patterns[key])
+            if rem > 0:
+                chunk_patterns[key].append(rem)
+
+        # Fractional uneven pattern (simulating variable callback sizes)
+        remaining = len(full_audio)
+        sizes = [145, 186, 93, 204, 311, 73, 160, 480]
+        idx = 0
+        while remaining > 0:
+            sz = min(remaining, sizes[idx % len(sizes)])
+            chunk_patterns["fractional_uneven"].append(sz)
+            remaining -= sz
+            idx += 1
+
+        results = {}
+        for pattern_name, chunks in chunk_patterns.items():
+            state = self.new_stream_state()
+            now = 0.0
+            offset = 0
+            finalized_pcm = None
+
+            for sz in chunks:
+                samples = full_audio[offset : offset + sz]
+                offset += sz
+                now += sz / sample_rate
+
+                self.update_vad_and_buffers(state, samples, now, sample_rate)
+
+                if state["is_speaking"] and state["last_voice_at"] is not None:
+                    if (now - state["last_voice_at"]) >= 0.65:
+                        finalized_pcm = state["full_utterance_pcm"].copy()
+                        state["is_speaking"] = False
+                        break
+
+            self.assertIsNotNone(
+                finalized_pcm,
+                f"Pattern {pattern_name} failed to finalize speech utterance",
+            )
+            results[pattern_name] = len(finalized_pcm)
+
+        base_len = results["20ms_fixed"]
+        for pattern_name, pcm_len in results.items():
+            # Allow minor packet boundary quantization jitter (<= 2 chunks / 80ms)
+            self.assertAlmostEqual(
+                pcm_len,
+                base_len,
+                delta=int(sample_rate * 0.10),
+                msg=f"Pattern {pattern_name} produced unexpected PCM length {pcm_len} vs {base_len}",
+            )
+
     async def test_asr_handler_processes_binary_audio_without_name_errors(self):
         """Verify real asr_handler coroutine processes binary PCM without NameError or runtime failure."""
         pcm_chunk = np.zeros(640, dtype=np.float32).tobytes()
@@ -356,6 +461,20 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
         sent_statuses = [json.loads(m).get("status") for m in ws.sent if "status" in json.loads(m)]
 
         self.assertIn("device_status", sent_types)
+        self.assertIn("pong", sent_statuses)
+
+    async def test_asr_handler_processes_10ms_sub_frame_chunks(self):
+        """Verify real asr_handler coroutine handles 10ms (160 samples) chunks without failure."""
+        pcm_10ms = np.zeros(160, dtype=np.float32).tobytes()
+
+        # Stream multiple 10ms packets
+        messages = [pcm_10ms for _ in range(8)]
+        messages.append(json.dumps({"cmd": "ping"}))
+
+        ws = MockWebSocket(messages)
+        await asyncio.wait_for(self.asr_handler(ws), timeout=3.0)
+
+        sent_statuses = [json.loads(m).get("status") for m in ws.sent if "status" in json.loads(m)]
         self.assertIn("pong", sent_statuses)
 
 
