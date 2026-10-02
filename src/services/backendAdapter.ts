@@ -235,7 +235,7 @@ export async function captureWindowPreviewApi(
     const preview = await invoke<string | null>("capture_window_preview", {
       title,
     });
-    if (preview) return preview;
+    return preview;
   }
   const res = await fetch(`${API_BASE}/api/capture/preview`, {
     method: "POST",

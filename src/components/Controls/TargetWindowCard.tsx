@@ -61,6 +61,8 @@ export const TargetWindowCard: React.FC<TargetWindowCardProps> = ({
           onChange={(e) => onWindowChange(e.target.value)}
           className="w-full text-xs linear-input py-1.5 px-2 bg-[#0f1011] text-[#d0d6e0] cursor-pointer truncate"
         >
+          <option value="">対象ウィンドウを選択</option>
+          {selectedWindow && !windows.includes(selectedWindow) && <option value={selectedWindow}>{selectedWindow} (Unavailable)</option>}
           {windows.length === 0 ? (
             <option value="" className="bg-[#161718] text-[#8a8f98]">(No active windows)</option>
           ) : (
@@ -89,7 +91,7 @@ export const TargetWindowCard: React.FC<TargetWindowCardProps> = ({
       ) : (
         <div className="rounded-[6px] border border-[#23252a] border-dashed aspect-video bg-[#08090a]/50 flex flex-col items-center justify-center text-[#62666d] text-[11px] gap-1">
           <Eye className="w-4 h-4 opacity-50" />
-          <span>No Preview Captured</span>
+          <span>CaptureUnavailable / No Preview</span>
         </div>
       )}
     </div>

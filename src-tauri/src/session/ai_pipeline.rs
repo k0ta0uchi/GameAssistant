@@ -373,7 +373,7 @@ impl SessionManager {
             .unwrap_or(true);
 
         // ゲーム画面のキャプチャ（選択中ウィンドウを優先、なければプライマリスクリーン）
-        let screen_b64 = if use_image {
+        let mut screen_b64 = if use_image {
             let win_name = st
                 .get("window")
                 .and_then(|v| v.as_str())
@@ -381,19 +381,7 @@ impl SessionManager {
                 .to_string();
             let log_mgr = self.log_mgr.clone();
             let capture = tokio::task::spawn_blocking(move || {
-                if !win_name.is_empty() {
-                    log_mgr.info(
-                        "Visual",
-                        &format!("Capturing target window: '{}'", win_name),
-                    );
-                    window_capture::capture_window_base64(&win_name).or_else(|| {
-                        log_mgr.warn("Visual", "Window capture fallback to primary screen");
-                        window_capture::capture_primary_screen_base64()
-                    })
-                } else {
-                    log_mgr.info("Visual", "Capturing primary screen...");
-                    window_capture::capture_primary_screen_base64()
-                }
+                window_capture::capture_window_with_log(&win_name, Some(&log_mgr))
             });
             match tokio::time::timeout(INPUT_SCREEN_CAPTURE_TIMEOUT, capture).await {
                 Ok(Ok(image)) => image,
@@ -436,6 +424,9 @@ impl SessionManager {
             });
         }
 
+        if crate::settings::load_settings_file(&self.root_dir).get("window") != st.get("window") {
+            screen_b64 = None;
+        }
         // プロンプト構築
         let full_system_instruction =
             format!("{}{}{}", system_prompt, memory_context, search_context);

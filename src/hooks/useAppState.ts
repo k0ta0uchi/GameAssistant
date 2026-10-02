@@ -106,6 +106,7 @@ export function useAppState() {
     setVram: sessionController.setVram,
     setRam: sessionController.setRam,
     setCommentaryTimer: sessionController.setCommentaryTimer,
+    selectedWindow: String(settingsState.settings.window || ""),
     setPreviewImage: audioDevices.setPreviewImage,
     handleAsrReady: setupState.handleAsrReady,
     handleAsrWarmupFailed: setupState.handleAsrWarmupFailed,
@@ -129,6 +130,10 @@ export function useAppState() {
   } = audioDevices;
   const { fetchModels } = modelStatus;
   const { fetchLogs } = tauriEvents;
+
+  useEffect(() => {
+    setSelectedWindow(String(settingsState.settings.window || ""));
+  }, [settingsState.settings.window, setSelectedWindow]);
 
   // Initial full data load
   const fetchAllData = useCallback(async () => {
