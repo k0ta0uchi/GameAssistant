@@ -31,6 +31,17 @@ pub fn load_settings_file(root_dir: &Path) -> Value {
     serde_json::json!({})
 }
 
+/// settings.json から whisper_device を取得する（デフォルトは "cuda"）。
+pub fn get_whisper_device(root_dir: &Path) -> String {
+    let settings = load_settings_file(root_dir);
+    if let Some(dev) = settings.get("whisper_device").and_then(|v| v.as_str()) {
+        if dev.trim().eq_ignore_ascii_case("cpu") {
+            return "cpu".to_string();
+        }
+    }
+    "cuda".to_string()
+}
+
 /// フロントエンドに返却するための安全化された設定 snapshot をロードする。
 /// - 初回や未マイグレーション時は自動的に平文クレデンシャルを OS credential store (DPAPI) へ移行
 /// - 平文シークレットは完全に除去
@@ -462,6 +473,42 @@ mod tests {
         );
 
         // クリーンアップ
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_get_whisper_device() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("ga_test_whisper_dev_{}", uuid::Uuid::new_v4()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        // 未設定時は "cuda"
+        assert_eq!(get_whisper_device(&temp_dir), "cuda");
+
+        // "cpu" 設定時
+        let _ = save_setting_key(
+            &temp_dir,
+            "whisper_device",
+            serde_json::Value::String("cpu".to_string()),
+        );
+        assert_eq!(get_whisper_device(&temp_dir), "cpu");
+
+        // 大文字 "CPU" 設定時
+        let _ = save_setting_key(
+            &temp_dir,
+            "whisper_device",
+            serde_json::Value::String("CPU".to_string()),
+        );
+        assert_eq!(get_whisper_device(&temp_dir), "cpu");
+
+        // "cuda" 設定時
+        let _ = save_setting_key(
+            &temp_dir,
+            "whisper_device",
+            serde_json::Value::String("cuda".to_string()),
+        );
+        assert_eq!(get_whisper_device(&temp_dir), "cuda");
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }

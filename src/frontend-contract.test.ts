@@ -3105,6 +3105,78 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// Manual ASR device controls expose the persisted selection and save through settings.
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+  const updates: Array<[string, unknown]> = [];
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(SettingsModal, {
+      isOpen: true, onClose: () => {}, initialTab: "engines",
+      settings: { whisper_device: "cpu" }, discordDevices: [],
+      onUpdateSetting: async (key: string, value: unknown) => { updates.push([key, value]); },
+    } as any));
+  });
+  const gpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper GPU");
+  const cpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper CPU");
+  assert.ok(gpu && cpu, "Whisper GPU/CPU controls must render in Engines");
+  const text = JSON.stringify(renderer.toJSON());
+  for (const label of ["ASR Engine (Whisper Model)", "Preallocate VRAM", "Auto-Restart Slow Whisper", "起動時にWhisperモデルを事前ロード"]) {
+    assert.ok(text.includes(label), `${label} must be grouped in Engines`);
+  }
+  assert.equal(text.includes("Enable Auto Commentary"), false);
+  assert.equal(cpu!.props["aria-pressed"], true);
+  await act(async () => { await gpu!.props.onClick(); });
+  assert.deepEqual(updates, [["whisper_device", "cuda"]]);
+  assert.ok(harness.invocations.some(c => c.command === "restart_whisper"), "Device click must await restart/warmup");
+  renderer.unmount();
+  await settleEffects();
+}
+
+// Keep controls disabled until the backend warmup promise resolves, and allow retry on failure.
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+  const original = harness.invoke.bind(harness);
+  let finish!: () => void;
+  const warmup = new Promise<void>(resolve => { finish = resolve; });
+  let saved = false;
+  let restarts = 0;
+  harness.invoke = async (command, args) => {
+    if (command === "get_whisper_status") return {device: "cpu", ready: true};
+    if (command === "restart_whisper") {
+      assert.ok(saved, "Save must complete before restart");
+      restarts++;
+      if (restarts > 1) throw new Error("warmup failed");
+      await warmup;
+      return "ready";
+    }
+    return original(command, args);
+  };
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(SettingsModal, {isOpen: true, onClose: () => {}, initialTab: "engines",
+      settings: {whisper_device: "cuda"}, discordDevices: [],
+      onUpdateSetting: async () => { await Promise.resolve(); saved = true; },
+    } as any));
+  });
+  const button = () => renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper CPU")!;
+  let pending!: Promise<void>;
+  await act(async () => { pending = button().props.onClick(); await Promise.resolve(); });
+  assert.equal(button().props.disabled, true);
+  await act(async () => { await button().props.onClick(); });
+  assert.equal(restarts, 1);
+  await act(async () => { finish(); await pending; });
+  assert.equal(button().props.disabled, false);
+  assert.ok(JSON.stringify(renderer.toJSON()).includes("Fallback"));
+  await act(async () => { await button().props.onClick(); });
+  assert.ok(JSON.stringify(renderer.toJSON()).includes("warmup failed"));
+  assert.equal(button().props.disabled, false);
+  renderer.unmount();
+  await settleEffects();
+}
+
 // Let any deferred setup effects settle while the final Tauri harness is still
 // installed, keeping npm test output deterministic.
 makeHarness();

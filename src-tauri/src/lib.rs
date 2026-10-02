@@ -734,23 +734,31 @@ async fn warmup_asr(app: AppHandle, state: State<'_, AppState>) -> Result<String
 }
 
 #[tauri::command]
+fn get_whisper_status(state: State<AppState>) -> serde_json::Value {
+    let client = &state.session_mgr.asr_engine.ws_client;
+    serde_json::json!({"device": client.current_device.lock().clone(), "ready": client.is_ready()})
+}
+
+#[tauri::command]
 async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
     bootstrap::runtime_is_ready(&state.root_dir)
         .map_err(|error| format!("Whisper restart blocked: {}", error))?;
-    state
-        .log_mgr
-        .info("ASR", "Restarting Whisper GPU worker...");
+    let device = settings::get_whisper_device(&state.root_dir);
+    state.log_mgr.info(
+        "ASR",
+        &format!("Restarting Whisper worker requested_device={}", device),
+    );
     state
         .session_mgr
         .asr_engine
         .ws_client
-        .restart_with_device(Some("cuda".to_string()))
+        .restart_with_device(Some(device))
         .await?;
     state.log_mgr.info(
         "ASR",
-        "Whisper GPU worker restarted and warmed up successfully.",
+        "Whisper worker restarted and warmed up successfully.",
     );
-    Ok("Whisper GPU worker restarted successfully".to_string())
+    Ok("Whisper worker restarted successfully".to_string())
 }
 
 // --- モデル管理 (Models Manager) ---
@@ -1486,6 +1494,8 @@ pub fn run() {
         tts_mgr.clone(),
         log_mgr.clone(),
     ));
+    *session_mgr.asr_engine.ws_client.forced_device.lock() =
+        Some(settings::get_whisper_device(&root_dir));
     let model_mgr = Arc::new(ModelManager::new());
     let migration_progress = Arc::new(lance_memory::MemoryMigrationProgress::default());
     let setup_migration_progress = migration_progress.clone();
@@ -1569,6 +1579,7 @@ pub fn run() {
             gemini_list_models,
             warmup_asr,
             restart_whisper,
+            get_whisper_status,
             get_models_status,
             download_model,
             cancel_download_model,

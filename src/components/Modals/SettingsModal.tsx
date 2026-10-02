@@ -115,6 +115,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   initialTab = "engines",
   onRefreshModelsStatus,
 }) => {
+  const switchBusy = useRef(false);
+  const [switching, setSwitching] = useState(false);
+  const [switchMessage, setSwitchMessage] = useState("");
+  const [workerStatus, setWorkerStatus] = useState<{device: string; ready: boolean} | null>(null);
+  const refreshWhisperStatus = async () => {
+    try { setWorkerStatus(await invoke("get_whisper_status")); }
+    catch { setWorkerStatus(null); }
+  };
+  useEffect(() => {
+    if (!isOpen) return;
+    void refreshWhisperStatus();
+    const timer = setInterval(() => void refreshWhisperStatus(), 1000);
+    return () => clearInterval(timer);
+  }, [isOpen]);
+  const switchWhisper = async (device: "cpu" | "cuda") => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setSwitching(true);
+    setSwitchMessage(`Switching to ${device === "cpu" ? "CPU" : "GPU"}...`);
+    try {
+      await onUpdateSetting("whisper_device", device, { throwOnError: true });
+      setSwitchMessage("Restarting / Warming up...");
+      await invoke("restart_whisper");
+      await refreshWhisperStatus();
+      setSwitchMessage("Warmup complete");
+    } catch (error) {
+      await refreshWhisperStatus();
+      setSwitchMessage(`Switch failed: ${String(error)} — 再試行できます`);
+    } finally {
+      switchBusy.current = false;
+      setSwitching(false);
+    }
+  };
   const [activeTab, setActiveTab] = useState<
     "engines" | "models" | "prompts" | "twitch" | "preferences" | "blog_skills"
   >(initialTab);
@@ -650,6 +683,63 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   className="w-4 h-4 rounded border-[#383b3f] bg-[#0f1011] text-[#e4f222] focus:ring-0 cursor-pointer"
                 />
               </div>
+
+              <div className="p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a]">
+                <div className="text-white font-medium">Whisper 実行モード</div>
+                <div className="flex gap-2 mt-2">
+                  {(["cuda", "cpu"] as const).map(device => (
+                    <button key={device} aria-label={`Whisper ${device === "cuda" ? "GPU" : "CPU"}`}
+                      aria-pressed={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device}
+                      className={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device ? "linear-btn-primary px-3 py-1" : "linear-btn-ghost px-3 py-1"}
+                      disabled={switching}
+                      onClick={() => switchWhisper(device)}>
+                      {device === "cuda" ? "GPU" : "CPU"}
+                    </button>
+                  ))}
+                </div>
+                <p role="status" className="text-[11px] text-[#8a8f98] mt-2">
+                  Selected: {settings.whisper_device === "cpu" ? "CPU" : "GPU"} / Running: {workerStatus?.ready ? (workerStatus.device === "cpu" ? `CPU${settings.whisper_device !== "cpu" ? " (Fallback)" : ""} Ready` : "GPU Ready") : "Unavailable / Warming up"}
+                  {switchMessage && <span className="block">{switchMessage}</span>}
+                </p>
+              </div>
+
+              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
+                <div>
+                  <div className="text-white font-medium">Preallocate VRAM</div>
+                  <div className="text-[11px] text-[#62666d]">
+                    PyTorch の VRAM を事前割り当てしてメモリ断片化を抑制します
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings.preallocate_vram)}
+                  onChange={(e) =>
+                    onUpdateSetting("preallocate_vram", e.target.checked)
+                  }
+                  className="w-4 h-4 rounded accent-[#e4f222]"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
+                <div>
+                  <div className="text-white font-medium">
+                    Auto-Restart Slow Whisper (遅延自動検知＆再起動)
+                  </div>
+                  <div className="text-[11px] text-[#62666d]">
+                    VRAM 蓄積による Whisper の推論遅延（&gt;
+                    2.5秒）を検知した際、GPU ワーカーを自動再起動して VRAM
+                    と速度を回復します（手動/自動切り替え可能）
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.auto_restart_whisper !== false}
+                  onChange={(e) =>
+                    onUpdateSetting("auto_restart_whisper", e.target.checked)
+                  }
+                  className="w-4 h-4 rounded accent-[#e4f222]"
+                />
+              </label>
 
               {/* Wake Word Engine */}
               <div className="flex flex-col gap-1.5">
@@ -1280,44 +1370,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 )}
               </div>
-
-              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
-                <div>
-                  <div className="text-white font-medium">Preallocate VRAM</div>
-                  <div className="text-[11px] text-[#62666d]">
-                    PyTorch の VRAM を事前割り当てしてメモリ断片化を抑制します
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={Boolean(settings.preallocate_vram)}
-                  onChange={(e) =>
-                    onUpdateSetting("preallocate_vram", e.target.checked)
-                  }
-                  className="w-4 h-4 rounded accent-[#e4f222]"
-                />
-              </label>
-
-              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
-                <div>
-                  <div className="text-white font-medium">
-                    Auto-Restart Slow Whisper (遅延自動検知＆再起動)
-                  </div>
-                  <div className="text-[11px] text-[#62666d]">
-                    VRAM 蓄積による Whisper の推論遅延（&gt;
-                    2.5秒）を検知した際、GPU ワーカーを自動再起動して VRAM
-                    と速度を回復します（手動/自動切り替え可能）
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={settings.auto_restart_whisper !== false}
-                  onChange={(e) =>
-                    onUpdateSetting("auto_restart_whisper", e.target.checked)
-                  }
-                  className="w-4 h-4 rounded accent-[#e4f222]"
-                />
-              </label>
 
               {/* Auto Commentary 設定グループ */}
               <div className="flex flex-col gap-2.5 p-3 rounded-[6px] bg-[#08090a] border border-[#23252a]">
