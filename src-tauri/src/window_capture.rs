@@ -208,16 +208,32 @@ pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> boo
 
     false
 }
-fn resolve_identity(
-    target: &WindowIdentity,
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TargetBinding {
+    pub base_title: String,
+    pub identity: WindowIdentity,
+}
+
+pub(crate) fn is_title_compatible_with_binding(
+    binding: &TargetBinding,
+    candidate_title: &str,
+) -> bool {
+    candidate_title.eq_ignore_ascii_case(&binding.base_title)
+        || candidate_title.eq_ignore_ascii_case(&binding.identity.title)
+        || title_compatible(&binding.base_title, candidate_title)
+        || title_compatible(&binding.identity.title, candidate_title)
+}
+
+fn resolve_binding(
+    binding: &TargetBinding,
     candidates: &[WindowIdentity],
 ) -> Option<WindowIdentity> {
     // 1. HWND 一致時: 同一プロセス・属性かつタイトルが互換であることを必須とする。
     // HWNDが同一プロセス内で再利用されて別用途のウィンドウになった場合は拒否する。
     if let Some(found) = candidates.iter().find(|w| {
-        w.hwnd == target.hwnd
-            && same_process_and_window_type(target, w)
-            && title_compatible(&target.title, &w.title)
+        w.hwnd == binding.identity.hwnd
+            && same_process_and_window_type(&binding.identity, w)
+            && is_title_compatible_with_binding(binding, &w.title)
     }) {
         return Some(found.clone());
     }
@@ -225,12 +241,15 @@ fn resolve_identity(
     // 同一プロセス・同一属性の候補を抽出
     let compatible: Vec<_> = candidates
         .iter()
-        .filter(|w| same_process_and_window_type(target, w))
+        .filter(|w| same_process_and_window_type(&binding.identity, w))
         .collect();
-    // 2a. タイトル完全一致が一意にあれば採用
+    // 2a. base_title または last title に完全一致が一意にあれば採用
     let exact: Vec<_> = compatible
         .iter()
-        .filter(|w| w.title == target.title)
+        .filter(|w| {
+            w.title.eq_ignore_ascii_case(&binding.base_title)
+                || w.title.eq_ignore_ascii_case(&binding.identity.title)
+        })
         .collect();
     if exact.len() == 1 {
         return Some((**exact[0]).clone());
@@ -238,7 +257,7 @@ fn resolve_identity(
     // 2b. タイトル互換（ロード中などのタイトル変化）の候補を探す
     let title_matches: Vec<_> = compatible
         .iter()
-        .filter(|w| title_compatible(&target.title, &w.title))
+        .filter(|w| is_title_compatible_with_binding(binding, &w.title))
         .collect();
     if title_matches.len() == 1 {
         return Some((**title_matches[0]).clone());
@@ -246,7 +265,19 @@ fn resolve_identity(
     // 候補が複数（曖昧）または互換タイトルがない場合は別ウィンドウ誤認を防ぐため None
     None
 }
-static TARGETS: OnceLock<Mutex<HashMap<String, WindowIdentity>>> = OnceLock::new();
+
+fn resolve_identity(
+    target: &WindowIdentity,
+    candidates: &[WindowIdentity],
+) -> Option<WindowIdentity> {
+    let binding = TargetBinding {
+        base_title: target.title.clone(),
+        identity: target.clone(),
+    };
+    resolve_binding(&binding, candidates)
+}
+
+static TARGETS: OnceLock<Mutex<HashMap<String, TargetBinding>>> = OnceLock::new();
 static CAPTURE_GATE: Mutex<()> = Mutex::new(());
 /// An explicit user selection may bind a restarted process. Recovery never changes PID.
 pub fn select_target(title: &str) {
@@ -264,16 +295,26 @@ fn target_for(title: &str) -> Option<WindowIdentity> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .ok()?;
-    let target = if let Some(original) = targets.get(title) {
-        resolve_identity(original, &all)?
+    let (target, updated_binding) = if let Some(existing) = targets.get(title) {
+        let resolved = resolve_binding(existing, &all)?;
+        let binding = TargetBinding {
+            base_title: existing.base_title.clone(),
+            identity: resolved.clone(),
+        };
+        (resolved, binding)
     } else {
         let matches: Vec<_> = all.iter().filter(|w| w.title == title).collect();
         if matches.len() != 1 {
             return None;
         }
-        matches[0].clone()
+        let matched = matches[0].clone();
+        let binding = TargetBinding {
+            base_title: title.to_string(),
+            identity: matched.clone(),
+        };
+        (matched, binding)
     };
-    targets.insert(title.to_string(), target.clone());
+    targets.insert(title.to_string(), updated_binding);
     Some(target)
 }
 // Same coordinate mapping as OBS libobs-winrt get_client_box, rejecting uncertain bounds.
@@ -541,5 +582,47 @@ mod tests {
         let mut fullscreen = original.clone();
         fullscreen.style = 0x8000_0000 | 0x1000_0000;
         assert_eq!(resolve_identity(&original, &[fullscreen]).unwrap().hwnd, 10);
+    }
+    #[test]
+    fn consecutive_title_changes_preserve_binding_and_reconnection() {
+        let mut binding = TargetBinding {
+            base_title: "AION2".to_string(),
+            identity: target(10, 42),
+        };
+
+        // 1回目のタイトル変化: "AION2" -> "AION2 - Loading"
+        let mut step1 = target(10, 42);
+        step1.title = "AION2 - Loading".into();
+        let resolved1 = resolve_binding(&binding, &[step1]).expect("step1 should resolve");
+        assert_eq!(resolved1.hwnd, 10);
+        assert_eq!(resolved1.title, "AION2 - Loading");
+        binding.identity = resolved1;
+
+        // 2回目のタイトル変化: "AION2 - Loading" -> "AION2 - Chapter 1"
+        // base_title ("AION2") が保持されているため、Loading -> Chapter 1 の遷移でも解決可能
+        let mut step2 = target(10, 42);
+        step2.title = "AION2 - Chapter 1".into();
+        let resolved2 =
+            resolve_binding(&binding, &[step2]).expect("step2 should resolve with base_title");
+        assert_eq!(resolved2.hwnd, 10);
+        assert_eq!(resolved2.title, "AION2 - Chapter 1");
+        binding.identity = resolved2;
+
+        // 3回目のタイトル変化: HWND再生成を伴う変化 ("AION2 - Chapter 1" -> "AION2 [DirectX 11]" on HWND 11)
+        let mut step3 = target(11, 42);
+        step3.title = "AION2 [DirectX 11]".into();
+        let resolved3 =
+            resolve_binding(&binding, &[step3]).expect("step3 should resolve on regenerated HWND");
+        assert_eq!(resolved3.hwnd, 11);
+        assert_eq!(resolved3.title, "AION2 [DirectX 11]");
+        binding.identity = resolved3;
+
+        // 4回目のタイトル変化: ベースタイトルへの復帰 ("AION2 [DirectX 11]" -> "AION2")
+        let mut step4 = target(11, 42);
+        step4.title = "AION2".into();
+        let resolved4 =
+            resolve_binding(&binding, &[step4]).expect("step4 should resolve back to base");
+        assert_eq!(resolved4.hwnd, 11);
+        assert_eq!(resolved4.title, "AION2");
     }
 }
