@@ -216,14 +216,17 @@ pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> boo
 }
 
 fn is_safe_suffix(suffix: &str) -> bool {
-    let s = suffix.trim();
+    let mut s = suffix.trim();
     if s.is_empty() {
         return false;
     }
     // 括弧で囲まれたサフィックス: (DirectX 11), [DX11], (64-bit), [Loading] 等
+    // 括弧を外して中身を検証する（[Other Window] 等の未知サフィックスを拒否）
     if (s.starts_with('(') && s.ends_with(')')) || (s.starts_with('[') && s.ends_with(']')) {
-        let inner = s[1..s.len() - 1].trim();
-        return !inner.is_empty();
+        s = s[1..s.len() - 1].trim();
+        if s.is_empty() {
+            return false;
+        }
     }
     let s_lower = s.to_lowercase();
     // ゲーム進行・章・ゾーン・サーバー・状態・レンダラー・ビルド等の安全な接頭辞
@@ -579,9 +582,14 @@ mod tests {
         assert!(resolve_identity(&original, &[aion2_crash]).is_none());
 
         // HWNDが同一でも、未知の補助ウィンドウ名 ("AION2 - Other Window") の場合は拒否
+        // HWNDが同一でも、未知の補助ウィンドウ名 ("AION2 - Other Window", "AION2 [Other Window]") の場合は拒否
         let mut other_window = original.clone();
         other_window.title = "AION2 - Other Window".into();
         assert!(resolve_identity(&original, &[other_window]).is_none());
+
+        let mut bracketed_other = original.clone();
+        bracketed_other.title = "AION2 [Other Window]".into();
+        assert!(resolve_identity(&original, &[bracketed_other]).is_none());
 
         // HWNDが同一でも別スレッドやオーナー持ち（ダイアログ）の場合は拒否
         let mut child_dialog = original.clone();
@@ -618,7 +626,7 @@ mod tests {
         crash_regen.title = "AION2 Crash Reporter".into();
         assert!(resolve_identity(&original, &[crash_regen]).is_none());
 
-        // HWND再生成だが未知のサフィックス ("AION2 - Other Window", "AION2 - Launcher") の場合は拒否
+        // HWND再生成だが未知のサフィックス ("AION2 - Other Window", "AION2 [Launcher]") の場合は拒否
         let mut other_regen = target(11, 42);
         other_regen.title = "AION2 - Other Window".into();
         assert!(resolve_identity(&original, &[other_regen]).is_none());
@@ -626,6 +634,10 @@ mod tests {
         let mut launcher_regen = target(11, 42);
         launcher_regen.title = "AION2 - Launcher".into();
         assert!(resolve_identity(&original, &[launcher_regen]).is_none());
+
+        let mut bracket_launcher = target(11, 42);
+        bracket_launcher.title = "AION2 [Launcher]".into();
+        assert!(resolve_identity(&original, &[bracket_launcher]).is_none());
     }
     #[test]
     fn title_compatible_rules() {
@@ -635,12 +647,22 @@ mod tests {
         assert!(title_compatible("AION2", "AION2 - Chapter 1"));
         assert!(title_compatible("AION2 - Chapter 1", "AION2"));
         assert!(title_compatible("AION2", "AION2 [DirectX 11]"));
+        assert!(title_compatible("AION2", "AION2 (DirectX 11)"));
+        assert!(title_compatible("AION2", "AION2 [DX11]"));
+        assert!(title_compatible("AION2", "AION2 (64-bit)"));
+        assert!(title_compatible("AION2", "AION2 [Loading]"));
         assert!(title_compatible("Firefox", "GitHub — Mozilla Firefox"));
         assert!(!title_compatible("AION2", "AION2 - Other Window"));
         assert!(!title_compatible("AION2", "AION2 - Launcher"));
         assert!(!title_compatible("AION2", "AION2 - Tool Window"));
         assert!(!title_compatible("AION2", "AION2 - SubWindow"));
         assert!(!title_compatible("AION2", "AION2 - Debug Console"));
+        assert!(!title_compatible("AION2", "AION2 [Other Window]"));
+        assert!(!title_compatible("AION2", "AION2 [Launcher]"));
+        assert!(!title_compatible("AION2", "AION2 (Tool Window)"));
+        assert!(!title_compatible("AION2", "AION2 (Debug Console)"));
+        assert!(!title_compatible("AION2", "AION2 []"));
+        assert!(!title_compatible("AION2", "AION2 ()"));
         assert!(!title_compatible("AION2", "Crash Reporter"));
         assert!(!title_compatible("AION2", "AION2 Crash Reporter"));
         assert!(!title_compatible("AION2", "AION2 Error"));
