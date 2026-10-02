@@ -66,10 +66,11 @@ Downloading dependencies and models requires an active internet connection and s
 1. **Prerequisites**:
    - Node.js 20 or higher
    - Rust toolchain (nightly version specified in `rust-toolchain.toml`)
-   - Python 3.12 and `uv` (or standard `python` / `pip`)
+   - Python 3.12
+   - `uv` (Python package manager; required as a compile-time resource for Rust)
    - Git
 
-2. **Clone the Repository and Install Dependencies**:
+2. **Clone the Repository and Prepare Build Prerequisites**:
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git
    cd GameAssistant
@@ -77,10 +78,17 @@ Downloading dependencies and models requires an active internet connection and s
    # Install Node.js packages
    npm install
 
-   # Create a Python virtual environment and install ASR/embedding dependencies
+   # Place uv.exe in resources directory for compile-time embedding in bootstrap.rs (PowerShell)
+   New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+   Copy-Item -Path (Get-Command uv).Source -Destination src-tauri/resources/uv.exe -Force
+   ```
+
+3. **Set Up Python Virtual Environment**:
+   The application's runtime layout expects a `venv/` directory at the project root (`RuntimeLayout`), so explicitly specify `venv` as the target directory:
+   ```bash
    # Using uv (recommended):
-   uv venv
-   uv pip install -r requirements.txt
+   uv venv venv --python 3.12
+   uv pip install --python venv\Scripts\python.exe -r requirements.txt
 
    # Or using standard Python venv:
    python -m venv venv
@@ -88,12 +96,12 @@ Downloading dependencies and models requires an active internet connection and s
    pip install -r requirements.txt
    ```
 
-3. **Launch Development Mode**:
+4. **Launch Development Mode**:
    ```bash
    npm run tauri dev
    ```
 
-4. **Package the Portable Release**:
+5. **Package the Portable Release**:
    ```powershell
    .\scripts\build-portable.ps1
    ```
@@ -199,10 +207,11 @@ Gemini API キーや Twitch OAuth トークンなどの機密情報は、平文�
 1. **前提ツールの準備**:
    - Node.js 20 以上
    - Rust ツールチェーン（`rust-toolchain.toml` で指定された nightly バージョン）
-   - Python 3.12 および `uv`（または標準 `python` / `pip`）
+   - Python 3.12
+   - `uv`（Python パッケージマネージャ。Rust 側のコンパイル時リソースとしても必須）
    - Git
 
-2. **リポジトリの取得と依存関係の導入**:
+2. **リポジトリの取得とビルド前提リソースの配置**:
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git
    cd GameAssistant
@@ -210,10 +219,17 @@ Gemini API キーや Twitch OAuth トークンなどの機密情報は、平文�
    # Node.js パッケージのインストール
    npm install
 
-   # Python 仮想環境の作成と音声認識・埋め込み依存ライブラリのインストール
+   # bootstrap.rs がコンパイル時に埋め込む uv.exe を resources ディレクトリに配置（PowerShell）
+   New-Item -ItemType Directory -Force -Path src-tauri/resources | Out-Null
+   Copy-Item -Path (Get-Command uv).Source -Destination src-tauri/resources/uv.exe -Force
+   ```
+
+3. **Python 仮想環境の作成と依存関係の導入**:
+   アプリケーションの実行時レイアウト（`RuntimeLayout`）はルート直下の `venv/` ディレクトリを参照するため、仮想環境の作成先として明示的に `venv` を指定する。
+   ```bash
    # uv を使用する場合（推奨）:
-   uv venv
-   uv pip install -r requirements.txt
+   uv venv venv --python 3.12
+   uv pip install --python venv\Scripts\python.exe -r requirements.txt
 
    # または標準 Python を使用する場合:
    python -m venv venv
@@ -221,12 +237,12 @@ Gemini API キーや Twitch OAuth トークンなどの機密情報は、平文�
    pip install -r requirements.txt
    ```
 
-3. **開発モードでの起動**:
+4. **開発モードでの起動**:
    ```bash
    npm run tauri dev
    ```
 
-4. **ポータブル版バイナリのパッケージング**:
+5. **ポータブル版バイナリのパッケージング**:
    ```powershell
    .\scripts\build-portable.ps1
    ```
