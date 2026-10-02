@@ -1,150 +1,229 @@
 # GameAssistant
 
-ゲームプレイや配信をリアルタイムで支援するために作られた、超高速・低遅延な **Tauri 2.0 + Pure Rust Native** 製 AI デスクトップアシスタントです。
-音声対話（Kotoba-Whisper CUDA INT8）、画面認識、Twitch連携、LanceDB ベクトル長期記憶、自立型実況（Auto Commentary）、noteブログ自動執筆など、様々な機能であなたのゲーミング体験を向上させます。
+[English](#english) | [日本語](#日本語)
 
 ---
 
-## ⚡ 主な機能 (Features)
+<a id="english"></a>
+## English
 
-- **🎮 AI によるゲームアシスト & 実況 (Gemini 2.0 Flash / Pro)**:
-  - 画面認識・過去の会話文脈・ゲーム内履歴を総合的に考慮して応答。
-  - 沈黙時間が続いた際に画面を見て自律的にコメント・ツッコミを入れる「Auto Commentary」機能。
-  - Thinking モードの動的切り替え（会話時は高速、ブログ執筆時は熟考）。
+GameAssistant is a desktop application designed to analyze PC gameplay video and audio in real time, providing voice interaction, automated commentary, and live streaming chat integration.
+Built on Tauri 2.0, it separates native processing in Rust from the user interface in React, integrating multimodal AI models while minimizing CPU and GPU overhead during gameplay.
 
-- **🎤 超低遅延・高精度 音声対話 (Kotoba-Whisper CUDA INT8 + cpal)**:
-  - 「ねえぐり」「アシスタント」等のウェイクワードで即座に起動し、相槌（Nod Sound）を即時再生。
-  - Faster-Whisper CUDA INT8 によるミリ秒単位のストリーミング音声認識。
-  - WASAPI Loopback による Discord 通話音声のゼロ遅延キャプチャ。
-  - VRAM 蓄積による推論遅延を自動検知して自律的にワーカーを再起動するウォッチドッグ。
+### Key Features
 
-- **🧠 ローカルベクトル長期記憶 (Pure Rust LanceDB + GLuCoSE-base-ja)**:
-  - プレイヤーの発話・AI応答・Discord会話を 768 次元の埋め込みベクトルとして LanceDB に自動蓄積。
-  - 過去の出来事やプレイ記憶を高速セマンティック検索してプロンプトに動的注入。
+#### Voice Recognition and Interaction
+Captures microphone input and voice communications (such as Discord via WASAPI loopback), performing transcription on a local GPU with Faster-Whisper (CUDA).
+Upon detecting a configured wake word, the application immediately plays an acknowledgment sound and delivers responses synthesized via the VOICEVOX Engine using the Gemini API.
 
-- **📝 note ブログ記事の自動執筆 & スキル注入 (Skills Engine)**:
-  - セッション終了時に配信ログから note ブログ記事（Markdown）を自動生成。
-  - `skills/` 配下の執筆ペルソナ・文体ガイドライン（YAMLフロントマター付き）を動的に注入。
+#### Gameplay Screen Analysis and Autonomous Commentary
+Combines captured gameplay frames with recent conversational context for multimodal analysis using Gemini 2.0.
+When the player remains silent for a set duration, the system detects visual activity and autonomously generates commentary or reactions.
 
-- **🤖 Pure Rust Twitch 連携 (WebSocket IRC)**:
-  - 配信セッション開始時に自動接続し、視聴者チャットに応答。
-  - OAuth Authorization Code フローによる安全なワンクリック認証。
+#### Persistent Memory and Semantic Search
+Session dialogue and game events are vectorized using an embedding model (GLuCoSE-base-ja) and stored in an embedded LanceDB database.
+Semantic search retrieves past context and player preferences across sessions, dynamically injecting them into AI prompts to enable persistent, long-term awareness.
 
-- **🖥️ リッチ & モダンな UI (React 18 + Tailwind CSS + Tauri 2.0)**:
-  - MIC, GEMINI, VOICE, TWITCH のリアルタイム・アクティビティ演出（Pulse / Glow）。
-  - GPU VRAM / システム RAM のリアルタイムモニターと VRAM 1GB 事前確保オプション。
+#### Live Streaming Integration
+Includes a native Rust WebSocket IRC client to monitor and respond to viewer chat during Twitch streaming sessions.
+Authentication is handled through an OAuth authorization code flow for secure token acquisition.
 
----
+#### Secure Credential Storage
+Sensitive tokens such as the Gemini API key and Twitch OAuth secrets are never stored in plaintext configuration files. They are encrypted using Windows DPAPI (Data Protection API) and persisted in `credentials.enc`.
+Read-modify-write operations are guarded by a two-layer exclusive lock combining an intra-process mutex and a Windows Named Mutex, preventing lost updates and file corruption during concurrent operations.
 
-## 🚀 必要なもの & セットアップ (Setup)
+#### Automated Blog Article Generation
+Generates Markdown articles suitable for publication on note at the end of a gaming session, summarizing highlights and conversational logs.
+Writing personas and style guidelines placed in the `skills/` directory can be dynamically injected into the generation prompt.
 
-### 必要な環境
+### System Requirements
+
 - **OS**: Windows 10 / 11 (64-bit)
-- **GPU**: NVIDIA GeForce (CUDA 12.x / VRAM 6GB以上推奨)
-- **Node.js**: v18 以上
-- **Rust**: 1.75 以上 (`rustup`)
-- **VOICEVOX Engine**: ローカル音声合成用に起動（デフォルト: `http://127.0.0.1:50021`）
-- **Google Gemini API Key**: [Google AI Studio](https://aistudio.google.com/) から取得
+- **GPU**: NVIDIA GeForce (CUDA 12.x support; 6 GB or more VRAM recommended)
+- **External Services & Software**:
+  - Google Gemini API Key
+  - VOICEVOX Engine (running locally; default port: `50021`)
 
-### インストール手順
+### Getting Started
 
-#### ポータブル版（推奨）
+#### Using the Portable Release
+Place the standalone executable (`GameAssistant-v<version>-portable.exe`) in any writable directory and launch it.
+On initial launch, a setup wizard automatically configures the following runtime components within the same directory:
 
-`GameAssistant-v0.3.0-portable.exe` を書き込み可能なフォルダへ置いて起動してください。初回起動時にセットアップ画面が表示され、同じフォルダへ次のランタイムを自動準備します。
+- Managed Python 3.12 runtime (via `uv`) and a dedicated virtual environment
+- Local summarization model (Gemma 3 1B IT GGUF, downloaded after accepting the terms of service)
 
-- `.python/` — `uv python install 3.12` で取得した管理対象Python
-- `venv/` — アプリ専用仮想環境
-- `models/` — 必須モデル
-- `.uv-cache/`、`logs/`、`scripts/`、`setup-state.json`、`uv.lock`
+#### Building and Developing from Source
 
-Gemma 3 1B IT (GGUF Q4_K_S) は必須モデルです。初回セットアップでは、同梱の `NOTICE-GEMMA.txt` と [Gemma Terms](https://ai.google.dev/gemma/terms) を確認して同意すると、固定リビジョンから取得します。
+1. **Prerequisites**:
+   - Node.js 20 or higher
+   - Rust toolchain (nightly version specified in `rust-toolchain.toml`)
+   - Python 3.12 and `uv`
+   - Git
 
-依存パッケージとモデルの取得にはネットワーク接続と数GBの空き容量が必要です。`Program Files` など書き込み禁止の場所では、画面の「管理者としてセットアップ」からUACを承認するか、書き込み可能なフォルダへEXEを移動してください。途中でキャンセルしても、次回起動時に完了済みの段階から再開します。
-
-モデルはすべて EXE 隣の `models/` に保存されます。旧バージョンの `settings.json` に `models_dir` が残っていても、セットアップ、状態表示、ダウンロード、実行時のモデル探索からは無視されます（`LOCALAPPDATA` へはリダイレクトしません）。
-
-要約用 llama-server は空きポートを一時確保して起動します。Phase 3 のワーカー分離では、ポート割り当てと子プロセスのライフサイクルを同一ワーカー内で管理する設計へ移行する予定ですが、現行版では「確保直後に別プロセスがポートを取得する」小さな競合窓を完全にはなくせません。
-
-1. **リポジトリをクローン:**
+2. **Clone the Repository and Install Dependencies**:
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git
    cd GameAssistant
-   ```
-
-2. **Python 仮想環境の作成と ASR 依存ライブラリのインストール:**
-   ```bash
-   python -m venv venv
-   .\venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-
-3. **Node.js パッケージのインストール:**
-   ```bash
    npm install
    ```
 
-4. **アプリケーションの起動 (開発モード):**
+3. **Launch Development Mode**:
    ```bash
    npm run tauri dev
    ```
 
-5. **テストの実行 (Testing):**
-   階層化されたテストスイートを実行できます：
-   ```powershell
-   # 高速ユニットテスト (~1.1s)
-   scripts\test-rust.ps1 -Suite Fast
-
-   # LanceDB / ストレージ統合テスト
-   scripts\test-rust.ps1 -Suite Memory
-
-   # プラットフォーム・外部依存テスト
-   scripts\test-rust.ps1 -Suite Platform
-
-   # 全テスト (323 tests)
-   scripts\test-rust.ps1 -Suite Full
-   ```
-   ※ `cargo-nextest` を導入すると、Memory スイートを約 2 倍高速（~12.9s）に実行できます（未インストール時は自動的に標準 Cargo で実行されます）：
-   ```powershell
-   # nextest のインストール
-   winget install nextest.cargo-nextest
-   # または cargo install cargo-nextest --locked
-
-   # nextest を指定して実行
-   scripts\test-rust.ps1 -Suite Memory -Runner Nextest
-   ```
-
-6. **CI チェック (Continuous Integration):**
-   Pull Request および `main` ブランチへの push 時に GitHub Actions で以下の Rust CI チェックが自動実行されます。ローカルで同等の健全性確認を行う場合のコマンド：
-   ```powershell
-   # コードフォーマット検証
-   cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
-
-   # コンパイル・型チェック
-   cargo check --manifest-path src-tauri/Cargo.toml
-
-   # 高速ユニットテスト
-   .\scripts\test-rust.ps1 -Suite Fast
-
-   # 全テストスイート実行
-   .\scripts\test-rust.ps1 -Suite Full
-   ```
-
-7. **ポータブル実行可能ファイル (Portable EXE) のビルド:**
-   配布用のスタンドアロン Portable EXE を生成する標準スクリプトです。フロントエンドのビルド、Tauri リリースバイナリのコンパイル、および `dist_release/` への出力・ハッシュ検証を一括して実行します：
+4. **Package the Portable Release**:
    ```powershell
    .\scripts\build-portable.ps1
    ```
-   ビルドが完了すると、`dist_release/GameAssistant-v<version>-portable.exe` に成果物が配置されます。
-   ※ GitHub Actions では、タグ push (`v*`) または手動トリガー (`workflow_dispatch`) により自動生成され、Artifact / GitHub Release asset として取得できます。
+   Upon completion, the standalone executable is generated in `dist_release/GameAssistant-v<version>-portable.exe`.
+
+### Testing and CI
+
+Automated tests are maintained for both Rust and frontend code to ensure reliability.
+
+- **Rust Test Suite**:
+  ```powershell
+  # Fast unit tests
+  .\scripts\test-rust.ps1 -Suite Fast
+
+  # Full test suite (~360 tests, including storage and platform integrations)
+  .\scripts\test-rust.ps1 -Suite Full
+  ```
+- **Frontend Contract Tests & Build**:
+  ```bash
+  # Component and hook behavioral contract tests
+  npm test
+
+  # TypeScript typecheck and Vite production build
+  npm run build
+  ```
+- **Continuous Integration (GitHub Actions)**:
+  On pull requests and pushes to `main`, GitHub Actions runs the frontend pipeline (`npm ci`, `npm test`, `npm run build`) on Ubuntu in parallel with the Rust pipeline (`cargo fmt`, `cargo check`, Fast/Full tests) on Windows.
+
+### Technology Stack
+
+| Domain | Technologies & Libraries |
+| :--- | :--- |
+| **Frontend** | React 18, TypeScript, Tailwind CSS, Lucide Icons, Vite |
+| **Backend Core** | Tauri 2.0, Rust (Tokio, cpal, hound, rodio, reqwest) |
+| **Speech Recognition (ASR)** | Faster-Whisper (CUDA INT8), cpal (WASAPI Loopback) |
+| **Vector Search & Memory** | LanceDB (Pure Rust SDK), Apache Arrow, GLuCoSE-base-ja |
+| **Multimodal & Inference** | Google Gemini API (2.0 Flash / Pro), llama-server (Gemma 3 GGUF) |
+| **Speech Synthesis (TTS)** | VOICEVOX Engine (Local HTTP REST) |
+| **Streaming Integration** | Twitch WebSocket IRC Client (tokio-tungstenite) |
+| **Security & Storage** | Windows DPAPI (CryptProtectData / CryptUnprotectData), Windows Named Mutex |
 
 ---
 
-## 🛠️ 技術スタック (Technology Stack)
+<a id="日本語"></a>
+## 日本語
 
-- **Frontend**: React 18, TypeScript, Tailwind CSS, Lucide Icons, Vite
-- **Core Backend**: Tauri 2.0, Pure Rust (`tokio`, `cpal`, `hound`, `rodio`, `reqwest`, `image`)
-- **Vector Database**: LanceDB (Pure Rust SDK) + Apache Arrow 53
-- **ASR & Embedding**: Kotoba-Whisper-v2.0-faster (CUDA INT8), pkshatech/GLuCoSE-base-ja
-- **AI & Multimodal**: Google Gemini 2.0 Flash / Pro API, Brave Search API
-- **TTS Engine**: VOICEVOX Engine (Local HTTP REST) / Style-Bert-VITS2
-- **Twitch Integration**: Pure Rust WebSocket IRC Client (`tokio-tungstenite`)
+GameAssistant は、PC ゲームのプレイ映像と音声をリアルタイムに解析し、音声対話、自動実況、配信チャット連携を行うデスクトップアプリケーションである。
+Tauri 2.0 を基盤に採用し、Rust によるネイティブ処理と React による操作画面を分離することで、ゲーム動作への負荷を抑えつつマルチモーダル AI を統合している。
+
+### 主な機能
+
+#### 音声認識と音声対話
+マイクロフォン入力および Discord などのボイスチャット音声（WASAPI ループバック）を取得し、ローカル環境の GPU 上で動作する Faster-Whisper（CUDA）によって文字起こしを行う。
+設定したウェイクワードの検知時には確認音（相槌）を即時再生し、Gemini API による回答テキストを VOICEVOX Engine と連携して音声出力する。
+
+#### ゲーム画面解析と自動実況
+キャプチャしたゲーム画面のフレームと直近の会話文脈を組み合わせ、マルチモーダルモデル（Gemini 2.0）で状況を判定する。
+プレイヤーの発話がない状態が一定時間継続した場合は、画面の動きや変化を検知して自動的に実況コメントを生成する。
+
+#### 長期記憶とセマンティック検索
+セッション中の発話や認識結果は、埋め込みモデル（GLuCoSE-base-ja）によりベクトル化され、組み込みの LanceDB に保存される。
+過去のセッションで蓄積された文脈やプレイヤーの好みをセマンティック検索で抽出し、AI へのプロンプトに動的に注入することで、長期的な記憶に基づく対話を実現する。
+
+#### 配信プラットフォーム連携
+Twitch の WebSocket IRC クライアントを内蔵しており、配信セッション中に視聴者チャットを受信して応答対象に含めることができる。
+認証には OAuth 認可コードフローを採用し、トークンを安全に取得する。
+
+#### 安全な資格情報管理
+Gemini API キーや Twitch OAuth トークンなどの機密情報は、平文の設定ファイルには保存せず、Windows DPAPI（Data Protection API）で暗号化して `credentials.enc` に保管する。
+ファイル操作にはプロセス内ミューテックスと Windows 名前付きミューテックスを組み合わせた排他制御を適用し、並行更新によるデータの巻き戻りや破損を防ぐ。
+
+#### プレイログからのブログ記事生成
+ゲームセッションの終了時に、会話ログと状況要約を基に note 形式の Markdown 記事を自動生成する。
+`skills/` ディレクトリ配下に定義した文体ガイドラインや執筆ペルソナをプロンプトへ注入できる。
+
+### 動作要件
+
+- **OS**: Windows 10 / 11 (64-bit)
+- **GPU**: NVIDIA GeForce（CUDA 12.x 対応、VRAM 6GB 以上を推奨）
+- **外部サービス・依存ソフトウェア**:
+  - Google Gemini API キー
+  - VOICEVOX Engine（ローカル実行、デフォルトポート: `50021`）
+
+### 利用手順
+
+#### ポータブル版の実行
+スタンドアロン配布ファイル（`GameAssistant-v<version>-portable.exe`）を書き込み権限のあるディレクトリに配置して実行する。
+初回起動時にセットアップ画面が表示され、以下の依存コンポーネントが同一ディレクトリ配下に自動構築される。
+
+- Python 3.12 ランタイム（`uv` による管理）および専用仮想環境
+- ローカル要約用言語モデル（Gemma 3 1B IT GGUF、利用規約の同意確認後にダウンロード）
+
+#### ソースコードからのビルドと開発
+
+1. **前提ツールの準備**:
+   - Node.js 20 以上
+   - Rust ツールチェーン（`rust-toolchain.toml` で指定された nightly バージョン）
+   - Python 3.12 および `uv`
+   - Git
+
+2. **リポジトリの取得と依存関係の導入**:
+   ```bash
+   git clone https://github.com/k0ta0uchi/GameAssistant.git
+   cd GameAssistant
+   npm install
+   ```
+
+3. **開発モードでの起動**:
+   ```bash
+   npm run tauri dev
+   ```
+
+4. **ポータブル版バイナリのパッケージング**:
+   ```powershell
+   .\scripts\build-portable.ps1
+   ```
+   ビルド完了後、`dist_release/GameAssistant-v<version>-portable.exe` に単一実行可能ファイルが出力される。
+
+### テストと CI
+
+本リポジトリでは、品質維持のために Rust およびフロントエンド双方の自動テストを実施している。
+
+- **Rust テストスイート**:
+  ```powershell
+  # 高速ユニットテスト
+  .\scripts\test-rust.ps1 -Suite Fast
+
+  # 全テスト（約360件、ストレージ統合・プラットフォームテストを含む）
+  .\scripts\test-rust.ps1 -Suite Full
+  ```
+- **フロントエンド契約テストとビルド**:
+  ```bash
+  # コンポーネントおよびフックの振る舞い検証
+  npm test
+
+  # TypeScript 型検査および Vite プロダクションビルド
+  npm run build
+  ```
+- **継続的インテグレーション (GitHub Actions)**:
+  プルリクエストおよび `main` ブランチへのプッシュ時に、Ubuntu 環境でのフロントエンド検証（`npm ci`, `npm test`, `npm run build`）と Windows 環境での Rust 検証（`cargo fmt`, `cargo check`, Fast/Full テスト）が並列で実行される。
+
+### 技術スタック
+
+| 分野 | 採用技術・ライブラリ |
+| :--- | :--- |
+| **フロントエンド** | React 18, TypeScript, Tailwind CSS, Lucide Icons, Vite |
+| **バックエンド基盤** | Tauri 2.0, Rust (Tokio, cpal, hound, rodio, reqwest) |
+| **音声認識 (ASR)** | Faster-Whisper (CUDA INT8), cpal (WASAPI Loopback) |
+| **ベクトル検索・記憶** | LanceDB (Pure Rust SDK), Apache Arrow, GLuCoSE-base-ja |
+| **マルチモーダル・推論** | Google Gemini API (2.0 Flash / Pro), llama-server (Gemma 3 GGUF) |
+| **音声合成 (TTS)** | VOICEVOX Engine (ローカル HTTP REST) |
+| **配信連携** | Twitch WebSocket IRC クライアント (tokio-tungstenite) |
+| **セキュリティ** | Windows DPAPI (CryptProtectData / CryptUnprotectData), Windows Named Mutex |
