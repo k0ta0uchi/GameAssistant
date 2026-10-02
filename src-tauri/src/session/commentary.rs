@@ -155,7 +155,7 @@ impl SessionManager {
             .get("use_image")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        let screen_b64 = if use_image {
+        let mut screen_b64 = if use_image {
             let win_name = st
                 .get("window")
                 .and_then(|v| v.as_str())
@@ -163,17 +163,7 @@ impl SessionManager {
                 .to_string();
             let log_mgr = self.log_mgr.clone();
             let capture = tokio::task::spawn_blocking(move || {
-                if !win_name.is_empty() {
-                    log_mgr.info(
-                        "Visual",
-                        &format!("Capturing target window for commentary: '{}'", win_name),
-                    );
-                    window_capture::capture_window_base64(&win_name)
-                        .or_else(window_capture::capture_primary_screen_base64)
-                } else {
-                    log_mgr.info("Visual", "Capturing primary screen for commentary...");
-                    window_capture::capture_primary_screen_base64()
-                }
+                window_capture::capture_window_with_log(&win_name, Some(&log_mgr))
             });
             match tokio::time::timeout(INPUT_SCREEN_CAPTURE_TIMEOUT, capture).await {
                 Ok(Ok(image)) => image,
@@ -208,17 +198,18 @@ impl SessionManager {
             return Err("commentary dropped: stale_after_screen_capture".to_string());
         }
 
+        if crate::settings::load_settings_file(&self.root_dir).get("window") != st.get("window") {
+            screen_b64 = None;
+        }
         // Auto Commentary が取得した最新フレームを Target Window カードの
         // プレビューへ即時反映する。以前は UI 側が選択時に撮った静止画のまま
         // 古くなっていたため、実況が実際に参照した画面をフロントへ通知する。
-        if let Some(ref image) = screen_b64 {
-            if self.context_allows_ui(context) {
-                if let Some(handle) = app_handle {
-                    let _ = handle.emit(
-                        "window_preview_updated",
-                        serde_json::json!({ "image": image, "source": "auto_commentary" }),
-                    );
-                }
+        if self.context_allows_ui(context) {
+            if let Some(handle) = app_handle {
+                let _ = handle.emit("window_preview_updated", serde_json::json!({
+                    "image": screen_b64.as_deref().unwrap_or(""), "source": "auto_commentary",
+                    "target": st.get("window"), "status": if screen_b64.is_some() { "ready" } else { "CaptureUnavailable" }
+                }));
             }
         }
 

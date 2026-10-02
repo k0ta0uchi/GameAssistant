@@ -184,23 +184,21 @@ fn list_windows() -> Vec<String> {
 }
 
 #[tauri::command]
-fn capture_window_preview(state: State<AppState>, title: String) -> Option<String> {
-    state.log_mgr.info(
-        "Capture",
-        &format!("Capturing window preview for: '{}'", title),
-    );
-    let result = window_capture::capture_window_base64(&title);
-    if result.is_some() {
-        state
-            .log_mgr
-            .info("Capture", "Window preview captured successfully");
-    } else {
-        state.log_mgr.warn(
-            "Capture",
-            &format!("Failed to capture window preview for: '{}'", title),
-        );
-    }
-    result
+async fn capture_window_preview(
+    state: State<'_, AppState>,
+    title: String,
+) -> Result<Option<String>, String> {
+    let log = state.log_mgr.clone();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || {
+            window_capture::capture_window_with_log(&title, Some(&log))
+        }),
+    )
+    .await
+    .map_err(|_| "CaptureUnavailable: timeout".to_string())?
+    .map_err(|e| format!("CaptureUnavailable: {}", e))?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -243,6 +241,11 @@ fn save_setting(
         })
     } else {
         settings::save_setting_with_worker_sync(&state.root_dir, &key, &value, |k, v| {
+            if k == "window" {
+                if let Some(title) = v.as_str() {
+                    window_capture::select_target(title);
+                }
+            }
             if k == "preallocate_vram" {
                 if let Some(enable) = v.as_bool() {
                     if let Err(e) = state

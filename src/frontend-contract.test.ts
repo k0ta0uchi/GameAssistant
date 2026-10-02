@@ -1024,11 +1024,15 @@ const findButton = (
   const { renderer, snapshot } = await mountHook(harness);
   harness.emit("window_preview_updated", {
     image: "data:image/png;base64,QUJD",
+    target: String(snapshot.current!.settings.window || ""),
     source: "auto_commentary",
   });
   await flush();
   assert.equal(snapshot.current!.previewImage, "data:image/png;base64,QUJD");
 
+  harness.emit("window_preview_updated", {source: "auto_commentary", image: "wrong-source", target: "Firefox-unselected"});
+  await flush();
+  assert.equal(snapshot.current!.previewImage, "data:image/png;base64,QUJD");
   harness.emit("window_preview_updated", { source: "auto_commentary" });
   await flush();
   assert.equal(
@@ -3246,6 +3250,20 @@ for (const [reason, expectedLabel, retryable] of [
   assert.equal(button().props["aria-pressed"], true);
   controls.unmount();
   hook.unmount();
+  await settleEffects();
+}
+
+// Target selection follows canonical settings instead of a stale independently initialized title.
+{
+  const {harness} = makeHarness();
+  const {renderer, snapshot} = await mountHook(harness);
+  await act(async () => { await snapshot.current!.updateSetting("window", "AION2"); });
+  assert.equal(snapshot.current!.selectedWindow, "AION2");
+  await act(async () => { await snapshot.current!.updateSetting("window", "Firefox"); });
+  assert.equal(snapshot.current!.selectedWindow, "Firefox");
+  await act(async () => { await snapshot.current!.fetchWindows(); });
+  assert.equal(snapshot.current!.selectedWindow, "Firefox", "Refresh must not select a different window");
+  renderer.unmount();
   await settleEffects();
 }
 

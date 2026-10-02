@@ -1,461 +1,344 @@
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
+//! Target-only WGC capture. No desktop, foreground, or title-substring fallback.
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use image::{ImageBuffer, Rgba};
-use std::ffi::OsString;
-use std::io::Cursor;
-use std::os::windows::ffi::OsStringExt;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, SRCCOPY,
+use std::{
+    collections::HashMap,
+    io::Cursor,
+    sync::{mpsc, Mutex, OnceLock},
+    time::Duration,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetDesktopWindow, GetSystemMetrics, GetWindowLongW, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsIconic, IsWindowVisible, IsZoomed, GWL_EXSTYLE,
-    SM_CXSCREEN, SM_CYSCREEN, WS_EX_TOOLWINDOW,
+use windows::{
+    core::PWSTR,
+    Win32::{
+        Foundation::{CloseHandle, BOOL, HWND, LPARAM, POINT, RECT},
+        Graphics::{
+            Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
+            Gdi::ClientToScreen,
+        },
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetClassNameW, GetClientRect, GetWindowTextW, GetWindowThreadProcessId,
+            IsIconic, IsWindowVisible,
+        },
+    },
+};
+use windows_capture::{
+    capture::{Context, GraphicsCaptureApiHandler},
+    frame::Frame,
+    graphics_capture_api::InternalCaptureControl,
+    settings::{
+        ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+        MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+    },
+    window::Window,
 };
 
-#[link(name = "user32")]
-extern "system" {
-    fn PrintWindow(hwnd: HWND, hdc_blt: HDC, n_flags: u32) -> BOOL;
-    fn GetWindowDC(hwnd: HWND) -> HDC;
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WindowIdentity {
+    pub hwnd: usize,
+    pub pid: u32,
+    pub title: String,
+    pub class_name: String,
+    pub executable: String,
 }
-
-const PW_RENDERFULLCONTENT: u32 = 2;
-
-/// 開いているアクティブウィンドウのタイトル一覧を取得
-pub fn list_windows() -> Vec<String> {
-    let mut windows: Vec<String> = Vec::new();
-    let lparam = &mut windows as *mut Vec<String> as isize;
-
+fn read_identity(hwnd: HWND) -> Option<WindowIdentity> {
     unsafe {
-        let _ = EnumWindows(Some(enum_window_callback), LPARAM(lparam));
-    }
-
-    windows
-}
-
-unsafe extern "system" fn enum_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let windows = &mut *(lparam.0 as *mut Vec<String>);
-
-    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-        return BOOL(1);
-    }
-
-    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-    if (ex_style & WS_EX_TOOLWINDOW.0) != 0 {
-        return BOOL(1);
-    }
-
-    let length = GetWindowTextLengthW(hwnd);
-    if length > 0 {
-        let mut buffer: Vec<u16> = vec![0; (length + 1) as usize];
-        let copied = GetWindowTextW(hwnd, &mut buffer);
-        if copied > 0 {
-            let title = OsString::from_wide(&buffer[..copied as usize])
-                .to_string_lossy()
-                .into_owned();
-
-            let trimmed = title.trim();
-            // 無視するシステムウィンドウ
-            let ignore_titles = [
-                "Program Manager",
-                "Settings",
-                "Microsoft Text Input Application",
-                "Windows Input Experience",
-            ];
-
-            if !trimmed.is_empty() && !ignore_titles.contains(&trimmed) {
-                windows.push(trimmed.to_string());
-            }
+        if !IsWindowVisible(hwnd).as_bool() {
+            return None;
         }
+        let mut title = [0u16; 4096];
+        let n = GetWindowTextW(hwnd, &mut title);
+        if n == 0 {
+            return None;
+        }
+        let mut class = [0u16; 256];
+        let c = GetClassNameW(hwnd, &mut class);
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut exe = vec![0u16; 32768];
+        let mut size = exe.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(exe.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(process);
+        result.ok()?;
+        Some(WindowIdentity {
+            hwnd: hwnd.0 as usize,
+            pid,
+            title: String::from_utf16_lossy(&title[..n as usize]),
+            class_name: String::from_utf16_lossy(&class[..c as usize]),
+            executable: String::from_utf16_lossy(&exe[..size as usize]),
+        })
     }
-
+}
+unsafe extern "system" fn enumerate(hwnd: HWND, arg: LPARAM) -> BOOL {
+    if let Some(identity) = read_identity(hwnd) {
+        (*(arg.0 as *mut Vec<WindowIdentity>)).push(identity);
+    }
     BOOL(1)
 }
-
-struct SearchContext<'a> {
-    target: &'a str,
-    found: Option<HWND>,
+fn identities() -> Vec<WindowIdentity> {
+    let mut result = Vec::new();
+    unsafe {
+        let _ = EnumWindows(
+            Some(enumerate),
+            LPARAM(&mut result as *mut Vec<WindowIdentity> as isize),
+        );
+    }
+    result
 }
-
-/// 指定したウィンドウタイトルに合致する実体 HWND を探す
-fn find_hwnd_by_title(target_title: &str) -> Option<HWND> {
-    let clean = target_title.trim();
-    if clean.is_empty() {
+pub fn list_windows() -> Vec<String> {
+    let mut titles: Vec<_> = identities().into_iter().map(|w| w.title).collect();
+    titles.sort();
+    titles.dedup();
+    titles
+}
+fn same_process(a: &WindowIdentity, b: &WindowIdentity) -> bool {
+    a.pid == b.pid
+        && a.class_name == b.class_name
+        && a.executable.eq_ignore_ascii_case(&b.executable)
+}
+fn resolve_identity(
+    target: &WindowIdentity,
+    candidates: &[WindowIdentity],
+) -> Option<WindowIdentity> {
+    if let Some(found) = candidates
+        .iter()
+        .find(|w| w.hwnd == target.hwnd && same_process(target, w))
+    {
+        return Some(found.clone());
+    }
+    let compatible: Vec<_> = candidates
+        .iter()
+        .filter(|w| same_process(target, w))
+        .collect();
+    let exact: Vec<_> = compatible
+        .iter()
+        .filter(|w| w.title == target.title)
+        .collect();
+    if exact.len() == 1 {
+        return Some((**exact[0]).clone());
+    }
+    if compatible.len() == 1 {
+        return Some(compatible[0].clone());
+    }
+    None
+}
+static TARGETS: OnceLock<Mutex<HashMap<String, WindowIdentity>>> = OnceLock::new();
+static CAPTURE_GATE: Mutex<()> = Mutex::new(());
+/// An explicit user selection may bind a restarted process. Recovery never changes PID.
+pub fn select_target(title: &str) {
+    if let Ok(mut targets) = TARGETS.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        targets.remove(title);
+    }
+    let _ = target_for(title);
+}
+fn target_for(title: &str) -> Option<WindowIdentity> {
+    if title.trim().is_empty() {
         return None;
     }
-
-    let mut ctx = SearchContext {
-        target: clean,
-        found: None,
-    };
-
-    let lparam = &mut ctx as *mut SearchContext as isize;
-    unsafe {
-        let _ = EnumWindows(Some(find_window_callback), LPARAM(lparam));
-    }
-
-    ctx.found
-}
-
-unsafe extern "system" fn find_window_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    let ctx = &mut *(lparam.0 as *mut SearchContext);
-
-    if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
-        return BOOL(1);
-    }
-
-    let mut rect = RECT::default();
-    if GetWindowRect(hwnd, &mut rect).is_err() {
-        return BOOL(1);
-    }
-
-    let w = rect.right - rect.left;
-    let h = rect.bottom - rect.top;
-    if w < 50 || h < 50 {
-        return BOOL(1);
-    }
-
-    let length = GetWindowTextLengthW(hwnd);
-    if length > 0 {
-        let mut buffer: Vec<u16> = vec![0; (length + 1) as usize];
-        let copied = GetWindowTextW(hwnd, &mut buffer);
-        if copied > 0 {
-            let title = OsString::from_wide(&buffer[..copied as usize])
-                .to_string_lossy()
-                .into_owned();
-
-            let trimmed = title.trim();
-            // タイトルの完全一致または部分一致
-            if trimmed.eq_ignore_ascii_case(ctx.target)
-                || trimmed.to_lowercase().contains(&ctx.target.to_lowercase())
-                || ctx.target.to_lowercase().contains(&trimmed.to_lowercase())
-            {
-                ctx.found = Some(hwnd);
-                return BOOL(0); // 有効な実体ウィンドウが見つかったので終了
-            }
+    let all = identities();
+    let mut targets = TARGETS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?;
+    let target = if let Some(original) = targets.get(title) {
+        resolve_identity(original, &all)?
+    } else {
+        let matches: Vec<_> = all.iter().filter(|w| w.title == title).collect();
+        if matches.len() != 1 {
+            return None;
         }
-    }
-
-    BOOL(1)
+        matches[0].clone()
+    };
+    targets.insert(title.to_string(), target.clone());
+    Some(target)
 }
-
-/// ウィンドウをキャプチャし、Base64 画像データ (data:image/png;base64,...) を生成
-/// 1. PrintWindow による直接ウィンドウキャプチャ
-/// 2. デスクトップ BitBlt (DirectX / Vulkan / Firefox / Chrome GPU描画アプリ)
-/// 3. プライマリスクリーン全体
+// Same coordinate mapping as OBS libobs-winrt get_client_box, rejecting uncertain bounds.
+fn client_box(target: &WindowIdentity, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
+    unsafe {
+        let hwnd = HWND(target.hwnd as *mut _);
+        if IsIconic(hwnd).as_bool() {
+            return None;
+        }
+        let mut client = RECT::default();
+        let mut bounds = RECT::default();
+        let mut origin = POINT::default();
+        GetClientRect(hwnd, &mut client).ok()?;
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut bounds as *mut _ as *mut _,
+            std::mem::size_of::<RECT>() as u32,
+        )
+        .ok()?;
+        if bounds.right - bounds.left != width as i32 || bounds.bottom - bounds.top != height as i32
+        {
+            return None;
+        }
+        if !ClientToScreen(hwnd, &mut origin).as_bool() {
+            return None;
+        }
+        let x = u32::try_from(origin.x - bounds.left).ok()?;
+        let y = u32::try_from(origin.y - bounds.top).ok()?;
+        let right = x.checked_add(u32::try_from(client.right - client.left).ok()?)?;
+        let bottom = y.checked_add(u32::try_from(client.bottom - client.top).ok()?)?;
+        if right > width || bottom > height || x >= right || y >= bottom {
+            return None;
+        }
+        Some((x, y, right, bottom))
+    }
+}
+type CaptureError = Box<dyn std::error::Error + Send + Sync>;
+struct Snapshot {
+    target: WindowIdentity,
+    sender: mpsc::SyncSender<Result<String, String>>,
+}
+impl GraphicsCaptureApiHandler for Snapshot {
+    type Flags = (WindowIdentity, mpsc::SyncSender<Result<String, String>>);
+    type Error = CaptureError;
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            target: ctx.flags.0,
+            sender: ctx.flags.1,
+        })
+    }
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        let result = (|| -> Result<String, CaptureError> {
+            let before = read_identity(HWND(self.target.hwnd as *mut _)).ok_or("target closed")?;
+            if !same_process(&self.target, &before) {
+                return Err("target identity changed".into());
+            }
+            let crop = client_box(&self.target, frame.width(), frame.height())
+                .ok_or("client bounds unavailable or resized")?;
+            let buffer = frame.buffer_crop(crop.0, crop.1, crop.2, crop.3)?;
+            let mut packed = Vec::new();
+            let pixels = buffer.as_nopadding_buffer(&mut packed).to_vec();
+            drop(buffer);
+            let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+                ImageBuffer::from_raw(crop.2 - crop.0, crop.3 - crop.1, pixels)
+                    .ok_or("invalid frame")?;
+            let mut bytes = Cursor::new(Vec::new());
+            img.write_to(&mut bytes, image::ImageFormat::Png)?;
+            let after = read_identity(HWND(self.target.hwnd as *mut _))
+                .ok_or("target closed during capture")?;
+            if !same_process(&self.target, &after)
+                || client_box(&self.target, frame.width(), frame.height()) != Some(crop)
+            {
+                return Err("target changed during capture".into());
+            }
+            Ok(format!(
+                "data:image/png;base64,{}",
+                BASE64.encode(bytes.into_inner())
+            ))
+        })()
+        .map_err(|e| e.to_string());
+        let _ = self.sender.try_send(result);
+        control.stop();
+        Ok(())
+    }
+    fn on_closed(&mut self) -> Result<(), Self::Error> {
+        let _ = self.sender.try_send(Err("target closed".into()));
+        Ok(())
+    }
+}
 pub fn capture_window_base64(title: &str) -> Option<String> {
-    let clean_title = title.trim();
-    if clean_title.is_empty() || clean_title == "(No active windows)" || clean_title == "全画面"
-    {
-        return capture_primary_screen_base64();
-    }
-
-    let hwnd = match find_hwnd_by_title(clean_title) {
-        Some(h) => h,
-        None => return capture_primary_screen_base64(),
-    };
-
-    unsafe {
-        let mut rect = RECT::default();
-        if GetWindowRect(hwnd, &mut rect).is_err() {
-            return capture_primary_screen_base64();
-        }
-
-        let full_w = rect.right - rect.left;
-        let full_h = rect.bottom - rect.top;
-
-        if full_w <= 0 || full_h <= 0 {
-            return capture_primary_screen_base64();
-        }
-
-        let is_zoomed = IsZoomed(hwnd).as_bool();
-        let (crop_x, crop_y, crop_w, crop_h) = if is_zoomed {
-            (8, 8, (full_w - 16).max(1), (full_h - 16).max(1))
-        } else {
-            (7, 0, (full_w - 14).max(1), (full_h - 7).max(1))
-        };
-
-        // 1. 裏画面対応: Python の getWindowBMAP と完全同一の GDI パイプライン
-        let mut captured_buffer: Option<(i32, i32, Vec<u8>)> = None;
-        let hdc_window = GetWindowDC(hwnd);
-        if !hdc_window.is_invalid() {
-            let mut bi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: crop_w,
-                    biHeight: -crop_h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-
-            // 試行 1: PrintWindow (PW_RENDERFULLCONTENT = 2)
-            {
-                let hdc1 = CreateCompatibleDC(hdc_window);
-                let hdc2 = CreateCompatibleDC(hdc_window);
-                let bmp1 = CreateCompatibleBitmap(hdc_window, full_w, full_h);
-                let bmp2 = CreateCompatibleBitmap(hdc_window, crop_w, crop_h);
-
-                let old1 = SelectObject(hdc1, bmp1);
-                let old2 = SelectObject(hdc2, bmp2);
-
-                let _ = PrintWindow(hwnd, hdc1, PW_RENDERFULLCONTENT);
-                let _ = BitBlt(hdc2, 0, 0, crop_w, crop_h, hdc1, crop_x, crop_y, SRCCOPY);
-
-                // ★重要: GetDIBits 呼び出し前に SelectObject を解除
-                SelectObject(hdc1, old1);
-                SelectObject(hdc2, old2);
-
-                let mut buffer: Vec<u8> = vec![0; (crop_w * crop_h * 4) as usize];
-                GetDIBits(
-                    hdc2,
-                    bmp2,
-                    0,
-                    crop_h as u32,
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut bi,
-                    DIB_RGB_COLORS,
-                );
-
-                let _ = DeleteObject(bmp1);
-                let _ = DeleteObject(bmp2);
-                let _ = DeleteDC(hdc1);
-                let _ = DeleteDC(hdc2);
-
-                if buffer.iter().any(|&b| b != 0) {
-                    captured_buffer = Some((crop_w, crop_h, buffer));
-                }
-            }
-
-            // 試行 2: レガシー PrintWindow (フラグ 0)
-            if captured_buffer.is_none() {
-                let hdc1 = CreateCompatibleDC(hdc_window);
-                let hdc2 = CreateCompatibleDC(hdc_window);
-                let bmp1 = CreateCompatibleBitmap(hdc_window, full_w, full_h);
-                let bmp2 = CreateCompatibleBitmap(hdc_window, crop_w, crop_h);
-
-                let old1 = SelectObject(hdc1, bmp1);
-                let old2 = SelectObject(hdc2, bmp2);
-
-                let _ = PrintWindow(hwnd, hdc1, 0);
-                let _ = BitBlt(hdc2, 0, 0, crop_w, crop_h, hdc1, crop_x, crop_y, SRCCOPY);
-
-                SelectObject(hdc1, old1);
-                SelectObject(hdc2, old2);
-
-                let mut buffer: Vec<u8> = vec![0; (crop_w * crop_h * 4) as usize];
-                GetDIBits(
-                    hdc2,
-                    bmp2,
-                    0,
-                    crop_h as u32,
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut bi,
-                    DIB_RGB_COLORS,
-                );
-
-                let _ = DeleteObject(bmp1);
-                let _ = DeleteObject(bmp2);
-                let _ = DeleteDC(hdc1);
-                let _ = DeleteDC(hdc2);
-
-                if buffer.iter().any(|&b| b != 0) {
-                    captured_buffer = Some((crop_w, crop_h, buffer));
-                }
-            }
-
-            // 試行 3: WindowDC から直接 BitBlt
-            if captured_buffer.is_none() {
-                let hdc2 = CreateCompatibleDC(hdc_window);
-                let bmp2 = CreateCompatibleBitmap(hdc_window, crop_w, crop_h);
-                let old2 = SelectObject(hdc2, bmp2);
-
-                let _ = BitBlt(
-                    hdc2, 0, 0, crop_w, crop_h, hdc_window, crop_x, crop_y, SRCCOPY,
-                );
-
-                SelectObject(hdc2, old2);
-
-                let mut buffer: Vec<u8> = vec![0; (crop_w * crop_h * 4) as usize];
-                GetDIBits(
-                    hdc2,
-                    bmp2,
-                    0,
-                    crop_h as u32,
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut bi,
-                    DIB_RGB_COLORS,
-                );
-
-                let _ = DeleteObject(bmp2);
-                let _ = DeleteDC(hdc2);
-
-                if buffer.iter().any(|&b| b != 0) {
-                    captured_buffer = Some((crop_w, crop_h, buffer));
-                }
-            }
-
-            ReleaseDC(hwnd, hdc_window);
-        }
-
-        // 2. 最終フォールバック
-        let (final_w, final_h, final_buffer) = match captured_buffer {
-            Some(res) => res,
-            None => {
-                let hwnd_desktop = GetDesktopWindow();
-                let hdc_desktop = GetDC(hwnd_desktop);
-                if hdc_desktop.is_invalid() {
-                    return capture_primary_screen_base64();
-                }
-
-                let hdc_mem = CreateCompatibleDC(hdc_desktop);
-                let hbitmap = CreateCompatibleBitmap(hdc_desktop, full_w, full_h);
-                let old = SelectObject(hdc_mem, hbitmap);
-
-                let _ = BitBlt(
-                    hdc_mem,
-                    0,
-                    0,
-                    full_w,
-                    full_h,
-                    hdc_desktop,
-                    rect.left,
-                    rect.top,
-                    SRCCOPY,
-                );
-
-                SelectObject(hdc_mem, old);
-
-                let mut bi = BITMAPINFO {
-                    bmiHeader: BITMAPINFOHEADER {
-                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                        biWidth: full_w,
-                        biHeight: -full_h,
-                        biPlanes: 1,
-                        biBitCount: 32,
-                        biCompression: BI_RGB.0,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-
-                let mut buffer: Vec<u8> = vec![0; (full_w * full_h * 4) as usize];
-                GetDIBits(
-                    hdc_mem,
-                    hbitmap,
-                    0,
-                    full_h as u32,
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut bi,
-                    DIB_RGB_COLORS,
-                );
-
-                let _ = DeleteObject(hbitmap);
-                let _ = DeleteDC(hdc_mem);
-                ReleaseDC(hwnd_desktop, hdc_desktop);
-
-                (full_w, full_h, buffer)
-            }
-        };
-
-        // BGRA -> RGBA 変換
-        let mut rgba_buffer = final_buffer;
-        for chunk in rgba_buffer.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-            chunk[3] = 255;
-        }
-
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            match ImageBuffer::from_raw(final_w as u32, final_h as u32, rgba_buffer) {
-                Some(im) => im,
-                None => return capture_primary_screen_base64(),
-            };
-
-        // メモリ上で PNG エンコード（ファイルウォッチャーの再起動ループを防止）
-        let mut png_bytes: Vec<u8> = Vec::new();
-        let mut cursor = Cursor::new(&mut png_bytes);
-        if img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
-            let b64 = BASE64.encode(&png_bytes);
-            Some(format!("data:image/png;base64,{}", b64))
-        } else {
-            capture_primary_screen_base64()
+    capture_window_with_log(title, None)
+}
+pub fn capture_window_with_log(
+    title: &str,
+    log: Option<&crate::logger::LogManager>,
+) -> Option<String> {
+    let result = capture_target(title, log);
+    if let Some(log) = log {
+        match &result {
+            Ok((target, _)) => log.info("Capture", &format!("target_title={:?} target_hwnd={} target_pid={} target_executable={:?} target_class={:?} capture_method=WGC capture_hwnd={} capture_status=ready reconnect_reason=snapshot_session fallback_reason=none", title, target.hwnd, target.pid, target.executable, target.class_name, target.hwnd)),
+            Err(error) => log.warn("Capture", &format!("target_title={:?} capture_method=WGC capture_status=CaptureUnavailable reconnect_reason={:?} fallback_reason=disabled", title, error)),
         }
     }
+    result.ok().map(|(_, image)| image)
+}
+fn capture_target(
+    title: &str,
+    log: Option<&crate::logger::LogManager>,
+) -> Result<(WindowIdentity, String), String> {
+    let _guard = CAPTURE_GATE.try_lock().map_err(|_| "capture_busy")?;
+    let target = target_for(title).ok_or("target missing, inaccessible, or ambiguous")?;
+    if let Some(log) = log {
+        log.info("Capture", &format!("target_title={:?} target_hwnd={} target_pid={} target_executable={:?} target_class={:?} capture_method=WGC capture_hwnd={} capture_status=starting reconnect_reason=new_snapshot_session fallback_reason=disabled", title, target.hwnd, target.pid, target.executable, target.class_name, target.hwnd));
+    }
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let settings = Settings::new(
+        Window::from_raw_hwnd(target.hwnd as *mut _),
+        CursorCaptureSettings::WithoutCursor,
+        DrawBorderSettings::Default,
+        SecondaryWindowSettings::Exclude,
+        MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default,
+        ColorFormat::Rgba8,
+        (target.clone(), sender),
+    );
+    let control = Snapshot::start_free_threaded(settings).map_err(|e| e.to_string())?;
+    let result = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "frame timeout".to_string())
+        .and_then(|r| r);
+    let _ = control.stop();
+    result.map(|image| (target, image))
 }
 
-/// プライマリスクリーン（画面全体）のキャプチャを Base64 文字列（PNG）で取得
-pub fn capture_primary_screen_base64() -> Option<String> {
-    unsafe {
-        let hwnd_desktop = GetDesktopWindow();
-        let hdc_screen = GetDC(hwnd_desktop);
-        if hdc_screen.is_invalid() {
-            return None;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn target(hwnd: usize, pid: u32) -> WindowIdentity {
+        WindowIdentity {
+            hwnd,
+            pid,
+            title: "AION2".into(),
+            class_name: "game".into(),
+            executable: "game.exe".into(),
         }
-
-        let width = GetSystemMetrics(SM_CXSCREEN);
-        let height = GetSystemMetrics(SM_CYSCREEN);
-
-        if width <= 0 || height <= 0 {
-            ReleaseDC(hwnd_desktop, hdc_screen);
-            return None;
-        }
-
-        let hdc_mem = CreateCompatibleDC(hdc_screen);
-        let hbitmap = CreateCompatibleBitmap(hdc_screen, width, height);
-        let h_old = SelectObject(hdc_mem, hbitmap);
-
-        let _ = BitBlt(hdc_mem, 0, 0, width, height, hdc_screen, 0, 0, SRCCOPY);
-
-        let mut bi = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height, // top-down
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let mut buffer: Vec<u8> = vec![0; (width * height * 4) as usize];
-        GetDIBits(
-            hdc_mem,
-            hbitmap,
-            0,
-            height as u32,
-            Some(buffer.as_mut_ptr() as *mut _),
-            &mut bi,
-            DIB_RGB_COLORS,
+    }
+    #[test]
+    fn empty_target_does_not_capture_desktop() {
+        assert!(capture_window_base64("").is_none());
+    }
+    #[test]
+    fn platform_missing_target_does_not_capture_desktop() {
+        assert!(capture_window_base64("GameAssistant-nonexistent-window-54-unique").is_none());
+    }
+    #[test]
+    fn reconnect_never_selects_another_process_or_ambiguous_window() {
+        let original = target(10, 42);
+        assert_eq!(
+            resolve_identity(&original, &[target(11, 42)]).unwrap().hwnd,
+            11
         );
-
-        SelectObject(hdc_mem, h_old);
-        let _ = DeleteObject(hbitmap);
-        let _ = DeleteDC(hdc_mem);
-        ReleaseDC(hwnd_desktop, hdc_screen);
-
-        let mut rgba_buffer = buffer;
-        for chunk in rgba_buffer.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-            chunk[3] = 255;
-        }
-
-        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-            ImageBuffer::from_raw(width as u32, height as u32, rgba_buffer)?;
-
-        let mut png_bytes: Vec<u8> = Vec::new();
-        let mut cursor = Cursor::new(&mut png_bytes);
-        if img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
-            let b64 = BASE64.encode(&png_bytes);
-            Some(format!("data:image/png;base64,{}", b64))
-        } else {
-            None
-        }
+        assert!(resolve_identity(&original, &[target(10, 43)]).is_none());
+        assert!(resolve_identity(&original, &[target(11, 42), target(12, 42)]).is_none());
+        let mut other = target(11, 42);
+        other.executable = "firefox.exe".into();
+        assert!(resolve_identity(&original, &[other]).is_none());
+    }
+    #[test]
+    fn unchanged_hwnd_must_still_belong_to_the_target() {
+        let original = target(10, 42);
+        let mut changed_title = original.clone();
+        changed_title.title = "Loading".into();
+        assert_eq!(
+            resolve_identity(&original, &[changed_title]).unwrap().hwnd,
+            10
+        );
     }
 }

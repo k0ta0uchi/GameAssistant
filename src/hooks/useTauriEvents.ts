@@ -42,6 +42,7 @@ export interface UseTauriEventsOptions {
     }>
   >;
   // Audio setters
+  selectedWindow?: string;
   setPreviewImage: React.Dispatch<React.SetStateAction<string>>;
   // Setup handlers
   handleAsrReady: () => void;
@@ -81,6 +82,7 @@ export function useTauriEvents(
     setVram,
     setRam,
     setCommentaryTimer,
+    selectedWindow,
     setPreviewImage,
     handleAsrReady,
     handleAsrWarmupFailed,
@@ -89,6 +91,8 @@ export function useTauriEvents(
   } = options;
 
   // トースト通知状態
+  const captureTargetRef = useRef(selectedWindow);
+  captureTargetRef.current = selectedWindow;
   const [toast, setToast] = useState<{
     id: string;
     message: string;
@@ -311,10 +315,10 @@ export function useTauriEvents(
             }
           });
 
-          await register<{ image?: string; source?: string }>(
+          await register<{ image?: string; source?: string; target?: string }>(
             "window_preview_updated",
             (event) => {
-              if (event.payload?.image) {
+              if (typeof event.payload?.image === "string" && event.payload.target === captureTargetRef.current) {
                 setPreviewImage(event.payload.image);
               }
             },

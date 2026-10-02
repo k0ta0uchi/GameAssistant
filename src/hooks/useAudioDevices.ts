@@ -64,22 +64,18 @@ export function useAudioDevices(
   const selectedWindowRef = useRef(selectedWindow);
   useEffect(() => {
     selectedWindowRef.current = selectedWindow;
+    setPreviewImage("");
   }, [selectedWindow]);
 
-  const isFetchingPreviewRef = useRef(false);
   const fetchPreview = useCallback(async (targetWindowName?: string) => {
     const win = targetWindowName || selectedWindowRef.current;
-    if (!win || isFetchingPreviewRef.current) return;
-    isFetchingPreviewRef.current = true;
+    if (!win) return;
     try {
       const preview = await captureWindowPreviewApi(win);
-      if (preview) {
-        setPreviewImage(preview);
-      }
+      if (win === selectedWindowRef.current) setPreviewImage(preview || "");
     } catch (e) {
+      if (win === selectedWindowRef.current) setPreviewImage("");
       console.error("Failed to fetch preview:", e);
-    } finally {
-      isFetchingPreviewRef.current = false;
     }
   }, []);
 
@@ -110,7 +106,7 @@ export function useAudioDevices(
       const winList = await listWindowsApi();
       setWindows(winList);
       setSelectedWindow((prev) => {
-        const target = prev && winList.includes(prev) ? prev : winList[0] || "";
+        const target = prev;
         return target;
       });
     } catch (e) {
