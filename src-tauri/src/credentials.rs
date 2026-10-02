@@ -1,15 +1,100 @@
+use parking_lot::Mutex;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use windows::core::{HSTRING, PCWSTR};
-use windows::Win32::Foundation::{LocalFree, HLOCAL};
+use windows::Win32::Foundation::{
+    CloseHandle, LocalFree, HANDLE, HLOCAL, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows::Win32::Security::Cryptography::{
     CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
 };
 use windows::Win32::Storage::FileSystem::{
     MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
+use windows::Win32::System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject};
+
+static PROCESS_DIR_MUTEXES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn get_process_dir_mutex(root_dir: &Path) -> Arc<Mutex<()>> {
+    let canonical = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf());
+    let registry = PROCESS_DIR_MUTEXES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = registry.lock();
+    map.entry(canonical)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Windows Named Mutex の RAII ガード
+#[derive(Debug)]
+pub(crate) struct NamedMutexGuard(HANDLE);
+
+unsafe impl Send for NamedMutexGuard {}
+unsafe impl Sync for NamedMutexGuard {}
+
+impl Drop for NamedMutexGuard {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = ReleaseMutex(self.0);
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// プロセス内 Mutex と Windows Named Mutex を組み合わせた排他ロックガード
+pub struct CredentialLockGuard<'a> {
+    _process_guard: parking_lot::MutexGuard<'a, ()>,
+    _named_guard: NamedMutexGuard,
+}
+
+fn acquire_named_mutex(root_dir: &Path, timeout_ms: u32) -> Result<NamedMutexGuard, String> {
+    let canonical = root_dir
+        .canonicalize()
+        .unwrap_or_else(|_| root_dir.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let hash_bytes = hasher.finalize();
+    let hash_hex: String = hash_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let lock_name = format!("Local\\GameAssistant_CredLock_{}", hash_hex);
+    let lock_name_w: Vec<u16> = lock_name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let handle = CreateMutexW(None, false, PCWSTR(lock_name_w.as_ptr())).map_err(|e| {
+            format!(
+                "Failed to create/open named mutex for credentials on '{}': {}",
+                root_dir.display(),
+                e
+            )
+        })?;
+
+        match WaitForSingleObject(handle, timeout_ms) {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(NamedMutexGuard(handle)),
+            WAIT_TIMEOUT => {
+                let _ = CloseHandle(handle);
+                Err(format!(
+                    "Timed out waiting for credential lock on '{}' after {} ms",
+                    root_dir.display(),
+                    timeout_ms
+                ))
+            }
+            other => {
+                let _ = CloseHandle(handle);
+                Err(format!(
+                    "Failed to acquire credential lock on '{}', wait result: {:?}",
+                    root_dir.display(),
+                    other
+                ))
+            }
+        }
+    }
+}
 
 /// 既存ファイルを安全にアトミック置換する (Windows MoveFileExW with MOVEFILE_REPLACE_EXISTING)
 pub fn atomic_replace_file(from: &Path, to: &Path) -> Result<(), String> {
@@ -120,25 +205,61 @@ pub fn dpapi_decrypt(data: &[u8]) -> Result<Vec<u8>, String> {
 /// 資格情報ストアの抽象トレイト
 pub trait CredentialStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<String>, String>;
-    fn set(&self, key: &str, value: &str) -> Result<(), String>;
-    fn delete(&self, key: &str) -> Result<(), String>;
+    fn set(&self, key: &str, value: &str) -> Result<(), String> {
+        let trimmed = value.trim().to_string();
+        let key_str = key.to_string();
+        self.mutate(&mut move |map| {
+            if trimmed.is_empty() {
+                map.remove(&key_str);
+            } else {
+                map.insert(key_str.clone(), trimmed.clone());
+            }
+            Ok(true)
+        })
+    }
+    fn delete(&self, key: &str) -> Result<(), String> {
+        let key_str = key.to_string();
+        self.mutate(&mut move |map| {
+            let changed = map.remove(&key_str).is_some();
+            Ok(changed)
+        })
+    }
     fn exists(&self, key: &str) -> Result<bool, String> {
         self.get(key).map(|opt| opt.is_some())
     }
     fn list_configured_keys(&self) -> Result<Vec<String>, String>;
+
+    /// 資格情報マップを一括・アトミックに変更する。
+    /// クロージャが true を返した場合のみファイル（またはストレージ）への書き込み・保存が行われる。
+    fn mutate(
+        &self,
+        f: &mut dyn FnMut(&mut HashMap<String, String>) -> Result<bool, String>,
+    ) -> Result<(), String>;
 }
 
 /// DPAPI で暗号化されたローカルファイルストア (credentials.enc)
 #[derive(Clone, Debug)]
 pub struct DpapiCredentialStore {
     root_dir: PathBuf,
+    process_lock: Arc<Mutex<()>>,
 }
 
 impl DpapiCredentialStore {
     pub fn new(root_dir: &Path) -> Self {
+        let process_lock = get_process_dir_mutex(root_dir);
         Self {
             root_dir: root_dir.to_path_buf(),
+            process_lock,
         }
+    }
+
+    pub fn acquire_lock(&self) -> Result<CredentialLockGuard<'_>, String> {
+        let process_guard = self.process_lock.lock();
+        let named_guard = acquire_named_mutex(&self.root_dir, 30_000)?;
+        Ok(CredentialLockGuard {
+            _process_guard: process_guard,
+            _named_guard: named_guard,
+        })
     }
 
     fn credentials_path(&self) -> PathBuf {
@@ -204,36 +325,32 @@ impl DpapiCredentialStore {
 
 impl CredentialStore for DpapiCredentialStore {
     fn get(&self, key: &str) -> Result<Option<String>, String> {
+        let _lock = self.acquire_lock()?;
         let map = self.load_map()?;
         Ok(map.get(key).cloned().filter(|v| !v.trim().is_empty()))
     }
 
-    fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        let mut map = self.load_map()?;
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            map.remove(key);
-        } else {
-            map.insert(key.to_string(), trimmed.to_string());
-        }
-        self.save_map(&map)
-    }
-
-    fn delete(&self, key: &str) -> Result<(), String> {
-        let mut map = self.load_map()?;
-        if map.remove(key).is_some() {
-            self.save_map(&map)?;
-        }
-        Ok(())
-    }
-
     fn list_configured_keys(&self) -> Result<Vec<String>, String> {
+        let _lock = self.acquire_lock()?;
         let map = self.load_map()?;
         Ok(map
             .into_iter()
             .filter(|(_, v)| !v.trim().is_empty())
             .map(|(k, _)| k)
             .collect())
+    }
+
+    fn mutate(
+        &self,
+        f: &mut dyn FnMut(&mut HashMap<String, String>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let _lock = self.acquire_lock()?;
+        let mut map = self.load_map()?;
+        let changed = f(&mut map)?;
+        if changed {
+            self.save_map(&map)?;
+        }
+        Ok(())
     }
 }
 
@@ -255,23 +372,6 @@ impl CredentialStore for InMemoryCredentialStore {
         Ok(lock.get(key).cloned().filter(|v| !v.trim().is_empty()))
     }
 
-    fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        let mut lock = self.secrets.write();
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            lock.remove(key);
-        } else {
-            lock.insert(key.to_string(), trimmed.to_string());
-        }
-        Ok(())
-    }
-
-    fn delete(&self, key: &str) -> Result<(), String> {
-        let mut lock = self.secrets.write();
-        lock.remove(key);
-        Ok(())
-    }
-
     fn list_configured_keys(&self) -> Result<Vec<String>, String> {
         let lock = self.secrets.read();
         Ok(lock
@@ -279,6 +379,15 @@ impl CredentialStore for InMemoryCredentialStore {
             .filter(|(_, v)| !v.trim().is_empty())
             .map(|(k, _)| k.clone())
             .collect())
+    }
+
+    fn mutate(
+        &self,
+        f: &mut dyn FnMut(&mut HashMap<String, String>) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let mut lock = self.secrets.write();
+        let _changed = f(&mut lock)?;
+        Ok(())
     }
 }
 
@@ -340,15 +449,16 @@ pub fn migrate_credentials_if_needed(
         return Ok(Vec::new());
     }
 
-    // 1. 各機密値を credential store に保存
-    for (k, v) in &keys_to_migrate {
-        store.set(k, v).map_err(|e| {
-            format!(
-                "Failed to migrate secret '{}' to credential store: {}",
-                k, e
-            )
-        })?;
-    }
+    // 1. 各機密値を credential store に一括保存 (mutate によるアトミックなバッチ更新)
+    let keys_to_migrate_ref = &keys_to_migrate;
+    store
+        .mutate(&mut |cred_map| {
+            for (k, v) in keys_to_migrate_ref {
+                cred_map.insert(k.clone(), v.clone());
+            }
+            Ok(true)
+        })
+        .map_err(|e| format!("Failed to migrate secrets to credential store: {}", e))?;
 
     // 2. すべての保存が成功した後にのみ、settings.json から平文キーを削除
     let mut migrated_keys = Vec::new();
@@ -889,6 +999,156 @@ mod tests {
         );
 
         drop(_locked_file);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Issue #42 回帰テスト:
+    /// 並行する複数スレッドから異なるキーを一斉に set しても
+    /// 排他制御により lost update が発生せず、全キーが確実に保存されることを検証する
+    #[test]
+    fn test_concurrent_set_distinct_keys_no_lost_update() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_concurrent_set_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let num_threads = 10;
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+        let mut handles = Vec::new();
+
+        for i in 0..num_threads {
+            let dir = temp_dir.clone();
+            let b = barrier.clone();
+            let handle = std::thread::spawn(move || {
+                let store = DpapiCredentialStore::new(&dir);
+                b.wait();
+                let key = format!("concurrent_key_{}", i);
+                let val = format!("concurrent_val_{}", i);
+                store.set(&key, &val).expect("concurrent set must succeed");
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("thread join must succeed");
+        }
+
+        let verify_store = DpapiCredentialStore::new(&temp_dir);
+        let keys = verify_store.list_configured_keys().expect("list keys");
+        assert_eq!(
+            keys.len(),
+            num_threads,
+            "All concurrently written distinct keys must be preserved without lost update"
+        );
+
+        for i in 0..num_threads {
+            let key = format!("concurrent_key_{}", i);
+            let expected_val = format!("concurrent_val_{}", i);
+            assert_eq!(
+                verify_store.get(&key).expect("get key").as_deref(),
+                Some(expected_val.as_str()),
+                "Value for key '{}' must match",
+                key
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Issue #42 回帰テスト:
+    /// 複数スレッドから高頻度で並行して set と delete を実行しても、
+    /// credentials.enc が破損せず整合性が維持されることを検証する
+    #[test]
+    fn test_concurrent_set_and_delete_consistency() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_concurrent_set_del_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // 初期キーを準備
+        let initial_store = DpapiCredentialStore::new(&temp_dir);
+        for i in 0..5 {
+            initial_store
+                .set(&format!("shared_key_{}", i), "initial_val")
+                .unwrap();
+        }
+
+        let num_threads = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+        let mut handles = Vec::new();
+
+        for i in 0..num_threads {
+            let dir = temp_dir.clone();
+            let b = barrier.clone();
+            let handle = std::thread::spawn(move || {
+                let store = DpapiCredentialStore::new(&dir);
+                b.wait();
+                for iter in 0..5 {
+                    let key = format!("shared_key_{}", (i + iter) % 5);
+                    if (i + iter) % 2 == 0 {
+                        let _ = store.set(&key, &format!("worker_{}_iter_{}", i, iter));
+                    } else {
+                        let _ = store.delete(&key);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("thread join must succeed");
+        }
+
+        // 高頻度並行操作後も破損せず正常に読み取れることの検証
+        let verify_store = DpapiCredentialStore::new(&temp_dir);
+        let configured = verify_store
+            .list_configured_keys()
+            .expect("must parse successfully");
+        for key in &configured {
+            let val = verify_store.get(key).expect("must get value");
+            assert!(val.is_some(), "Configured key must have a value");
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Issue #42 回帰テスト:
+    /// mutate による一括更新と、クロージャ内エラー発生時のロールバック（変更破棄）を検証する
+    #[test]
+    fn test_mutate_atomic_batch_update() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_mutate_batch_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let store = DpapiCredentialStore::new(&temp_dir);
+        store.set("key_a", "val_a").unwrap();
+
+        // 一括更新
+        store
+            .mutate(&mut |map| {
+                map.insert("key_b".to_string(), "val_b".to_string());
+                map.insert("key_c".to_string(), "val_c".to_string());
+                map.remove("key_a");
+                Ok(true)
+            })
+            .expect("mutate batch must succeed");
+
+        assert_eq!(store.get("key_a").unwrap(), None);
+        assert_eq!(store.get("key_b").unwrap().as_deref(), Some("val_b"));
+        assert_eq!(store.get("key_c").unwrap().as_deref(), Some("val_c"));
+
+        // エラー発生時のロールバック検証（ファイルへの書き込みが行われないこと）
+        let err_res = store.mutate(&mut |map| {
+            map.insert("key_temp".to_string(), "val_temp".to_string());
+            Err("abort mutation".to_string())
+        });
+        assert!(err_res.is_err());
+        assert_eq!(store.get("key_temp").unwrap(), None);
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 }
