@@ -601,18 +601,6 @@ def get_embedding_model():
     return _embedding_model
 
 
-# 3. VRAM 事前確保 (Preallocation) の無力化（不要な1GBダミー確保を廃止）
-_vram_preallocate_buffer = None
-
-
-def set_vram_preallocation(enable: bool) -> bool:
-    # 廃止: PyTorch 1GB 確保は CTranslate2 で再利用できず、VRAMを圧迫するため無効化
-    logger.info(
-        "VRAM preallocation request handled (no-op: CTranslate2 manages its own workspace memory)."
-    )
-    return True
-
-
 def new_stream_state():
     return {
         # Audio Buffers: full utterance PCM for complete final transcription
@@ -1245,16 +1233,6 @@ async def asr_handler(websocket):
                                 "type": "embed_res",
                                 "id": req_id,
                                 "vectors": vectors,
-                            }
-                        )
-                    elif cmd == "preallocate_vram":
-                        enable = data.get("enable", True)
-                        success = set_vram_preallocation(enable)
-                        await send_queue.put(
-                            {
-                                "type": "preallocate_res",
-                                "success": success,
-                                "enabled": enable,
                             }
                         )
                 except Exception as err:

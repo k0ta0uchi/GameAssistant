@@ -705,23 +705,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
               <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
                 <div>
-                  <div className="text-white font-medium">Preallocate VRAM</div>
-                  <div className="text-[11px] text-[#62666d]">
-                    PyTorch の VRAM を事前割り当てしてメモリ断片化を抑制します
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={Boolean(settings.preallocate_vram)}
-                  onChange={(e) =>
-                    onUpdateSetting("preallocate_vram", e.target.checked)
-                  }
-                  className="w-4 h-4 rounded accent-[#e4f222]"
-                />
-              </label>
-
-              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
-                <div>
                   <div className="text-white font-medium">
                     Auto-Restart Slow Whisper (遅延自動検知＆再起動)
                   </div>

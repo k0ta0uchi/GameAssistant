@@ -2741,15 +2741,15 @@ for (const [reason, expectedLabel, retryable] of [
 {
   const { harness } = makeHarness();
   harness.saveSettingWarning =
-    "Failed to apply VRAM preallocation to ASR worker: WebSocket connection not active";
+    "Failed to apply setting to worker: WebSocket connection not active";
 
   const { renderer, snapshot } = await mountHook(harness);
   await act(async () => {
-    await snapshot.current!.updateSetting("preallocate_vram", true);
+    await snapshot.current!.updateSetting("test_worker_sync_key", true);
   });
 
   assert.equal(
-    snapshot.current!.settings.preallocate_vram,
+    snapshot.current!.settings.test_worker_sync_key,
     true,
     "Settings should remain updated when persistence succeeds",
   );
@@ -3197,9 +3197,10 @@ for (const [reason, expectedLabel, retryable] of [
   const cpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper CPU");
   assert.ok(gpu && cpu, "Whisper GPU/CPU controls must render in Engines");
   const text = JSON.stringify(renderer.toJSON());
-  for (const label of ["ASR Engine (Whisper Model)", "Preallocate VRAM", "Auto-Restart Slow Whisper", "起動時にWhisperモデルを事前ロード"]) {
+  for (const label of ["ASR Engine (Whisper Model)", "Auto-Restart Slow Whisper", "起動時にWhisperモデルを事前ロード"]) {
     assert.ok(text.includes(label), `${label} must be grouped in Engines`);
   }
+  assert.equal(text.includes("Preallocate VRAM"), false, "Preallocate VRAM must not render in Engines");
   assert.equal(text.includes("Enable Auto Commentary"), false);
   assert.equal(cpu!.props["aria-pressed"], true);
   await act(async () => { await gpu!.props.onClick(); });

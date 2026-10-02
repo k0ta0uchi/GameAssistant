@@ -1076,22 +1076,6 @@ impl WhisperWsClient {
             .map_err(|_| "Embedding channel dropped".to_string())
     }
 
-    /// VRAM 事前確保 (1GB) の動的切り替え
-    pub fn set_preallocate_vram(&self, enable: bool) -> Result<(), String> {
-        let msg = serde_json::json!({
-            "cmd": "preallocate_vram",
-            "enable": enable,
-        })
-        .to_string();
-
-        if let Some(ref sender) = *self.cmd_tx.lock() {
-            sender.send(msg).map_err(|e| e.to_string())?;
-            Ok(())
-        } else {
-            Err("WebSocket connection not active".to_string())
-        }
-    }
-
     /// Faster-Whisper WebSocket サーバーを起動し、ws://127.0.0.1:18088/asr に接続
     pub fn start<F>(&self, on_result: F) -> Result<(), String>
     where

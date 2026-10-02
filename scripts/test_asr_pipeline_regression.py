@@ -120,7 +120,6 @@ class AsrPipelineRegressionTests(unittest.IsolatedAsyncioTestCase):
                 "SHORT_UTTERANCE_FINAL_TIMEOUT_SECONDS", 0.75
             ),
             "get_embedding_model": lambda: None,
-            "set_vram_preallocation": lambda x: True,
             "websockets": SimpleNamespace(
                 exceptions=SimpleNamespace(ConnectionClosed=Exception)
             ),

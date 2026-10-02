@@ -246,25 +246,6 @@ fn save_setting(
                     window_capture::select_target(title);
                 }
             }
-            if k == "preallocate_vram" {
-                if let Some(enable) = v.as_bool() {
-                    if let Err(e) = state
-                        .session_mgr
-                        .asr_engine
-                        .ws_client
-                        .set_preallocate_vram(enable)
-                    {
-                        let warn_msg =
-                            format!("Failed to apply VRAM preallocation to ASR worker: {}", e);
-                        state.log_mgr.warn("System", &warn_msg);
-                        return Err(warn_msg);
-                    } else {
-                        state
-                            .log_mgr
-                            .info("System", &format!("VRAM Preallocation updated: {}", enable));
-                    }
-                }
-            }
             Ok(())
         })
     }
