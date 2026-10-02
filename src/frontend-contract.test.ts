@@ -3105,6 +3105,29 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// Manual ASR device controls expose the persisted selection and save through settings.
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+  const updates: Array<[string, unknown]> = [];
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(SettingsModal, {
+      isOpen: true, onClose: () => {}, initialTab: "preferences",
+      settings: { whisper_device: "cpu" }, discordDevices: [],
+      onUpdateSetting: async (key: string, value: unknown) => { updates.push([key, value]); },
+    } as any));
+  });
+  const gpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper GPU");
+  const cpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper CPU");
+  assert.ok(gpu && cpu, "Whisper GPU/CPU controls must render");
+  assert.equal(cpu!.props["aria-pressed"], true);
+  await act(async () => { await gpu!.props.onClick(); });
+  assert.deepEqual(updates, [["whisper_device", "cuda"]]);
+  renderer.unmount();
+  await settleEffects();
+}
+
 // Let any deferred setup effects settle while the final Tauri harness is still
 // installed, keeping npm test output deterministic.
 makeHarness();

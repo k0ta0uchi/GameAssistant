@@ -1281,6 +1281,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 )}
               </div>
 
+              <div className="p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a]">
+                <div className="text-white font-medium">Whisper 実行モード</div>
+                <div className="flex gap-2 mt-2">
+                  {(["cuda", "cpu"] as const).map(device => (
+                    <button key={device} aria-label={`Whisper ${device === "cuda" ? "GPU" : "CPU"}`}
+                      aria-pressed={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device}
+                      className={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device ? "linear-btn-primary px-3 py-1" : "linear-btn-ghost px-3 py-1"}
+                      onClick={() => onUpdateSetting("whisper_device", device)}>
+                      {device === "cuda" ? "GPU" : "CPU"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-[#8a8f98] mt-2">選択は保存され、次回のアプリ起動または「Restart Whisper」で反映されます。GPUの自動CPUフォールバックは引き続き有効です。実際のデバイスはASRステータスとログで確認できます。</p>
+              </div>
+
               <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
                 <div>
                   <div className="text-white font-medium">Preallocate VRAM</div>
