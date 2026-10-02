@@ -734,6 +734,12 @@ async fn warmup_asr(app: AppHandle, state: State<'_, AppState>) -> Result<String
 }
 
 #[tauri::command]
+fn get_whisper_status(state: State<AppState>) -> serde_json::Value {
+    let client = &state.session_mgr.asr_engine.ws_client;
+    serde_json::json!({"device": client.current_device.lock().clone(), "ready": client.is_ready()})
+}
+
+#[tauri::command]
 async fn restart_whisper(state: State<'_, AppState>) -> Result<String, String> {
     bootstrap::runtime_is_ready(&state.root_dir)
         .map_err(|error| format!("Whisper restart blocked: {}", error))?;
@@ -1573,6 +1579,7 @@ pub fn run() {
             gemini_list_models,
             warmup_asr,
             restart_whisper,
+            get_whisper_status,
             get_models_status,
             download_model,
             cancel_download_model,

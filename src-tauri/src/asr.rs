@@ -890,6 +890,7 @@ pub struct WhisperWsClient {
     cmd_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     child: Arc<Mutex<Option<Child>>>,
     lifecycle_lock: Arc<Mutex<()>>,
+    restart_gate: tokio::sync::Mutex<()>,
     process_lock: Arc<Mutex<()>>,
     #[cfg(windows)]
     job: Arc<Mutex<Option<AsrJobHandle>>>,
@@ -921,6 +922,7 @@ impl WhisperWsClient {
             cmd_tx: Mutex::new(None),
             child: Arc::new(Mutex::new(None)),
             lifecycle_lock: Arc::new(Mutex::new(())),
+            restart_gate: tokio::sync::Mutex::new(()),
             process_lock: Arc::new(Mutex::new(())),
             #[cfg(windows)]
             job: Arc::new(Mutex::new(None)),
@@ -1737,6 +1739,10 @@ impl WhisperWsClient {
 
     /// Whisper ワーカーを指定デバイス（"cpu" / "cuda"）で再起動
     pub async fn restart_with_device(&self, device: Option<String>) -> Result<(), String> {
+        let _restart_guard = self
+            .restart_gate
+            .try_lock()
+            .map_err(|_| "Whisper restart already in progress".to_string())?;
         let device = self.resolve_restart_device(device);
         let cb_opt = self.callback.lock().clone();
         self.stop();
@@ -2551,6 +2557,18 @@ pub fn match_wake_word_in_source(text: &str, wake_words: &[String]) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn test_concurrent_restart_is_rejected_before_worker_stop() {
+        let client = super::WhisperWsClient::new();
+        let _guard = client.restart_gate.lock().await;
+        let error = client
+            .restart_with_device(Some("cpu".to_string()))
+            .await
+            .unwrap_err();
+        assert!(error.contains("already in progress"));
+        assert_eq!(*client.forced_device.lock(), None);
+    }
+
     #[test]
     fn test_supervisor_restart_preserves_device_policy() {
         let client = super::WhisperWsClient::new();

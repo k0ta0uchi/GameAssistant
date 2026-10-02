@@ -115,6 +115,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   initialTab = "engines",
   onRefreshModelsStatus,
 }) => {
+  const switchBusy = useRef(false);
+  const [switching, setSwitching] = useState(false);
+  const [switchMessage, setSwitchMessage] = useState("");
+  const [workerStatus, setWorkerStatus] = useState<{device: string; ready: boolean} | null>(null);
+  const refreshWhisperStatus = async () => {
+    try { setWorkerStatus(await invoke("get_whisper_status")); }
+    catch { setWorkerStatus(null); }
+  };
+  useEffect(() => {
+    if (!isOpen) return;
+    void refreshWhisperStatus();
+    const timer = setInterval(() => void refreshWhisperStatus(), 1000);
+    return () => clearInterval(timer);
+  }, [isOpen]);
+  const switchWhisper = async (device: "cpu" | "cuda") => {
+    if (switchBusy.current) return;
+    switchBusy.current = true;
+    setSwitching(true);
+    setSwitchMessage(`Switching to ${device === "cpu" ? "CPU" : "GPU"}...`);
+    try {
+      await onUpdateSetting("whisper_device", device, { throwOnError: true });
+      setSwitchMessage("Restarting / Warming up...");
+      await invoke("restart_whisper");
+      await refreshWhisperStatus();
+      setSwitchMessage("Warmup complete");
+    } catch (error) {
+      await refreshWhisperStatus();
+      setSwitchMessage(`Switch failed: ${String(error)} — 再試行できます`);
+    } finally {
+      switchBusy.current = false;
+      setSwitching(false);
+    }
+  };
   const [activeTab, setActiveTab] = useState<
     "engines" | "models" | "prompts" | "twitch" | "preferences" | "blog_skills"
   >(initialTab);
@@ -658,12 +691,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <button key={device} aria-label={`Whisper ${device === "cuda" ? "GPU" : "CPU"}`}
                       aria-pressed={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device}
                       className={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device ? "linear-btn-primary px-3 py-1" : "linear-btn-ghost px-3 py-1"}
-                      onClick={() => onUpdateSetting("whisper_device", device)}>
+                      disabled={switching}
+                      onClick={() => switchWhisper(device)}>
                       {device === "cuda" ? "GPU" : "CPU"}
                     </button>
                   ))}
                 </div>
-                <p className="text-[11px] text-[#8a8f98] mt-2">選択は保存され、次回のアプリ起動または「Restart Whisper」で反映されます。GPUの自動CPUフォールバックは引き続き有効です。実際のデバイスはASRステータスとログで確認できます。</p>
+                <p role="status" className="text-[11px] text-[#8a8f98] mt-2">
+                  Selected: {settings.whisper_device === "cpu" ? "CPU" : "GPU"} / Running: {workerStatus?.ready ? (workerStatus.device === "cpu" ? `CPU${settings.whisper_device !== "cpu" ? " (Fallback)" : ""} Ready` : "GPU Ready") : "Unavailable / Warming up"}
+                  {switchMessage && <span className="block">{switchMessage}</span>}
+                </p>
               </div>
 
               <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
