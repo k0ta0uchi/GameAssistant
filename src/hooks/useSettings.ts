@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import type {
   PromptItem,
   LocalSummaryState,
@@ -84,9 +84,14 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsResult
   const [settings, setSettings] = useState<Record<string, unknown>>({});
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
 
+  const settingsRevision = useRef(0);
+  const savesInFlight = useRef(0);
   const fetchSettings = useCallback(async (): Promise<Record<string, unknown> | null> => {
     try {
+      const revision = settingsRevision.current;
+      const loadingDuringSave = savesInFlight.current > 0;
       const loaded = await loadSettingsApi();
+      if (loadingDuringSave || savesInFlight.current > 0 || revision !== settingsRevision.current) return null;
       if (loaded && Object.keys(loaded).length > 0) {
         setSettings(loaded);
         return loaded;
@@ -103,6 +108,8 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsResult
       value: any,
       opt: SettingUpdateOptions = {},
     ): Promise<void> => {
+      settingsRevision.current++;
+      savesInFlight.current++;
       let prevValue: any;
 
       // 1. ローカルステート即時更新（Optimistic update）
@@ -141,6 +148,9 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsResult
         showToast?.(`設定「${key}」の保存に失敗しました: ${errText}`, "warning");
 
         if (opt.throwOnError) throw e;
+      } finally {
+        savesInFlight.current--;
+        settingsRevision.current++;
       }
     },
     [onSettingRollback, onSettingSynchronized, showToast],

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useState } from 'react';
 import { Play, Square, RotateCcw } from 'lucide-react';
 
 interface ActionButtonsProps {
@@ -9,6 +9,8 @@ interface ActionButtonsProps {
   onStart: () => void;
   onStop: () => void;
   onRestartWhisper: () => void;
+  autoCommentaryEnabled?: boolean;
+  onToggleAutoCommentary?: (enabled: boolean) => Promise<void>;
 }
 
 export const ActionButtons: React.FC<ActionButtonsProps> = ({
@@ -19,7 +21,21 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({
   onStart,
   onStop,
   onRestartWhisper,
+  autoCommentaryEnabled = false,
+  onToggleAutoCommentary,
 }) => {
+  const saving = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const toggle = async () => {
+    if (saving.current || !onToggleAutoCommentary) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try { await onToggleAutoCommentary(!autoCommentaryEnabled); }
+    catch (e) { setError(`自動ツッコミの保存に失敗しました: ${String(e)}`); }
+    finally { saving.current = false; setBusy(false); }
+  };
   return (
     <div className="flex flex-col gap-2">
       {sessionRunning ? (
@@ -49,6 +65,18 @@ export const ActionButtons: React.FC<ActionButtonsProps> = ({
           </span>
         </button>
       )}
+
+      <button
+        aria-label="自動ツッコミ"
+        aria-pressed={autoCommentaryEnabled}
+        aria-busy={busy}
+        disabled={busy || !onToggleAutoCommentary}
+        onClick={toggle}
+        className={`w-full py-2 px-3 rounded-[6px] text-xs font-medium disabled:opacity-60 ${autoCommentaryEnabled ? 'linear-btn-primary' : 'linear-btn-ghost'}`}
+      >
+        自動ツッコミ: {autoCommentaryEnabled ? 'ON' : 'OFF'}{busy ? ' (保存中...)' : ''}
+      </button>
+      {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
 
       <button
         onClick={onRestartWhisper}

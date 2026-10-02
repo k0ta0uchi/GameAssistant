@@ -125,6 +125,10 @@ export function App() {
             onStartSession={startSession}
             onStopSession={stopSession}
             onRestartWhisper={restartWhisper}
+            autoCommentaryEnabled={settings.enable_auto_commentary === true}
+            onToggleAutoCommentary={(enabled) =>
+              updateSetting("enable_auto_commentary", enabled, { throwOnError: true })
+            }
             inputDevices={inputDevices}
             selectedDevice={selectedDevice}
             onDeviceChange={(dev) => updateSetting("audio_device", dev)}

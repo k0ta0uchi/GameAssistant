@@ -14,6 +14,8 @@ interface SidebarProps {
   onStartSession: () => void;
   onStopSession: () => void;
   onRestartWhisper: () => void;
+  autoCommentaryEnabled: boolean;
+  onToggleAutoCommentary: (enabled: boolean) => Promise<void>;
 
   inputDevices: string[];
   selectedDevice: string;
@@ -49,6 +51,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onStartSession,
   onStopSession,
   onRestartWhisper,
+  autoCommentaryEnabled,
+  onToggleAutoCommentary,
   inputDevices,
   selectedDevice,
   onDeviceChange,
@@ -99,6 +103,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           onStart={onStartSession}
           onStop={onStopSession}
           onRestartWhisper={onRestartWhisper}
+          autoCommentaryEnabled={autoCommentaryEnabled}
+          onToggleAutoCommentary={onToggleAutoCommentary}
         />
 
         {/* オーディオカード */}
