@@ -36,6 +36,7 @@ import {
   normalizeMemoryMigrationStatus,
 } from "./types";
 import { SetupScreen } from "./components/Common/SetupScreen";
+import { ActionButtons } from "./components/Controls/ActionButtons";
 import { SettingsModal } from "./components/Modals/SettingsModal";
 import { MemoryModal } from "./components/Modals/MemoryModal";
 import { dismissStartupLoader } from "./startupLoader";
@@ -3174,6 +3175,77 @@ for (const [reason, expectedLabel, retryable] of [
   assert.ok(JSON.stringify(renderer.toJSON()).includes("warmup failed"));
   assert.equal(button().props.disabled, false);
   renderer.unmount();
+  await settleEffects();
+}
+
+// Main controls reflect shared settings and serialize saves, with errors retryable.
+{
+  let finish!: () => void;
+  const save = new Promise<void>(resolve => { finish = resolve; });
+  const values: boolean[] = [];
+  let fail = false;
+  const props = {sessionRunning: false, onStart: () => {}, onStop: () => {}, onRestartWhisper: () => {},
+    autoCommentaryEnabled: false,
+    onToggleAutoCommentary: async (value: boolean) => { values.push(value); if (fail) throw new Error("save failed"); await save; },
+  };
+  let renderer!: ReactTestRenderer;
+  await act(async () => { renderer = create(React.createElement(ActionButtons, props as any)); });
+  const button = () => renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "自動ツッコミ")!;
+  assert.ok(button(), "Main controls must include Auto Commentary");
+  assert.equal(button().props["aria-pressed"], false);
+  let pending!: Promise<void>;
+  await act(async () => { pending = button().props.onClick(); });
+  assert.equal(button().props.disabled, true);
+  await act(async () => { await button().props.onClick(); });
+  assert.deepEqual(values, [true]);
+  await act(async () => { finish(); await pending; renderer.update(React.createElement(ActionButtons, {...props, autoCommentaryEnabled: true} as any)); });
+  assert.equal(button().props["aria-pressed"], true);
+  assert.equal(button().props.disabled, false);
+  fail = true;
+  await act(async () => { await button().props.onClick(); });
+  assert.deepEqual(values, [true, false]);
+  assert.ok(JSON.stringify(renderer.toJSON()).includes("save failed"));
+  assert.equal(button().props.disabled, false);
+  assert.equal(button().props["aria-pressed"], true);
+  renderer.unmount();
+}
+
+// The sidebar and Settings use the same canonical setting; reload preserves toggles.
+{
+  const { harness } = makeHarness();
+  harness.settings.enable_auto_commentary = true;
+  const {renderer: hook, snapshot} = await mountHook(harness);
+  let controls!: ReactTestRenderer;
+  const props = () => ({sessionRunning: snapshot.current!.status.session, onStart: () => {}, onStop: () => {}, onRestartWhisper: () => {},
+    autoCommentaryEnabled: snapshot.current!.settings.enable_auto_commentary === true,
+    onToggleAutoCommentary: (value: boolean) => snapshot.current!.updateSetting("enable_auto_commentary", value, {throwOnError: true}),
+  });
+  await act(async () => { controls = create(React.createElement(ActionButtons, props())); });
+  const button = () => controls.root.findAllByType("button").find(n => n.props["aria-label"] === "自動ツッコミ")!;
+  assert.equal(button().props["aria-pressed"], true);
+  await act(async () => { await button().props.onClick(); });
+  assert.equal(snapshot.current!.settings.enable_auto_commentary, false);
+  assert.equal(harness.settings.enable_auto_commentary, false);
+  await act(async () => { await snapshot.current!.fetchSettings(); });
+  assert.equal(snapshot.current!.settings.enable_auto_commentary, false);
+  const originalInvoke = harness.invoke.bind(harness);
+  let finishLoad!: () => void;
+  const oldSnapshot = {...harness.settings};
+  const delayedLoad = new Promise<void>(resolve => { finishLoad = resolve; });
+  harness.invoke = async (command, args) => {
+    if (command === "load_settings") { await delayedLoad; return oldSnapshot; }
+    return originalInvoke(command, args);
+  };
+  let staleFetch!: Promise<Record<string, unknown> | null>;
+  await act(async () => { staleFetch = snapshot.current!.fetchSettings(); });
+  // This is the same callback used by SettingsModal.
+  await act(async () => { await snapshot.current!.updateSetting("enable_auto_commentary", true); });
+  await act(async () => { finishLoad(); await staleFetch; });
+  assert.equal(snapshot.current!.settings.enable_auto_commentary, true, "Stale reload must not undo latest toggle");
+  await act(async () => { controls.update(React.createElement(ActionButtons, props())); });
+  assert.equal(button().props["aria-pressed"], true);
+  controls.unmount();
+  hook.unmount();
   await settleEffects();
 }
 
