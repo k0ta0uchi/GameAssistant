@@ -20,8 +20,8 @@ use windows::{
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
         UI::WindowsAndMessaging::{
-            EnumWindows, GetClassNameW, GetClientRect, GetWindowTextW, GetWindowThreadProcessId,
-            IsIconic, IsWindowVisible,
+            EnumWindows, GetClassNameW, GetClientRect, GetWindow, GetWindowLongW, GetWindowTextW,
+            GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_OWNER,
         },
     },
 };
@@ -40,9 +40,12 @@ use windows_capture::{
 pub struct WindowIdentity {
     pub hwnd: usize,
     pub pid: u32,
+    pub thread_id: u32,
     pub title: String,
     pub class_name: String,
     pub executable: String,
+    pub is_root_owner: bool,
+    pub style: u32,
 }
 fn read_identity(hwnd: HWND) -> Option<WindowIdentity> {
     unsafe {
@@ -57,7 +60,10 @@ fn read_identity(hwnd: HWND) -> Option<WindowIdentity> {
         let mut class = [0u16; 256];
         let c = GetClassNameW(hwnd, &mut class);
         let mut pid = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let thread_id = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut exe = vec![0u16; 32768];
         let mut size = exe.len() as u32;
@@ -69,12 +75,18 @@ fn read_identity(hwnd: HWND) -> Option<WindowIdentity> {
         );
         let _ = CloseHandle(process);
         result.ok()?;
+        let owner = GetWindow(hwnd, GW_OWNER).unwrap_or_default();
+        let is_root_owner = owner.0 as usize == 0;
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
         Some(WindowIdentity {
             hwnd: hwnd.0 as usize,
             pid,
+            thread_id,
             title: String::from_utf16_lossy(&title[..n as usize]),
             class_name: String::from_utf16_lossy(&class[..c as usize]),
             executable: String::from_utf16_lossy(&exe[..size as usize]),
+            is_root_owner,
+            style,
         })
     }
 }
@@ -100,25 +112,67 @@ pub fn list_windows() -> Vec<String> {
     titles.dedup();
     titles
 }
-fn same_process(a: &WindowIdentity, b: &WindowIdentity) -> bool {
+fn same_process_and_window_type(a: &WindowIdentity, b: &WindowIdentity) -> bool {
     a.pid == b.pid
+        && a.thread_id == b.thread_id
         && a.class_name == b.class_name
+        && a.is_root_owner == b.is_root_owner
         && a.executable.eq_ignore_ascii_case(&b.executable)
+}
+pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> bool {
+    let t = target_title.trim();
+    let c = candidate_title.trim();
+    if t.is_empty() || c.is_empty() {
+        return false;
+    }
+    if t.eq_ignore_ascii_case(c) {
+        return true;
+    }
+    let t_lower = t.to_lowercase();
+    let c_lower = c.to_lowercase();
+    if t_lower.len() >= 3 && c_lower.contains(&t_lower) {
+        return true;
+    }
+    if c_lower.len() >= 3 && t_lower.contains(&c_lower) {
+        return true;
+    }
+    let t_first = t
+        .split(|ch: char| {
+            ch.is_whitespace() || ch == '-' || ch == ':' || ch == '|' || ch == '[' || ch == '('
+        })
+        .find(|s| !s.is_empty());
+    let c_first = c
+        .split(|ch: char| {
+            ch.is_whitespace() || ch == '-' || ch == ':' || ch == '|' || ch == '[' || ch == '('
+        })
+        .find(|s| !s.is_empty());
+    if let (Some(tf), Some(cf)) = (t_first, c_first) {
+        if tf.len() >= 3 && tf.eq_ignore_ascii_case(cf) {
+            return true;
+        }
+    }
+    false
 }
 fn resolve_identity(
     target: &WindowIdentity,
     candidates: &[WindowIdentity],
 ) -> Option<WindowIdentity> {
-    if let Some(found) = candidates
-        .iter()
-        .find(|w| w.hwnd == target.hwnd && same_process(target, w))
-    {
+    // 1. HWND 一致時: 同一プロセス・属性かつタイトルが互換であることを必須とする。
+    // HWNDが同一プロセス内で再利用されて別用途のウィンドウになった場合は拒否する。
+    if let Some(found) = candidates.iter().find(|w| {
+        w.hwnd == target.hwnd
+            && same_process_and_window_type(target, w)
+            && title_compatible(&target.title, &w.title)
+    }) {
         return Some(found.clone());
     }
+    // 2. HWND 再生成時（ロード画面・画面遷移等）:
+    // 同一プロセス・同一属性の候補を抽出
     let compatible: Vec<_> = candidates
         .iter()
-        .filter(|w| same_process(target, w))
+        .filter(|w| same_process_and_window_type(target, w))
         .collect();
+    // 2a. タイトル完全一致が一意にあれば採用
     let exact: Vec<_> = compatible
         .iter()
         .filter(|w| w.title == target.title)
@@ -126,9 +180,15 @@ fn resolve_identity(
     if exact.len() == 1 {
         return Some((**exact[0]).clone());
     }
-    if compatible.len() == 1 {
-        return Some(compatible[0].clone());
+    // 2b. タイトル互換（ロード中などのタイトル変化）の候補を探す
+    let title_matches: Vec<_> = compatible
+        .iter()
+        .filter(|w| title_compatible(&target.title, &w.title))
+        .collect();
+    if title_matches.len() == 1 {
+        return Some((**title_matches[0]).clone());
     }
+    // 候補が複数（曖昧）または互換タイトルがない場合は別ウィンドウ誤認を防ぐため None
     None
 }
 static TARGETS: OnceLock<Mutex<HashMap<String, WindowIdentity>>> = OnceLock::new();
@@ -217,8 +277,10 @@ impl GraphicsCaptureApiHandler for Snapshot {
     ) -> Result<(), Self::Error> {
         let result = (|| -> Result<String, CaptureError> {
             let before = read_identity(HWND(self.target.hwnd as *mut _)).ok_or("target closed")?;
-            if !same_process(&self.target, &before) {
-                return Err("target identity changed".into());
+            if !same_process_and_window_type(&self.target, &before)
+                || !title_compatible(&self.target.title, &before.title)
+            {
+                return Err("target identity changed or reused by different window".into());
             }
             let crop = client_box(&self.target, frame.width(), frame.height())
                 .ok_or("client bounds unavailable or resized")?;
@@ -233,7 +295,8 @@ impl GraphicsCaptureApiHandler for Snapshot {
             img.write_to(&mut bytes, image::ImageFormat::Png)?;
             let after = read_identity(HWND(self.target.hwnd as *mut _))
                 .ok_or("target closed during capture")?;
-            if !same_process(&self.target, &after)
+            if !same_process_and_window_type(&self.target, &after)
+                || !title_compatible(&self.target.title, &after.title)
                 || client_box(&self.target, frame.width(), frame.height()) != Some(crop)
             {
                 return Err("target changed during capture".into());
@@ -305,9 +368,12 @@ mod tests {
         WindowIdentity {
             hwnd,
             pid,
+            thread_id: 1,
             title: "AION2".into(),
             class_name: "game".into(),
             executable: "game.exe".into(),
+            is_root_owner: true,
+            style: 0x14cf0000,
         }
     }
     #[test]
@@ -332,13 +398,54 @@ mod tests {
         assert!(resolve_identity(&original, &[other]).is_none());
     }
     #[test]
-    fn unchanged_hwnd_must_still_belong_to_the_target() {
+    fn unchanged_hwnd_must_have_compatible_title_and_attributes() {
         let original = target(10, 42);
-        let mut changed_title = original.clone();
-        changed_title.title = "Loading".into();
+        // ロード画面等の互換タイトルなら同一HWNDで受理
+        let mut loading = original.clone();
+        loading.title = "AION2 - Loading".into();
+        assert_eq!(resolve_identity(&original, &[loading]).unwrap().hwnd, 10);
+
+        // HWNDが再利用されて全く別用途（非互換タイトル）になった場合は拒否
+        let mut crash_dialog = original.clone();
+        crash_dialog.title = "Crash Reporter".into();
+        assert!(resolve_identity(&original, &[crash_dialog]).is_none());
+
+        // HWNDが同一でも別スレッドやオーナー持ち（ダイアログ）の場合は拒否
+        let mut child_dialog = original.clone();
+        child_dialog.is_root_owner = false;
+        assert!(resolve_identity(&original, &[child_dialog]).is_none());
+
+        let mut diff_thread = original.clone();
+        diff_thread.thread_id = 99;
+        assert!(resolve_identity(&original, &[diff_thread]).is_none());
+    }
+    #[test]
+    fn reconnected_hwnd_supports_compatible_title_if_unique() {
+        let original = target(10, 42);
+        // HWND再生成かつタイトルが "AION2 [DX11]" に変化した場合も一意なら復帰
+        let mut regenerated = target(11, 42);
+        regenerated.title = "AION2 [DX11]".into();
         assert_eq!(
-            resolve_identity(&original, &[changed_title]).unwrap().hwnd,
-            10
+            resolve_identity(&original, &[regenerated]).unwrap().hwnd,
+            11
         );
+
+        // HWND再生成だがタイトルが無関係な場合は拒否
+        let mut unrelated = target(11, 42);
+        unrelated.title = "Setup Wizard".into();
+        assert!(resolve_identity(&original, &[unrelated]).is_none());
+    }
+    #[test]
+    fn title_compatible_rules() {
+        assert!(title_compatible("AION2", "AION2"));
+        assert!(title_compatible("AION2", "aion2"));
+        assert!(title_compatible("AION2", "AION2 - Chapter 1"));
+        assert!(title_compatible("AION2 - Chapter 1", "AION2"));
+        assert!(title_compatible("AION2", "AION2 [DirectX 11]"));
+        assert!(title_compatible("Firefox", "GitHub — Mozilla Firefox"));
+        assert!(!title_compatible("AION2", "Crash Reporter"));
+        assert!(!title_compatible("AION2", "Settings"));
+        assert!(!title_compatible("AION2", ""));
+        assert!(!title_compatible("", "AION2"));
     }
 }
