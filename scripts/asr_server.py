@@ -258,6 +258,39 @@ def create_cpu_whisper_model(
         )
 
 
+def warmup_whisper_model(model) -> float:
+    """Run a throwaway dummy inference to warm up CUDA kernels, cuBLAS handles,
+    and CTranslate2 memory pools before the WebSocket server accepts requests.
+    Returns the warmup duration in milliseconds.
+    """
+    logger.info(f"Warming up Whisper model on {current_device}...")
+    t0 = time.monotonic()
+    try:
+        dummy_audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
+        segments, _ = model.transcribe(
+            dummy_audio,
+            language="ja",
+            beam_size=1,
+            vad_filter=False,
+            without_timestamps=True,
+        )
+        for _ in segments:
+            pass
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        logger.info(
+            f"Whisper model warmup completed in {elapsed_ms:.1f}ms "
+            f"(device={current_device}, model={current_model_name}, compute_type={current_compute_type})."
+        )
+        return elapsed_ms
+    except Exception as warmup_err:
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        logger.warning(
+            f"Whisper model warmup encountered an error after {elapsed_ms:.1f}ms ({warmup_err}); "
+            "continuing startup without warm cache."
+        )
+        return elapsed_ms
+
+
 if current_device == "cuda":
     model_source, model_name = get_model_spec(model_preset or "quality", "cuda")
     current_model_name = model_name
@@ -270,14 +303,34 @@ if current_device == "cuda":
             model_source, device="cuda", compute_type=gpu_compute_type
         )
         logger.info(f"Faster-Whisper model successfully loaded on CUDA ({gpu_compute_type})!")
+        _warmup_inference_ms = warmup_whisper_model(whisper_model)
     except Exception as e:
         logger.warning(f"Failed to load on CUDA: {e}. Falling back to CPU...")
         whisper_model = create_cpu_whisper_model()
         current_device = "cpu"
+        _warmup_inference_ms = warmup_whisper_model(whisper_model)
 else:
     whisper_model = create_cpu_whisper_model()
     current_device = "cpu"
+    _warmup_inference_ms = warmup_whisper_model(whisper_model)
 
+
+DEFAULT_INFERENCE_TIMEOUT_SECONDS = float(
+    get_arg_or_env(
+        ["--inference-timeout"],
+        ["ASR_INFERENCE_TIMEOUT"],
+        default="3.0",
+    )
+)
+FIRST_INFERENCE_TIMEOUT_SECONDS = float(
+    get_arg_or_env(
+        ["--first-inference-timeout"],
+        ["ASR_FIRST_INFERENCE_TIMEOUT"],
+        default="10.0",
+    )
+)
+_is_first_inference: bool = True
+_cold_start_inference_ms: float | None = None
 
 REASON_GPU_OOM = "gpu_oom"
 REASON_INFERENCE_TIMEOUT = "inference_timeout"
@@ -392,7 +445,7 @@ def record_switch_diagnostic(reason, exc=None, elapsed_ms=None, extra=None):
     return entry
 
 
-def record_inference_stall(elapsed_ms: float) -> int:
+def record_inference_stall(elapsed_ms: float, extra: dict | None = None) -> int:
     """推論タイムアウトを記録する。モデルは切替えない (実行中スレッド保護)。
 
     連続スタールが閾値に達したらプロセスを終了し、復旧は外側の監督処理が
@@ -400,10 +453,13 @@ def record_inference_stall(elapsed_ms: float) -> int:
     """
     global inference_stall_streak
     inference_stall_streak += 1
+    extra_payload = {"streak": inference_stall_streak}
+    if extra:
+        extra_payload.update(extra)
     record_switch_diagnostic(
         REASON_INFERENCE_TIMEOUT,
         elapsed_ms=elapsed_ms,
-        extra={"streak": inference_stall_streak},
+        extra=extra_payload,
     )
     if inference_stall_streak >= INFERENCE_STALL_EXIT_THRESHOLD:
         logger.critical(
@@ -470,7 +526,7 @@ def _perform_cpu_switch(reason: str, exc=None, elapsed_ms=None) -> None:
 
     The failed native inference must have returned; admission remains locked.
     """
-    global whisper_model, current_device, last_switch_reason
+    global whisper_model, current_device, last_switch_reason, _is_first_inference
     record_switch_diagnostic(reason, exc=exc, elapsed_ms=elapsed_ms)
     last_switch_reason = reason
     logger.warning(
@@ -486,6 +542,7 @@ def _perform_cpu_switch(reason: str, exc=None, elapsed_ms=None) -> None:
     try:
         loaded_cpu_model = create_cpu_whisper_model()
         whisper_model = loaded_cpu_model
+        _is_first_inference = True
     except Exception as load_err:
         # CPU モデルのロードに失敗: whisper_model が未束納のまま残り、以降の
         # 推論が全て失敗する。プロセス内での自己修復は不可能なため、監視側の
@@ -703,6 +760,7 @@ async def asr_handler(websocket):
         explicit flush is allowed to transcribe a shorter window: callers use
         that path when VAD produced no partial before the utterance ended.
         """
+        global _is_first_inference, _cold_start_inference_ms
         if len(audio_buffer) == 0:
             return "", 0.0
         if not allow_short and len(audio_buffer) < sample_rate * MIN_AUDIO_SECONDS:
@@ -852,13 +910,19 @@ async def asr_handler(websocket):
                         exc_info=(type(error), error, error.__traceback__),
                     )
 
+        current_timeout = (
+            FIRST_INFERENCE_TIMEOUT_SECONDS
+            if _is_first_inference
+            else DEFAULT_INFERENCE_TIMEOUT_SECONDS
+        )
+        was_first = _is_first_inference
         inference.add_done_callback(observe_completion)
         try:
             current_text = await asyncio.wait_for(
                 # Cancellation must not cancel a queued job: its finally owns
                 # releasing admission, and it must run even without a waiter.
                 asyncio.shield(inference),
-                timeout=3.0,
+                timeout=current_timeout,
             )
         except asyncio.TimeoutError:
             # タイムアウトはVRAM枯渇 (OOM) とは無関係。wait_for 打切後も実行中の
@@ -866,16 +930,30 @@ async def asr_handler(websocket):
             # いけない。窓を1つスキップして継続し、連続スタールが閾値に達したら
             # record_inference_stall がプロセスを終了し、外側の監督処理 (Rust
             # ASR エンジン) が子プロセスを再生成する。
-            streak = record_inference_stall((loop.time() - t0) * 1000.0)
+            streak = record_inference_stall(
+                (loop.time() - t0) * 1000.0,
+                extra={
+                    "is_first_inference": was_first,
+                    "timeout_budget": current_timeout,
+                },
+            )
             logger.warning(
-                f"Inference exceeded 3.0s (reason={REASON_INFERENCE_TIMEOUT}, "
+                f"Inference exceeded {current_timeout:.1f}s (reason={REASON_INFERENCE_TIMEOUT}, "
                 f"streak={streak}/{INFERENCE_STALL_EXIT_THRESHOLD}, "
-                f"VRAM: {vram_status_text()}). Skipping this window; "
+                f"first_inference={was_first}, VRAM: {vram_status_text()}). Skipping this window; "
                 "the GPU model is kept in place."
             )
             current_text = ""
         else:
             reset_inference_stall_streak()
+            if was_first:
+                _is_first_inference = False
+                _cold_start_inference_ms = (loop.time() - t0) * 1000.0
+                logger.info(
+                    f"First ASR inference completed in {_cold_start_inference_ms:.1f}ms "
+                    f"(device={current_device}, model={current_model_name}). "
+                    f"Subsequent timeout budget set to {DEFAULT_INFERENCE_TIMEOUT_SECONDS:.1f}s."
+                )
 
         if current_device != prev_dev:
             await send_queue.put(
