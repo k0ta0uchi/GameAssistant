@@ -266,6 +266,7 @@ fn resolve_binding(
     None
 }
 
+#[cfg(test)]
 fn resolve_identity(
     target: &WindowIdentity,
     candidates: &[WindowIdentity],
