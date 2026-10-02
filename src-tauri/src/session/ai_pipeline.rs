@@ -1,6 +1,6 @@
+use chrono::Local;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use chrono::Local;
 use tauri::{AppHandle, Emitter};
 
 use crate::ai_client::{AiGenerateOptions, ChatMessage};

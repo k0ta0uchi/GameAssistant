@@ -1,5 +1,5 @@
-use std::sync::atomic::Ordering;
 use chrono::Utc;
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter};
 
 use crate::lance_memory::{self, MemoryItem, StoredMemory, SummaryBackfillApplyResult};
@@ -536,7 +536,6 @@ pub(crate) async fn persist_backfill_chunk(
     )
     .await
 }
-
 
 impl SessionManager {
     pub async fn retry_summary(&self, event_id: &str) -> Result<bool, String> {

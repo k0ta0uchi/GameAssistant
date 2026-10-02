@@ -1,7 +1,7 @@
+use chrono::{Local, Utc};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
-use chrono::{Local, Utc};
 use tauri::{AppHandle, Emitter};
 
 use crate::asr::WakeWordAction;
@@ -65,7 +65,6 @@ pub(crate) fn session_context_fields(
             )
         })
 }
-
 
 impl SessionManager {
     pub(crate) fn current_session_context(&self) -> Option<SessionContext> {
@@ -145,7 +144,11 @@ impl SessionManager {
         })
     }
 
-    pub(crate) fn append_event_to_session(&self, event: SessionEvent, context: Option<&SessionContext>) {
+    pub(crate) fn append_event_to_session(
+        &self,
+        event: SessionEvent,
+        context: Option<&SessionContext>,
+    ) {
         let _lifecycle_guard = self.session_lifecycle.lock();
         let current_id = self.session_id.lock().clone();
         let target_archive = context

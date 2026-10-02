@@ -1,11 +1,9 @@
+use chrono::{Local, Utc};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use chrono::{Local, Utc};
 use tauri::{AppHandle, Emitter};
 
-use crate::asr::{
-    WakeWordAction, WakeWordConfig, WakeWordDecision, WakeWordMode, WakeWordPhase,
-};
+use crate::asr::{WakeWordAction, WakeWordConfig, WakeWordDecision, WakeWordMode, WakeWordPhase};
 
 use super::ai_pipeline::{ai_error_reason, emit_toast_notice};
 use super::lifecycle::session_context_fields;
@@ -60,7 +58,9 @@ pub(crate) fn admit_twitch_comment(wake_words: &[String], body: &str) -> Option<
     }
 }
 
-pub(crate) fn wake_word_config_from_settings(settings: &serde_json::Value) -> (WakeWordConfig, bool) {
+pub(crate) fn wake_word_config_from_settings(
+    settings: &serde_json::Value,
+) -> (WakeWordConfig, bool) {
     let requested_engine = settings
         .get("wake_word_engine")
         .and_then(|value| value.as_str())
@@ -166,7 +166,6 @@ pub(crate) fn wake_decision_log_message(
         collecting,
     )
 }
-
 
 impl SessionManager {
     pub(crate) fn admit_asr_callback(&self, context: &SessionContext, is_final: bool) -> bool {

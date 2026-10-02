@@ -1,8 +1,8 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::asr::WakeWordDecision;

@@ -44,12 +44,12 @@
 //! - `EventTaskGuard` tracks in-flight raw saving tasks. `wait_for_event_tasks_bounded` drains them
 //!   before blog generation begins (up to 10 seconds timeout).
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::ai_client::AiClient;
@@ -60,20 +60,21 @@ use crate::logger::LogManager;
 use crate::tts::TtsManager;
 use crate::web_search::WebSearchClient;
 
-pub mod types;
-pub(crate) mod lifecycle;
-pub(crate) mod input_pipeline;
-pub(crate) mod persistence;
 pub(crate) mod ai_pipeline;
-pub(crate) mod commentary;
 pub(crate) mod blog;
+pub(crate) mod commentary;
+pub(crate) mod input_pipeline;
+pub(crate) mod lifecycle;
+pub(crate) mod persistence;
+pub mod types;
 
 #[cfg(test)]
 mod tests;
 
-pub use types::*;
 pub(crate) use lifecycle::resolve_effective_twitch_channel;
+#[allow(unused_imports)]
 pub(crate) use persistence::memory_event_log_message;
+pub use types::*;
 
 #[derive(Clone)]
 pub struct SessionManager {
@@ -166,7 +167,10 @@ impl SessionManager {
             .await
     }
 
-    pub(crate) async fn wait_for_event_tasks_with_timeout(&self, timeout: std::time::Duration) -> usize {
+    pub(crate) async fn wait_for_event_tasks_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> usize {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             // Register interest before checking the counter so a guard that
