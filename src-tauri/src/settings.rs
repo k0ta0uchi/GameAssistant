@@ -312,7 +312,7 @@ mod tests {
 
         let res = save_setting_with_worker_sync(
             invalid_root,
-            "preallocate_vram",
+            "test_sync_setting",
             &serde_json::json!(true),
             |_k, _v| {
                 worker_called.store(true, Ordering::SeqCst);
@@ -341,7 +341,7 @@ mod tests {
         let worker_called = AtomicBool::new(false);
         let res = save_setting_with_worker_sync(
             &temp_dir,
-            "preallocate_vram",
+            "test_sync_setting",
             &serde_json::json!(true),
             |_k, _v| {
                 worker_called.store(true, Ordering::SeqCst);
@@ -364,7 +364,7 @@ mod tests {
             "Worker failure must be reported as a warning"
         );
         assert_eq!(
-            response.settings.get("preallocate_vram"),
+            response.settings.get("test_sync_setting"),
             Some(&serde_json::json!(true)),
             "Settings must be persisted despite worker warning"
         );
@@ -387,7 +387,7 @@ mod tests {
         let worker_called = AtomicBool::new(false);
         let res = save_setting_with_worker_sync(
             &temp_dir,
-            "preallocate_vram",
+            "test_sync_setting",
             &serde_json::json!(false),
             |_k, _v| {
                 worker_called.store(true, Ordering::SeqCst);
@@ -403,11 +403,46 @@ mod tests {
             "Warning must be None on clean success"
         );
         assert_eq!(
-            response.settings.get("preallocate_vram"),
+            response.settings.get("test_sync_setting"),
             Some(&serde_json::json!(false))
         );
 
         // クリーンアップ
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_load_settings_ignores_legacy_preallocate_vram_safely() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ga_legacy_preallocate_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let legacy_content = serde_json::json!({
+            "whisper_device": "cuda",
+            "preallocate_vram": true,
+            "user_name": "TestUser"
+        });
+        fs::write(
+            temp_dir.join("settings.json"),
+            serde_json::to_string(&legacy_content).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_frontend_settings(&temp_dir).expect("must load legacy settings");
+        assert_eq!(
+            loaded.get("whisper_device").and_then(|v| v.as_str()),
+            Some("cuda")
+        );
+        assert_eq!(
+            loaded.get("user_name").and_then(|v| v.as_str()),
+            Some("TestUser")
+        );
+
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
