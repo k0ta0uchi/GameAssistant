@@ -48,24 +48,44 @@ Writing personas and style guidelines placed in the `skills/` directory can be d
 
 #### Using the Portable Release
 Place the standalone executable (`GameAssistant-v<version>-portable.exe`) in any writable directory and launch it.
-On initial launch, a setup wizard automatically configures the following runtime components within the same directory:
+On initial launch, a setup wizard automatically configures the runtime environment and downloads the following required models into `models/` and the local virtual environment within the same directory:
 
-- Managed Python 3.12 runtime (via `uv`) and a dedicated virtual environment
-- Local summarization model (Gemma 3 1B IT GGUF, downloaded after accepting the terms of service)
+- **Python Runtime and Virtual Environment**: Managed Python 3.12 runtime (via `uv`) and an application-dedicated virtual environment
+- **Speech Recognition Models (ASR)**:
+  - `kotoba-whisper-v2.0-faster` (GPU inference with CUDA, Japanese-specialized)
+  - `faster-whisper-small` (CPU fallback model)
+- **Text Embedding Model (Embedding)**:
+  - `GLuCoSE-base-ja` (768-dimensional model for long-term memory and vector search)
+- **Local Summarization Model (LLM)**:
+  - `gemma-3-1b-it-Q4_K_S.gguf` (GGUF format for llama-server, downloaded after accepting the bundled terms of service)
+
+Downloading dependencies and models requires an active internet connection and several gigabytes of free disk space.
 
 #### Building and Developing from Source
 
 1. **Prerequisites**:
    - Node.js 20 or higher
    - Rust toolchain (nightly version specified in `rust-toolchain.toml`)
-   - Python 3.12 and `uv`
+   - Python 3.12 and `uv` (or standard `python` / `pip`)
    - Git
 
 2. **Clone the Repository and Install Dependencies**:
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git
    cd GameAssistant
+
+   # Install Node.js packages
    npm install
+
+   # Create a Python virtual environment and install ASR/embedding dependencies
+   # Using uv (recommended):
+   uv venv
+   uv pip install -r requirements.txt
+
+   # Or using standard Python venv:
+   python -m venv venv
+   .\venv\Scripts\activate
+   pip install -r requirements.txt
    ```
 
 3. **Launch Development Mode**:
@@ -161,24 +181,44 @@ Gemini API キーや Twitch OAuth トークンなどの機密情報は、平文�
 
 #### ポータブル版の実行
 スタンドアロン配布ファイル（`GameAssistant-v<version>-portable.exe`）を書き込み権限のあるディレクトリに配置して実行する。
-初回起動時にセットアップ画面が表示され、以下の依存コンポーネントが同一ディレクトリ配下に自動構築される。
+初回起動時にセットアップ画面が表示され、以下のランタイムおよび必須モデル群が同一ディレクトリ配下の `models/` や仮想環境へ自動的に構築・取得される。
 
-- Python 3.12 ランタイム（`uv` による管理）および専用仮想環境
-- ローカル要約用言語モデル（Gemma 3 1B IT GGUF、利用規約の同意確認後にダウンロード）
+- **Python ランタイムと仮想環境**: `uv` により管理される Python 3.12 およびアプリ専用仮想環境
+- **音声認識モデル (ASR)**:
+  - `kotoba-whisper-v2.0-faster`（CUDA 推論用、日本語特化モデル）
+  - `faster-whisper-small`（CPU フォールバック用モデル）
+- **テキスト埋め込みモデル (Embedding)**:
+  - `GLuCoSE-base-ja`（長期記憶・ベクトル検索用、768次元）
+- **ローカル要約言語モデル (LLM)**:
+  - `gemma-3-1b-it-Q4_K_S.gguf`（llama-server 用 GGUF モデル、同梱の利用規約同意確認後にダウンロード）
+
+依存パッケージやモデルの取得には、ネットワーク接続および数 GB の空き容量が必要となる。
 
 #### ソースコードからのビルドと開発
 
 1. **前提ツールの準備**:
    - Node.js 20 以上
    - Rust ツールチェーン（`rust-toolchain.toml` で指定された nightly バージョン）
-   - Python 3.12 および `uv`
+   - Python 3.12 および `uv`（または標準 `python` / `pip`）
    - Git
 
 2. **リポジトリの取得と依存関係の導入**:
    ```bash
    git clone https://github.com/k0ta0uchi/GameAssistant.git
    cd GameAssistant
+
+   # Node.js パッケージのインストール
    npm install
+
+   # Python 仮想環境の作成と音声認識・埋め込み依存ライブラリのインストール
+   # uv を使用する場合（推奨）:
+   uv venv
+   uv pip install -r requirements.txt
+
+   # または標準 Python を使用する場合:
+   python -m venv venv
+   .\venv\Scripts\activate
+   pip install -r requirements.txt
    ```
 
 3. **開発モードでの起動**:
