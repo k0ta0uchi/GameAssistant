@@ -651,6 +651,59 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
+              <div className="p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a]">
+                <div className="text-white font-medium">Whisper 実行モード</div>
+                <div className="flex gap-2 mt-2">
+                  {(["cuda", "cpu"] as const).map(device => (
+                    <button key={device} aria-label={`Whisper ${device === "cuda" ? "GPU" : "CPU"}`}
+                      aria-pressed={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device}
+                      className={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device ? "linear-btn-primary px-3 py-1" : "linear-btn-ghost px-3 py-1"}
+                      onClick={() => onUpdateSetting("whisper_device", device)}>
+                      {device === "cuda" ? "GPU" : "CPU"}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-[#8a8f98] mt-2">選択は保存され、次回のアプリ起動または「Restart Whisper」で反映されます。GPUの自動CPUフォールバックは引き続き有効です。実際のデバイスはASRステータスとログで確認できます。</p>
+              </div>
+
+              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
+                <div>
+                  <div className="text-white font-medium">Preallocate VRAM</div>
+                  <div className="text-[11px] text-[#62666d]">
+                    PyTorch の VRAM を事前割り当てしてメモリ断片化を抑制します
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(settings.preallocate_vram)}
+                  onChange={(e) =>
+                    onUpdateSetting("preallocate_vram", e.target.checked)
+                  }
+                  className="w-4 h-4 rounded accent-[#e4f222]"
+                />
+              </label>
+
+              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
+                <div>
+                  <div className="text-white font-medium">
+                    Auto-Restart Slow Whisper (遅延自動検知＆再起動)
+                  </div>
+                  <div className="text-[11px] text-[#62666d]">
+                    VRAM 蓄積による Whisper の推論遅延（&gt;
+                    2.5秒）を検知した際、GPU ワーカーを自動再起動して VRAM
+                    と速度を回復します（手動/自動切り替え可能）
+                  </div>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={settings.auto_restart_whisper !== false}
+                  onChange={(e) =>
+                    onUpdateSetting("auto_restart_whisper", e.target.checked)
+                  }
+                  className="w-4 h-4 rounded accent-[#e4f222]"
+                />
+              </label>
+
               {/* Wake Word Engine */}
               <div className="flex flex-col gap-1.5">
                 <label className="text-[#8a8f98] font-medium">
@@ -1280,59 +1333,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   </div>
                 )}
               </div>
-
-              <div className="p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a]">
-                <div className="text-white font-medium">Whisper 実行モード</div>
-                <div className="flex gap-2 mt-2">
-                  {(["cuda", "cpu"] as const).map(device => (
-                    <button key={device} aria-label={`Whisper ${device === "cuda" ? "GPU" : "CPU"}`}
-                      aria-pressed={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device}
-                      className={(settings.whisper_device === "cpu" ? "cpu" : "cuda") === device ? "linear-btn-primary px-3 py-1" : "linear-btn-ghost px-3 py-1"}
-                      onClick={() => onUpdateSetting("whisper_device", device)}>
-                      {device === "cuda" ? "GPU" : "CPU"}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-[11px] text-[#8a8f98] mt-2">選択は保存され、次回のアプリ起動または「Restart Whisper」で反映されます。GPUの自動CPUフォールバックは引き続き有効です。実際のデバイスはASRステータスとログで確認できます。</p>
-              </div>
-
-              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
-                <div>
-                  <div className="text-white font-medium">Preallocate VRAM</div>
-                  <div className="text-[11px] text-[#62666d]">
-                    PyTorch の VRAM を事前割り当てしてメモリ断片化を抑制します
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={Boolean(settings.preallocate_vram)}
-                  onChange={(e) =>
-                    onUpdateSetting("preallocate_vram", e.target.checked)
-                  }
-                  className="w-4 h-4 rounded accent-[#e4f222]"
-                />
-              </label>
-
-              <label className="flex items-center justify-between p-2.5 rounded-[6px] bg-[#08090a] border border-[#23252a] cursor-pointer">
-                <div>
-                  <div className="text-white font-medium">
-                    Auto-Restart Slow Whisper (遅延自動検知＆再起動)
-                  </div>
-                  <div className="text-[11px] text-[#62666d]">
-                    VRAM 蓄積による Whisper の推論遅延（&gt;
-                    2.5秒）を検知した際、GPU ワーカーを自動再起動して VRAM
-                    と速度を回復します（手動/自動切り替え可能）
-                  </div>
-                </div>
-                <input
-                  type="checkbox"
-                  checked={settings.auto_restart_whisper !== false}
-                  onChange={(e) =>
-                    onUpdateSetting("auto_restart_whisper", e.target.checked)
-                  }
-                  className="w-4 h-4 rounded accent-[#e4f222]"
-                />
-              </label>
 
               {/* Auto Commentary 設定グループ */}
               <div className="flex flex-col gap-2.5 p-3 rounded-[6px] bg-[#08090a] border border-[#23252a]">

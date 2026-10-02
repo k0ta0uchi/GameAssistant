@@ -3113,14 +3113,19 @@ for (const [reason, expectedLabel, retryable] of [
   let renderer!: ReactTestRenderer;
   await act(async () => {
     renderer = create(React.createElement(SettingsModal, {
-      isOpen: true, onClose: () => {}, initialTab: "preferences",
+      isOpen: true, onClose: () => {}, initialTab: "engines",
       settings: { whisper_device: "cpu" }, discordDevices: [],
       onUpdateSetting: async (key: string, value: unknown) => { updates.push([key, value]); },
     } as any));
   });
   const gpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper GPU");
   const cpu = renderer.root.findAllByType("button").find(n => n.props["aria-label"] === "Whisper CPU");
-  assert.ok(gpu && cpu, "Whisper GPU/CPU controls must render");
+  assert.ok(gpu && cpu, "Whisper GPU/CPU controls must render in Engines");
+  const text = JSON.stringify(renderer.toJSON());
+  for (const label of ["ASR Engine (Whisper Model)", "Preallocate VRAM", "Auto-Restart Slow Whisper", "起動時にWhisperモデルを事前ロード"]) {
+    assert.ok(text.includes(label), `${label} must be grouped in Engines`);
+  }
+  assert.equal(text.includes("Enable Auto Commentary"), false);
   assert.equal(cpu!.props["aria-pressed"], true);
   await act(async () => { await gpu!.props.onClick(); });
   assert.deepEqual(updates, [["whisper_device", "cuda"]]);
