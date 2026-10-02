@@ -15,6 +15,12 @@ import {
   isTermsAcceptanceRequired,
   useAppState,
 } from "./hooks/useAppState";
+import { useSetupState } from "./hooks/useSetupState";
+import { useSessionController } from "./hooks/useSessionController";
+import { useAudioDevices } from "./hooks/useAudioDevices";
+import { useSettings } from "./hooks/useSettings";
+import { useRuntimeInitialization } from "./hooks/useRuntimeInitialization";
+import { useModelStatus } from "./hooks/useModelStatus";
 import {
   GEMMA_MODEL_ID,
   GEMMA_TERMS_MODEL_SHA256,
@@ -2777,6 +2783,250 @@ for (const [reason, expectedLabel, retryable] of [
     harness.unregistered.includes("plugin:event|unlisten"),
     "memory-migration-progress listener should be released on unmount",
   );
+}
+
+// Issue #8: useAppState hook decomposition into domain-specific hooks and facade
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+
+  let appStateResult: ReturnType<typeof useAppState> | null = null;
+  function TestApp() {
+    appStateResult = useAppState();
+    return React.createElement("div", null, "test");
+  }
+
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(TestApp));
+  });
+  await settleEffects();
+
+  // Verify all required facade properties are present
+  assert.ok(appStateResult);
+  const requiredKeys = [
+    "isConnected",
+    "status",
+    "levelMeter",
+    "discordLevelMeter",
+    "currentAsr",
+    "asrHistory",
+    "factHistory",
+    "geminiResponse",
+    "vram",
+    "ram",
+    "commentaryTimer",
+    "sessionStarting",
+    "logs",
+    "inputDevices",
+    "discordDevices",
+    "selectedDevice",
+    "selectedDiscordDevice",
+    "enableDiscordCapture",
+    "windows",
+    "selectedWindow",
+    "previewImage",
+    "settings",
+    "prompts",
+    "startSession",
+    "stopSession",
+    "restartWhisper",
+    "updateSetting",
+    "fetchWindows",
+    "fetchPreview",
+    "fetchSettings",
+    "fetchPrompts",
+    "savePrompt",
+    "resetPrompt",
+    "clearLogs",
+    "toast",
+    "showToast",
+    "modelsStatus",
+    "missingRequiredModels",
+    "fetchModelsStatus",
+    "setupStatus",
+    "setupProgress",
+    "runtimeInitialization",
+    "initializeRuntime",
+    "fetchRuntimeInitializationStatus",
+    "isSetupRunning",
+    "setupError",
+    "isElevationRequesting",
+    "fetchSetupStatus",
+    "runSetup",
+    "acceptTermsAndRunSetup",
+    "requestSetupElevation",
+    "cancelSetup",
+  ];
+  for (const key of requiredKeys) {
+    assert.ok(key in appStateResult!, `Property ${key} should exist in useAppState facade`);
+  }
+
+  // Verify that event listeners were registered
+  assert.ok(
+    harness.registrations.includes("resource_status"),
+    "resource_status listener should be registered",
+  );
+  assert.ok(
+    harness.registrations.includes("asr_result"),
+    "asr_result listener should be registered",
+  );
+
+  // Verify individual domain hooks are exported and functional
+  assert.equal(typeof useSetupState, "function");
+  assert.equal(typeof useSessionController, "function");
+  assert.equal(typeof useAudioDevices, "function");
+  assert.equal(typeof useSettings, "function");
+  assert.equal(typeof useRuntimeInitialization, "function");
+  assert.equal(typeof useModelStatus, "function");
+
+  // Unmount and verify every single registered listener is unlistened
+  const registeredEventIds = new Set(
+    harness.successfulRegistrations.map((r) => r.eventId),
+  );
+  assert.ok(
+    registeredEventIds.size >= 10,
+    "Expected multiple event listeners to be registered on mount",
+  );
+
+  renderer.unmount();
+  await settleEffects();
+
+  const unlistenedEventIds = new Set(
+    harness.unregisteredListeners.map((u) => u.eventId),
+  );
+  for (const id of registeredEventIds) {
+    assert.ok(
+      unlistenedEventIds.has(id),
+      `Registered event listener with id ${id} must be unlistened upon unmount`,
+    );
+  }
+  assert.equal(
+    harness.unregisteredListeners.length,
+    harness.successfulRegistrations.length,
+    "Number of unlistened events must match number of successful registrations",
+  );
+}
+
+// Issue #8: verify rerenders do not trigger redundant initial data fetches or infinite loop
+{
+  const { harness } = makeHarness();
+  harness.install(domForConfirm(harness));
+
+  let triggerRerender!: () => void;
+  function RerenderTestHost() {
+    const [, setCount] = React.useState(0);
+    triggerRerender = () => setCount((c) => c + 1);
+    useAppState();
+    return React.createElement("div", null, "test");
+  }
+
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(React.createElement(RerenderTestHost));
+  });
+  await settleEffects();
+
+  const initialLoadSettingsCalls = harness.invocations.filter(
+    (c) => c.command === "load_settings",
+  ).length;
+  const initialDevicesCalls = harness.invocations.filter(
+    (c) => c.command === "list_audio_devices",
+  ).length;
+  const initialWindowsCalls = harness.invocations.filter(
+    (c) => c.command === "list_windows",
+  ).length;
+  const initialPromptsCalls = harness.invocations.filter(
+    (c) => c.command === "get_prompts",
+  ).length;
+  const initialModelsCalls = harness.invocations.filter(
+    (c) => c.command === "get_models_status",
+  ).length;
+
+  assert.equal(
+    initialLoadSettingsCalls,
+    1,
+    "load_settings should be called exactly once on mount",
+  );
+  assert.equal(
+    initialDevicesCalls,
+    1,
+    "list_audio_devices should be called exactly once on mount",
+  );
+  assert.equal(
+    initialWindowsCalls,
+    1,
+    "list_windows should be called exactly once on mount",
+  );
+  assert.equal(
+    initialPromptsCalls,
+    1,
+    "get_prompts should be called exactly once on mount",
+  );
+  assert.equal(
+    initialModelsCalls,
+    1,
+    "get_models_status should be called exactly once on mount",
+  );
+
+  // Trigger 3 consecutive rerenders
+  await act(async () => {
+    triggerRerender();
+  });
+  await settleEffects();
+  await act(async () => {
+    triggerRerender();
+  });
+  await settleEffects();
+  await act(async () => {
+    triggerRerender();
+  });
+  await settleEffects();
+
+  const postRerenderLoadSettingsCalls = harness.invocations.filter(
+    (c) => c.command === "load_settings",
+  ).length;
+  const postRerenderDevicesCalls = harness.invocations.filter(
+    (c) => c.command === "list_audio_devices",
+  ).length;
+  const postRerenderWindowsCalls = harness.invocations.filter(
+    (c) => c.command === "list_windows",
+  ).length;
+  const postRerenderPromptsCalls = harness.invocations.filter(
+    (c) => c.command === "get_prompts",
+  ).length;
+  const postRerenderModelsCalls = harness.invocations.filter(
+    (c) => c.command === "get_models_status",
+  ).length;
+
+  assert.equal(
+    postRerenderLoadSettingsCalls,
+    initialLoadSettingsCalls,
+    "load_settings should not be re-invoked on rerender",
+  );
+  assert.equal(
+    postRerenderDevicesCalls,
+    initialDevicesCalls,
+    "list_audio_devices should not be re-invoked on rerender",
+  );
+  assert.equal(
+    postRerenderWindowsCalls,
+    initialWindowsCalls,
+    "list_windows should not be re-invoked on rerender",
+  );
+  assert.equal(
+    postRerenderPromptsCalls,
+    initialPromptsCalls,
+    "get_prompts should not be re-invoked on rerender",
+  );
+  assert.equal(
+    postRerenderModelsCalls,
+    initialModelsCalls,
+    "get_models_status should not be re-invoked on rerender",
+  );
+
+  renderer.unmount();
+  await settleEffects();
 }
 
 // Let any deferred setup effects settle while the final Tauri harness is still
