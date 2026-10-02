@@ -178,18 +178,18 @@ pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> boo
     if c_lower.starts_with(&t_lower) {
         let remainder = &c[t.len()..];
         let trimmed_remainder = remainder.trim_start();
-        // 括弧で囲まれたサフィックス: (DirectX 11), [DX11], (64-bit), [Loading] 等
-        if trimmed_remainder.starts_with(['(', '['])
-            && (trimmed_remainder.ends_with(')') || trimmed_remainder.ends_with(']'))
-        {
-            return true;
-        }
-        // ハイフン・コロン・パイプ区切りの安全なサフィックス
-        if remainder.starts_with(" - ")
+        if trimmed_remainder.starts_with(['(', '[']) {
+            if is_safe_suffix(trimmed_remainder) {
+                return true;
+            }
+        } else if remainder.starts_with(" - ")
             || remainder.starts_with(": ")
             || remainder.starts_with(" | ")
         {
-            return true;
+            let suffix = remainder[3..].trim();
+            if is_safe_suffix(suffix) {
+                return true;
+            }
         }
     }
 
@@ -197,15 +197,81 @@ pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> boo
     if t_lower.starts_with(&c_lower) {
         let remainder = &t[c.len()..];
         let trimmed_remainder = remainder.trim_start();
-        if trimmed_remainder.starts_with(['(', '['])
-            || remainder.starts_with(" - ")
+        if trimmed_remainder.starts_with(['(', '[']) {
+            if is_safe_suffix(trimmed_remainder) {
+                return true;
+            }
+        } else if remainder.starts_with(" - ")
             || remainder.starts_with(": ")
             || remainder.starts_with(" | ")
         {
-            return true;
+            let suffix = remainder[3..].trim();
+            if is_safe_suffix(suffix) {
+                return true;
+            }
         }
     }
 
+    false
+}
+
+fn is_safe_suffix(suffix: &str) -> bool {
+    let s = suffix.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // 括弧で囲まれたサフィックス: (DirectX 11), [DX11], (64-bit), [Loading] 等
+    if (s.starts_with('(') && s.ends_with(')')) || (s.starts_with('[') && s.ends_with(']')) {
+        let inner = s[1..s.len() - 1].trim();
+        return !inner.is_empty();
+    }
+    let s_lower = s.to_lowercase();
+    // ゲーム進行・章・ゾーン・サーバー・状態・レンダラー・ビルド等の安全な接頭辞
+    const SAFE_PREFIXES: &[&str] = &[
+        "chapter",
+        "act",
+        "episode",
+        "part",
+        "stage",
+        "level",
+        "zone",
+        "server",
+        "realm",
+        "world",
+        "loading",
+        "connecting",
+        "running",
+        "paused",
+        "in-game",
+        "game",
+        "play",
+        "directx",
+        "dx9",
+        "dx10",
+        "dx11",
+        "dx12",
+        "vulkan",
+        "opengl",
+        "64-bit",
+        "32-bit",
+        "x64",
+        "x86",
+        "build",
+        "ver",
+        "v0",
+        "v1",
+        "v2",
+        "v3",
+    ];
+    for pfx in SAFE_PREFIXES {
+        if s_lower.starts_with(pfx) {
+            return true;
+        }
+    }
+    // 数字・バージョン表記（例: "1.0.3", "1234"）
+    if s.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+        return true;
+    }
     false
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -512,6 +578,11 @@ mod tests {
         aion2_crash.title = "AION2 Crash Reporter".into();
         assert!(resolve_identity(&original, &[aion2_crash]).is_none());
 
+        // HWNDが同一でも、未知の補助ウィンドウ名 ("AION2 - Other Window") の場合は拒否
+        let mut other_window = original.clone();
+        other_window.title = "AION2 - Other Window".into();
+        assert!(resolve_identity(&original, &[other_window]).is_none());
+
         // HWNDが同一でも別スレッドやオーナー持ち（ダイアログ）の場合は拒否
         let mut child_dialog = original.clone();
         child_dialog.is_root_owner = false;
@@ -546,15 +617,30 @@ mod tests {
         let mut crash_regen = target(11, 42);
         crash_regen.title = "AION2 Crash Reporter".into();
         assert!(resolve_identity(&original, &[crash_regen]).is_none());
+
+        // HWND再生成だが未知のサフィックス ("AION2 - Other Window", "AION2 - Launcher") の場合は拒否
+        let mut other_regen = target(11, 42);
+        other_regen.title = "AION2 - Other Window".into();
+        assert!(resolve_identity(&original, &[other_regen]).is_none());
+
+        let mut launcher_regen = target(11, 42);
+        launcher_regen.title = "AION2 - Launcher".into();
+        assert!(resolve_identity(&original, &[launcher_regen]).is_none());
     }
     #[test]
     fn title_compatible_rules() {
         assert!(title_compatible("AION2", "AION2"));
         assert!(title_compatible("AION2", "aion2"));
+        assert!(title_compatible("AION2", "AION2 - Loading"));
         assert!(title_compatible("AION2", "AION2 - Chapter 1"));
         assert!(title_compatible("AION2 - Chapter 1", "AION2"));
         assert!(title_compatible("AION2", "AION2 [DirectX 11]"));
         assert!(title_compatible("Firefox", "GitHub — Mozilla Firefox"));
+        assert!(!title_compatible("AION2", "AION2 - Other Window"));
+        assert!(!title_compatible("AION2", "AION2 - Launcher"));
+        assert!(!title_compatible("AION2", "AION2 - Tool Window"));
+        assert!(!title_compatible("AION2", "AION2 - SubWindow"));
+        assert!(!title_compatible("AION2", "AION2 - Debug Console"));
         assert!(!title_compatible("AION2", "Crash Reporter"));
         assert!(!title_compatible("AION2", "AION2 Crash Reporter"));
         assert!(!title_compatible("AION2", "AION2 Error"));
