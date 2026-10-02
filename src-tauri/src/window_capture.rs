@@ -287,7 +287,7 @@ pub fn select_target(title: &str) {
     }
     let _ = target_for(title);
 }
-fn target_for(title: &str) -> Option<WindowIdentity> {
+fn target_for(title: &str) -> Option<TargetBinding> {
     if title.trim().is_empty() {
         return None;
     }
@@ -296,27 +296,25 @@ fn target_for(title: &str) -> Option<WindowIdentity> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .ok()?;
-    let (target, updated_binding) = if let Some(existing) = targets.get(title) {
+    let updated_binding = if let Some(existing) = targets.get(title) {
         let resolved = resolve_binding(existing, &all)?;
-        let binding = TargetBinding {
+        TargetBinding {
             base_title: existing.base_title.clone(),
-            identity: resolved.clone(),
-        };
-        (resolved, binding)
+            identity: resolved,
+        }
     } else {
         let matches: Vec<_> = all.iter().filter(|w| w.title == title).collect();
         if matches.len() != 1 {
             return None;
         }
         let matched = matches[0].clone();
-        let binding = TargetBinding {
+        TargetBinding {
             base_title: title.to_string(),
-            identity: matched.clone(),
-        };
-        (matched, binding)
+            identity: matched,
+        }
     };
-    targets.insert(title.to_string(), updated_binding);
-    Some(target)
+    targets.insert(title.to_string(), updated_binding.clone());
+    Some(updated_binding)
 }
 // Same coordinate mapping as OBS libobs-winrt get_client_box, rejecting uncertain bounds.
 fn client_box(target: &WindowIdentity, width: u32, height: u32) -> Option<(u32, u32, u32, u32)> {
@@ -355,15 +353,15 @@ fn client_box(target: &WindowIdentity, width: u32, height: u32) -> Option<(u32, 
 }
 type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 struct Snapshot {
-    target: WindowIdentity,
+    binding: TargetBinding,
     sender: mpsc::SyncSender<Result<String, String>>,
 }
 impl GraphicsCaptureApiHandler for Snapshot {
-    type Flags = (WindowIdentity, mpsc::SyncSender<Result<String, String>>);
+    type Flags = (TargetBinding, mpsc::SyncSender<Result<String, String>>);
     type Error = CaptureError;
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
-            target: ctx.flags.0,
+            binding: ctx.flags.0,
             sender: ctx.flags.1,
         })
     }
@@ -373,13 +371,14 @@ impl GraphicsCaptureApiHandler for Snapshot {
         control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let result = (|| -> Result<String, CaptureError> {
-            let before = read_identity(HWND(self.target.hwnd as *mut _)).ok_or("target closed")?;
-            if !same_process_and_window_type(&self.target, &before)
-                || !title_compatible(&self.target.title, &before.title)
+            let before =
+                read_identity(HWND(self.binding.identity.hwnd as *mut _)).ok_or("target closed")?;
+            if !same_process_and_window_type(&self.binding.identity, &before)
+                || !is_title_compatible_with_binding(&self.binding, &before.title)
             {
                 return Err("target identity changed or reused by different window".into());
             }
-            let crop = client_box(&self.target, frame.width(), frame.height())
+            let crop = client_box(&self.binding.identity, frame.width(), frame.height())
                 .ok_or("client bounds unavailable or resized")?;
             let buffer = frame.buffer_crop(crop.0, crop.1, crop.2, crop.3)?;
             let mut packed = Vec::new();
@@ -390,11 +389,11 @@ impl GraphicsCaptureApiHandler for Snapshot {
                     .ok_or("invalid frame")?;
             let mut bytes = Cursor::new(Vec::new());
             img.write_to(&mut bytes, image::ImageFormat::Png)?;
-            let after = read_identity(HWND(self.target.hwnd as *mut _))
+            let after = read_identity(HWND(self.binding.identity.hwnd as *mut _))
                 .ok_or("target closed during capture")?;
-            if !same_process_and_window_type(&self.target, &after)
-                || !title_compatible(&self.target.title, &after.title)
-                || client_box(&self.target, frame.width(), frame.height()) != Some(crop)
+            if !same_process_and_window_type(&self.binding.identity, &after)
+                || !is_title_compatible_with_binding(&self.binding, &after.title)
+                || client_box(&self.binding.identity, frame.width(), frame.height()) != Some(crop)
             {
                 return Err("target changed during capture".into());
             }
@@ -434,7 +433,8 @@ fn capture_target(
     log: Option<&crate::logger::LogManager>,
 ) -> Result<(WindowIdentity, String), String> {
     let _guard = CAPTURE_GATE.try_lock().map_err(|_| "capture_busy")?;
-    let target = target_for(title).ok_or("target missing, inaccessible, or ambiguous")?;
+    let binding = target_for(title).ok_or("target missing, inaccessible, or ambiguous")?;
+    let target = binding.identity.clone();
     if let Some(log) = log {
         log.info("Capture", &format!("target_title={:?} target_hwnd={} target_pid={} target_executable={:?} target_class={:?} capture_method=WGC capture_hwnd={} capture_status=starting reconnect_reason=new_snapshot_session fallback_reason=disabled", title, target.hwnd, target.pid, target.executable, target.class_name, target.hwnd));
     }
@@ -447,7 +447,7 @@ fn capture_target(
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        (target.clone(), sender),
+        (binding, sender),
     );
     let control = Snapshot::start_free_threaded(settings).map_err(|e| e.to_string())?;
     let result = receiver
@@ -625,5 +625,35 @@ mod tests {
             resolve_binding(&binding, &[step4]).expect("step4 should resolve back to base");
         assert_eq!(resolved4.hwnd, 11);
         assert_eq!(resolved4.title, "AION2");
+    }
+    #[test]
+    fn snapshot_verification_allows_binding_title_transitions_during_frame() {
+        let binding = TargetBinding {
+            base_title: "AION2".to_string(),
+            identity: {
+                let mut id = target(10, 42);
+                id.title = "AION2 - Loading".into();
+                id
+            },
+        };
+
+        // スナップショット実行中にタイトルが "AION2 - Chapter 1" に変化した場合
+        let mut mid_capture = target(10, 42);
+        mid_capture.title = "AION2 - Chapter 1".into();
+
+        assert!(same_process_and_window_type(
+            &binding.identity,
+            &mid_capture
+        ));
+        // binding の base_title ("AION2") と互換判定されるため成功
+        assert!(is_title_compatible_with_binding(
+            &binding,
+            &mid_capture.title
+        ));
+
+        // 一方でクラッシュレポーターなどの危険ウィンドウに変化した場合は確実に拒否
+        let mut crash = target(10, 42);
+        crash.title = "AION2 Crash Reporter".into();
+        assert!(!is_title_compatible_with_binding(&binding, &crash.title));
     }
 }
