@@ -21,7 +21,7 @@ use windows::{
         },
         UI::WindowsAndMessaging::{
             EnumWindows, GetClassNameW, GetClientRect, GetWindow, GetWindowLongW, GetWindowTextW,
-            GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_OWNER,
+            GetWindowThreadProcessId, IsIconic, IsWindowVisible, GWL_STYLE, GW_OWNER, WS_CHILD,
         },
     },
 };
@@ -112,12 +112,17 @@ pub fn list_windows() -> Vec<String> {
     titles.dedup();
     titles
 }
+/// ウィンドウ種別（トップレベル vs 子コントロール）を区別する安定ビット。
+/// WS_MAXIMIZE, WS_MINIMIZE などの状態ビットや、フルスクリーン/ボーダレス切替に伴う
+/// 枠スタイル変化（WS_POPUP, WS_CAPTION, WS_THICKFRAME 等）は同一ウィンドウでも動的に変化するため除外する。
+const WINDOW_TYPE_STYLE_MASK: u32 = WS_CHILD.0;
+
 fn same_process_and_window_type(a: &WindowIdentity, b: &WindowIdentity) -> bool {
     a.pid == b.pid
         && a.thread_id == b.thread_id
         && a.class_name == b.class_name
         && a.is_root_owner == b.is_root_owner
-        && a.style == b.style
+        && (a.style & WINDOW_TYPE_STYLE_MASK) == (b.style & WINDOW_TYPE_STYLE_MASK)
         && a.executable.eq_ignore_ascii_case(&b.executable)
 }
 pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> bool {
@@ -474,10 +479,10 @@ mod tests {
         diff_thread.thread_id = 99;
         assert!(resolve_identity(&original, &[diff_thread]).is_none());
 
-        // HWNDが同一でもウィンドウスタイルが異なる場合は拒否
-        let mut diff_style = original.clone();
-        diff_style.style = 0x80000000;
-        assert!(resolve_identity(&original, &[diff_style]).is_none());
+        // HWNDが同一でも子ウィンドウ（WS_CHILD）種別に変化した場合は拒否
+        let mut child_style = original.clone();
+        child_style.style |= WS_CHILD.0;
+        assert!(resolve_identity(&original, &[child_style]).is_none());
     }
     #[test]
     fn reconnected_hwnd_supports_compatible_title_if_unique() {
@@ -517,5 +522,24 @@ mod tests {
         assert!(!title_compatible("AION2", "Settings"));
         assert!(!title_compatible("AION2", ""));
         assert!(!title_compatible("", "AION2"));
+    }
+    #[test]
+    fn window_state_transitions_preserve_identity() {
+        let original = target(10, 42);
+
+        // 1. 最大化 (WS_MAXIMIZE = 0x01000000 が付与される)
+        let mut maximized = original.clone();
+        maximized.style |= 0x0100_0000;
+        assert_eq!(resolve_identity(&original, &[maximized]).unwrap().hwnd, 10);
+
+        // 2. 最小化 (WS_MINIMIZE = 0x20000000 が付与される)
+        let mut minimized = original.clone();
+        minimized.style |= 0x2000_0000;
+        assert_eq!(resolve_identity(&original, &[minimized]).unwrap().hwnd, 10);
+
+        // 3. フルスクリーン/ボーダレス切替 (WS_POPUP = 0x80000000 付与、枠スタイル変更)
+        let mut fullscreen = original.clone();
+        fullscreen.style = 0x8000_0000 | 0x1000_0000;
+        assert_eq!(resolve_identity(&original, &[fullscreen]).unwrap().hwnd, 10);
     }
 }
