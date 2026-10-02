@@ -250,6 +250,24 @@ class AsrServerContractTests(unittest.TestCase):
             "というわけでねやっていきたいと思うんですけれども",
         )
 
+    def test_inference_timeout_constants_contract(self):
+        """First inference must have a generous budget to absorb CUDA/CTranslate2 cold start."""
+        self.assertIn("DEFAULT_INFERENCE_TIMEOUT_SECONDS", self.source)
+        self.assertIn("FIRST_INFERENCE_TIMEOUT_SECONDS", self.source)
+        self.assertIn("_is_first_inference", self.source)
+
+    def test_warmup_whisper_model_contract(self):
+        """Model loading must warm up the model with vad_filter=False to trigger full graph init."""
+        self.assertIn("def warmup_whisper_model(model)", self.source)
+        self.assertIn("vad_filter=False", self.source)
+        self.assertIn("warmup_whisper_model(whisper_model)", self.source)
+
+    def test_first_inference_tracking_and_diagnostics_contract(self):
+        """Transcribe buffer must track cold start duration and log diagnostic info."""
+        self.assertIn("First ASR inference completed in", self.source)
+        self.assertIn('"is_first_inference": was_first', self.source)
+        self.assertIn('"timeout_budget": current_timeout', self.source)
+
 
 if __name__ == "__main__":
     unittest.main()
