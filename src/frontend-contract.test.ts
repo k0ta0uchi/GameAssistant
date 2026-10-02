@@ -3029,6 +3029,82 @@ for (const [reason, expectedLabel, retryable] of [
   await settleEffects();
 }
 
+// Issue #9: MemoryModal resets managerTab to Raw on close/reopen and preserves component wiring
+{
+  const harness = new TauriHarness();
+  harness.memoryItems = [
+    {
+      id: "mem-test-1",
+      document: "Memory row for tab reset test",
+      memory_type: "conversation",
+      source: "User",
+      timestamp: "2026-09-28T10:00:00Z",
+    },
+  ];
+  const dom = domForConfirm(harness);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+
+  // 1. Initial mount with isOpen = true: default tab is Raw
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+
+  const rawTab = findButton(host, "Raw");
+  const semanticTab = findButton(host, "Fact / Summary");
+  assert.ok(rawTab, "Raw tab button should render");
+  assert.ok(semanticTab, "Fact / Summary tab button should render");
+  assert.equal(rawTab?.getAttribute("aria-selected"), "true", "Raw tab should be active by default");
+  assert.equal(semanticTab?.getAttribute("aria-selected"), "false", "Fact / Summary tab should be inactive by default");
+
+  // 2. Switch to Fact / Summary tab
+  await act(async () => {
+    semanticTab!.click();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+  assert.equal(rawTab?.getAttribute("aria-selected"), "false");
+  assert.equal(semanticTab?.getAttribute("aria-selected"), "true", "Fact / Summary should be active after click");
+
+  // 3. Close the modal (isOpen = false)
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: false, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+  assert.equal(host.children.length, 0, "Modal should not render content when closed");
+
+  // 4. Reopen the modal (isOpen = true) -> must reset to Raw tab
+  await act(async () => {
+    root.render(
+      React.createElement(MemoryModal, { isOpen: true, onClose: () => {} }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+
+  const reopenedRawTab = findButton(host, "Raw");
+  const reopenedSemanticTab = findButton(host, "Fact / Summary");
+  assert.ok(reopenedRawTab, "Raw tab should render after reopen");
+  assert.ok(reopenedSemanticTab, "Semantic tab should render after reopen");
+  assert.equal(
+    reopenedRawTab?.getAttribute("aria-selected"),
+    "true",
+    "managerTab must be reset to 'raw' on modal close and reopen",
+  );
+  assert.equal(
+    reopenedSemanticTab?.getAttribute("aria-selected"),
+    "false",
+    "Semantic tab must not remain active across close/reopen",
+  );
+
+  await act(async () => root.unmount());
+  await settleEffects();
+}
+
 // Let any deferred setup effects settle while the final Tauri harness is still
 // installed, keeping npm test output deterministic.
 makeHarness();

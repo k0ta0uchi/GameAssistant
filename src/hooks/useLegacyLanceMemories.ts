@@ -78,6 +78,13 @@ export function useLegacyLanceMemories({
     [],
   );
 
+  const optimisticallyDeletedIdsRef = useRef(optimisticallyDeletedIds);
+  optimisticallyDeletedIdsRef.current = optimisticallyDeletedIds;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
+  const activeItemRef = useRef(activeItem);
+  activeItemRef.current = activeItem;
+
   const populateEditForm = useCallback((item: MemoryItem) => {
     setIsCreatingNew(false);
     setEditKey(item.key || item.id);
@@ -87,7 +94,8 @@ export function useLegacyLanceMemories({
   }, []);
 
   const fetchMemories = useCallback(
-    async (hiddenIds: ReadonlySet<string> = optimisticallyDeletedIds) => {
+    async (hiddenIds?: ReadonlySet<string>) => {
+      const idsToHide = hiddenIds ?? optimisticallyDeletedIdsRef.current;
       const requestId = ++fetchRequestId.current;
       setLoading(true);
       try {
@@ -95,10 +103,14 @@ export function useLegacyLanceMemories({
         // A successful delete is reflected locally before LanceDB's next
         // snapshot is observable. Keep the tombstone overlay while this read
         // catches up so a stale snapshot cannot make the row reappear.
-        const visibleList = list.filter((memory) => !hiddenIds.has(memory.id));
+        const visibleList = list.filter((memory) => !idsToHide.has(memory.id));
         if (requestId !== fetchRequestId.current) return;
         setMemories(visibleList);
-        if (visibleList.length > 0 && selectedIds.length === 0 && !activeItem) {
+        if (
+          visibleList.length > 0 &&
+          selectedIdsRef.current.length === 0 &&
+          !activeItemRef.current
+        ) {
           setActiveItem(visibleList[0]);
           setSelectedIds([visibleList[0].id]);
           setLastAnchorIndex(0);
@@ -112,7 +124,7 @@ export function useLegacyLanceMemories({
         if (requestId === fetchRequestId.current) setLoading(false);
       }
     },
-    [activeItem, optimisticallyDeletedIds, populateEditForm, selectedIds.length, showNotice],
+    [populateEditForm, showNotice],
   );
 
   useEffect(() => {

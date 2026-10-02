@@ -1,5 +1,5 @@
 import type React from "react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   X,
   Database,
@@ -32,6 +32,12 @@ export const MemoryModal: React.FC<MemoryModalProps> = ({
   onClearLogs,
 }) => {
   const [managerTab, setManagerTab] = useState<"raw" | "semantic">("raw");
+
+  useEffect(() => {
+    if (!isOpen && managerTab !== "raw") {
+      setManagerTab("raw");
+    }
+  }, [isOpen, managerTab]);
 
   const legacyState = useLegacyLanceMemories({
     isOpen,
