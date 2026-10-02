@@ -369,6 +369,7 @@ class TauriHarness {
   summaryReason = "inference_failed";
   summaryStatus = "fallback";
   failSummaryRead = false;
+  geminiListModelsError: string | null = null;
   summaryRetryResult: unknown = {
     attempt_id: "attempt-2",
     event_id: "event-1",
@@ -500,8 +501,12 @@ class TauriHarness {
         filename: "2026-09-29_blog-test.md",
         content: "生成されたブログ記事の本文",
       };
-    if (command === "gemini_list_models")
+    if (command === "gemini_list_models") {
+      if (this.geminiListModelsError) {
+        throw new Error(this.geminiListModelsError);
+      }
       return ["gemini-3.8-flash", "gemini-2.5-flash"];
+    }
     if (command === "get_prompts") return [];
     if (command === "read_logs") return [];
     if (command === "twitch_get_status") return { connected: false };
@@ -2431,6 +2436,71 @@ for (const [reason, expectedLabel, retryable] of [
   });
   assert.ok(updates.includes("gemini_model"), "selection must be saved");
   assert.equal(settings.gemini_model, "gemini-2.5-flash");
+}
+
+// SettingsModal displays a safe error reason when gemini_list_models fails and allows manual model input
+{
+  const harness = new TauriHarness();
+  harness.geminiListModelsError =
+    "model list failed (400 Bad Request): API key not valid [INVALID_ARGUMENT]";
+  const updates: string[] = [];
+  const settings: Record<string, unknown> = {};
+  const dom = domForConfirm(harness);
+  const host = dom.window.document.createElement("div");
+  dom.window.document.body.appendChild(host);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(
+      React.createElement(SettingsModal, {
+        isOpen: true,
+        onClose: () => {},
+        settings,
+        onUpdateSetting: async (key: string, value: unknown) => {
+          updates.push(key);
+          settings[key] = value;
+        },
+        discordDevices: [],
+        initialTab: "models" as const,
+      }),
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+
+  const errorDiv = host.querySelector("div.text-\\[\\#eb5757\\]");
+  assert.ok(errorDiv, "error container must be rendered when list_models fails");
+  assert.ok(
+    errorDiv!.textContent?.includes("model list failed (400 Bad Request): API key not valid"),
+    "error reason must be displayed safely to the user",
+  );
+
+  const manualInput = host.querySelector(
+    'input[placeholder="gemini-2.5-flash"]',
+  ) as HTMLInputElement | null;
+  assert.ok(manualInput, "manual model input must be available when list_models fails");
+
+  await act(async () => {
+    const reactPropsKey = Object.keys(manualInput!).find((k) =>
+      k.startsWith("__reactProps$"),
+    );
+    if (reactPropsKey) {
+      (manualInput as any)[reactPropsKey].onChange({
+        target: { value: "custom-gemini-model" },
+      });
+    } else {
+      const inputSetter = Object.getOwnPropertyDescriptor(
+        dom.window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      inputSetter.call(manualInput!, "custom-gemini-model");
+      manualInput!.dispatchEvent(
+        new dom.window.Event("change", { bubbles: true }),
+      );
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  });
+
+  assert.ok(updates.includes("gemini_model"), "manual model entry must be saved");
+  assert.equal(settings.gemini_model, "custom-gemini-model");
 }
 
 // MemoryModal supports copying selected memories as JSON via Ctrl+C shortcut

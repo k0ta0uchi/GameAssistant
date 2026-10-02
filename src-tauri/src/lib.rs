@@ -1354,8 +1354,14 @@ async fn generate_blog_from_memories(
 
 /// 設定/環境の有効キーで利用可能な Gemini モデル一覧を返す (設定UIのモデル選択用)。
 #[tauri::command]
-async fn gemini_list_models(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    state.session_mgr.list_gemini_models().await
+async fn gemini_list_models(
+    state: State<'_, AppState>,
+    api_key: Option<String>,
+) -> Result<Vec<String>, String> {
+    state
+        .session_mgr
+        .list_gemini_models_with_override(api_key.as_deref())
+        .await
 }
 
 #[tauri::command]

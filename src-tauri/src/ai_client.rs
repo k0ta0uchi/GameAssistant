@@ -163,6 +163,72 @@ fn sanitize_transport_error(message: &str) -> String {
     sanitized
 }
 
+/// Remove API keys, query parameters, and sensitive strings from error messages
+/// and response bodies before exposing them in UI or logs.
+fn sanitize_api_error_detail(message: &str, known_keys: &[&str]) -> String {
+    let mut sanitized = sanitize_transport_error(message);
+    for key in known_keys {
+        let trimmed = key.trim();
+        if trimmed.len() >= 4 {
+            sanitized = sanitized.replace(trimmed, "[REDACTED]");
+        }
+    }
+    // Pattern match for standard Google API keys (AIza...)
+    let mut search_from = 0;
+    while let Some(pos) = sanitized[search_from..].find("AIza") {
+        let start = search_from + pos;
+        let candidate = &sanitized[start..];
+        let end_offset = candidate
+            .char_indices()
+            .find(|(_, c)| !c.is_ascii_alphanumeric() && *c != '_' && *c != '-')
+            .map(|(offset, _)| offset)
+            .unwrap_or(candidate.len());
+        if end_offset >= 30 {
+            sanitized.replace_range(start..start + end_offset, "[REDACTED]");
+            search_from = start + "[REDACTED]".len();
+        } else {
+            search_from = start + 4;
+        }
+    }
+    sanitized
+}
+
+/// Extract a safe, readable error message from a Google API HTTP error response.
+fn extract_google_api_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    known_keys: &[&str],
+) -> String {
+    let sanitized_body = sanitize_api_error_detail(body, known_keys);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&sanitized_body) {
+        if let Some(err_obj) = value.get("error") {
+            let message = err_obj.get("message").and_then(|m| m.as_str());
+            let reason = err_obj
+                .get("details")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.iter().find_map(|item| item.get("reason")?.as_str()));
+            let status_code_str = err_obj.get("status").and_then(|s| s.as_str());
+
+            match (message, reason.or(status_code_str)) {
+                (Some(msg), Some(detail)) => {
+                    return format!("model list failed ({status}): {msg} ({detail})");
+                }
+                (Some(msg), None) => {
+                    return format!("model list failed ({status}): {msg}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let trimmed = sanitized_body.trim();
+    if !trimmed.is_empty() && trimmed.len() <= 200 && !trimmed.contains('<') {
+        format!("model list failed ({status}): {trimmed}")
+    } else {
+        format!("model list failed ({status})")
+    }
+}
+
 /// ListModels レスポンスから generateContent 対応の gemini モデル名を抽出し、
 /// 新しいバージョン順 (降順) に並べる。
 fn parse_model_list(payload: &str) -> Vec<String> {
@@ -258,9 +324,14 @@ impl AiClient {
         }
     }
 
-    /// 利用可能な Gemini モデル一覧 (generateContent 対応、新しいう順) を返す。
+    /// 利用可能な Gemini モデル一覧 (generateContent 対応、新しい順) を返す。
     /// 結果は 10 分間キャッシュする。
-    pub async fn list_models(&self, api_key: &str) -> Result<Vec<String>, String> {
+    pub async fn list_models(&self, api_key_str: &str) -> Result<Vec<String>, String> {
+        let raw_keys = parse_gemini_api_keys(api_key_str).map_err(|error| match error {
+            GeminiKeyError::Missing => "Gemini API key is not set".to_string(),
+            GeminiKeyError::Invalid => "Gemini API key configuration is invalid".to_string(),
+        })?;
+
         {
             // poisoning は他スレッドの一時的パニック由文字のみ。キャッシュ読取は
             // 破損しないため、 poison guard から中身を取り出して継続する。
@@ -275,39 +346,76 @@ impl AiClient {
             }
         }
 
+        let key_refs: Vec<&str> = raw_keys.iter().map(String::as_str).collect();
         let url = format!("{}/models", self.endpoint_base.trim_end_matches('/'));
-        let response = self
-            .client
-            .get(&url)
-            .header("x-goog-api-key", api_key.trim())
-            .send()
-            .await
-            .map_err(|error| {
-                format!(
-                    "model list request failed: {}",
-                    sanitize_transport_error(&error.to_string())
-                )
-            })?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("model list read failed: {error}"))?;
-        if !status.is_success() {
-            return Err(format!("model list failed ({status})"));
+        let mut last_error = String::new();
+
+        for (idx, key) in raw_keys.iter().enumerate() {
+            let response = match self
+                .client
+                .get(&url)
+                .header("x-goog-api-key", key)
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(error) => {
+                    let safe_error = sanitize_api_error_detail(&error.to_string(), &key_refs);
+                    crate::logger::global_warn(
+                        "Gemini",
+                        &format!(
+                            "Failed to list models with key index {}: {}",
+                            idx, safe_error
+                        ),
+                    );
+                    last_error = format!("model list request failed: {safe_error}");
+                    continue;
+                }
+            };
+
+            let status = response.status();
+            let body = match response.text().await {
+                Ok(text) => text,
+                Err(error) => {
+                    last_error = format!("model list read failed: {error}");
+                    continue;
+                }
+            };
+
+            if !status.is_success() {
+                let error_detail = extract_google_api_error(status, &body, &key_refs);
+                crate::logger::global_warn(
+                    "Gemini",
+                    &format!(
+                        "Failed to list models with key index {}: {}",
+                        idx, error_detail
+                    ),
+                );
+                last_error = error_detail;
+                continue;
+            }
+
+            let models = parse_model_list(&body);
+            if models.is_empty() {
+                last_error = "model list is empty".to_string();
+                continue;
+            }
+
+            {
+                let mut cache = self
+                    .model_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *cache = Some((std::time::Instant::now(), models.clone()));
+            }
+            return Ok(models);
         }
-        let models = parse_model_list(&body);
-        if models.is_empty() {
-            return Err("model list is empty".to_string());
-        }
-        {
-            let mut cache = self
-                .model_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *cache = Some((std::time::Instant::now(), models.clone()));
-        }
-        Ok(models)
+
+        Err(if last_error.is_empty() {
+            "model list failed".to_string()
+        } else {
+            last_error
+        })
     }
 
     /// 「最新」の解決: ListModels から最も新しい generateContent 対応モデルを
@@ -836,5 +944,134 @@ mod tests {
         assert_eq!(model_rank("gemini-3.8-flash"), (3, 8));
         assert_eq!(model_rank("gemini-2.0-flash"), (2, 0));
         assert_eq!(model_rank("unknown"), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn list_models_unquotes_api_keys_and_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let read_bytes = stream.read(&mut request).await.unwrap();
+            let request_text = String::from_utf8_lossy(&request[..read_bytes]);
+            assert!(
+                request_text.contains("x-goog-api-key: my-secret-key\r\n"),
+                "Request header must contain unquoted key, got:\n{}",
+                request_text
+            );
+            let body = r#"{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = AiClient::with_endpoint(format!("http://{}/v1beta", address));
+        let models = client.list_models("\"my-secret-key\"").await.unwrap();
+        assert_eq!(models, vec!["gemini-2.5-flash".to_string()]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_models_rotates_keys_on_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for idx in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).await.unwrap();
+                let (status, body) = if idx == 0 {
+                    (
+                        "400 Bad Request",
+                        r#"{"error":{"code":400,"message":"API key not valid","status":"INVALID_ARGUMENT"}}"#.to_string(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"models":[{"name":"models/gemini-3.8-flash","supportedGenerationMethods":["generateContent"]}]}"#.to_string(),
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let client = AiClient::with_endpoint(format!("http://{}/v1beta", address));
+        let models = client.list_models("bad-key, good-key").await.unwrap();
+        assert_eq!(models, vec!["gemini-3.8-flash".to_string()]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_models_extracts_safe_error_detail_without_secret() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = r#"{"error":{"code":400,"message":"API key AIzaSyTestKey0123456789012345678901 not valid","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let secret = "AIzaSyTestKey0123456789012345678901";
+        let client = AiClient::with_endpoint(format!("http://{}/v1beta", address));
+        let error = client.list_models(secret).await.unwrap_err();
+
+        assert!(
+            !error.contains(secret),
+            "Secret must be redacted from error message"
+        );
+        assert!(
+            error.contains("[REDACTED]"),
+            "Error must contain [REDACTED]"
+        );
+        assert!(
+            error.contains("400 Bad Request"),
+            "Error must contain HTTP status"
+        );
+        assert!(
+            error.contains("API key"),
+            "Error must contain error message reason"
+        );
+        assert!(
+            error.contains("API_KEY_INVALID"),
+            "Error must contain error details reason"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_models_rejects_missing_or_invalid_key() {
+        let client = AiClient::with_endpoint("http://127.0.0.1:1/v1beta".to_string());
+        assert_eq!(
+            client.list_models("").await.unwrap_err(),
+            "Gemini API key is not set"
+        );
+        assert_eq!(
+            client.list_models("   \t\n  ").await.unwrap_err(),
+            "Gemini API key is not set"
+        );
+        assert_eq!(
+            client.list_models("\"unterminated").await.unwrap_err(),
+            "Gemini API key configuration is invalid"
+        );
+        assert_eq!(
+            client.list_models("key1,   ,key2").await.unwrap_err(),
+            "Gemini API key configuration is invalid"
+        );
     }
 }
