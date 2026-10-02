@@ -117,6 +117,7 @@ fn same_process_and_window_type(a: &WindowIdentity, b: &WindowIdentity) -> bool 
         && a.thread_id == b.thread_id
         && a.class_name == b.class_name
         && a.is_root_owner == b.is_root_owner
+        && a.style == b.style
         && a.executable.eq_ignore_ascii_case(&b.executable)
 }
 pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> bool {
@@ -130,27 +131,76 @@ pub(crate) fn title_compatible(target_title: &str, candidate_title: &str) -> boo
     }
     let t_lower = t.to_lowercase();
     let c_lower = c.to_lowercase();
-    if t_lower.len() >= 3 && c_lower.contains(&t_lower) {
-        return true;
+
+    // クラッシュレポーターや設定ダイアログ、アップデータ等の非ゲーム・補助ウィンドウキーワードは拒否
+    const DANGEROUS_KEYWORDS: &[&str] = &[
+        "crash",
+        "reporter",
+        "report",
+        "error",
+        "bug",
+        "diagnostic",
+        "updater",
+        "update",
+        "installer",
+        "setup",
+        "wizard",
+        "config",
+        "settings",
+        "feedback",
+    ];
+    for kw in DANGEROUS_KEYWORDS {
+        if c_lower.contains(kw) && !t_lower.contains(kw) {
+            return false;
+        }
     }
-    if c_lower.len() >= 3 && t_lower.contains(&c_lower) {
-        return true;
-    }
-    let t_first = t
-        .split(|ch: char| {
-            ch.is_whitespace() || ch == '-' || ch == ':' || ch == '|' || ch == '[' || ch == '('
-        })
-        .find(|s| !s.is_empty());
-    let c_first = c
-        .split(|ch: char| {
-            ch.is_whitespace() || ch == '-' || ch == ':' || ch == '|' || ch == '[' || ch == '('
-        })
-        .find(|s| !s.is_empty());
-    if let (Some(tf), Some(cf)) = (t_first, c_first) {
-        if tf.len() >= 3 && tf.eq_ignore_ascii_case(cf) {
+
+    // ブラウザ等でよく見られる「<Page Title> <Separator> [Vendor] <App Name>」パターン（末尾一致）
+    // 例: target = "Firefox", candidate = "GitHub — Mozilla Firefox"
+    // 例: target = "Chrome", candidate = "YouTube - Google Chrome"
+    if let Some((_, right)) = c.rsplit_once(['—', '-', '|', '–', ':']) {
+        let right_lower = right.trim().to_lowercase();
+        if right_lower == t_lower
+            || right_lower.ends_with(&t_lower)
+            || right_lower.starts_with(&t_lower)
+        {
             return true;
         }
     }
+
+    // ゲーム等で安全な「<Game Title><Separator><Safe Suffix>」パターン
+    // target が candidate の先頭にあり、直後に安全な区切り（括弧や ' - ', ': ', ' | '）で続く
+    if c_lower.starts_with(&t_lower) {
+        let remainder = &c[t.len()..];
+        let trimmed_remainder = remainder.trim_start();
+        // 括弧で囲まれたサフィックス: (DirectX 11), [DX11], (64-bit), [Loading] 等
+        if trimmed_remainder.starts_with(['(', '['])
+            && (trimmed_remainder.ends_with(')') || trimmed_remainder.ends_with(']'))
+        {
+            return true;
+        }
+        // ハイフン・コロン・パイプ区切りの安全なサフィックス
+        if remainder.starts_with(" - ")
+            || remainder.starts_with(": ")
+            || remainder.starts_with(" | ")
+        {
+            return true;
+        }
+    }
+
+    // 逆に元の target が詳細タイトル（"AION2 - Chapter 1"）で、candidate がベースタイトル（"AION2"）の場合
+    if t_lower.starts_with(&c_lower) {
+        let remainder = &t[c.len()..];
+        let trimmed_remainder = remainder.trim_start();
+        if trimmed_remainder.starts_with(['(', '['])
+            || remainder.starts_with(" - ")
+            || remainder.starts_with(": ")
+            || remainder.starts_with(" | ")
+        {
+            return true;
+        }
+    }
+
     false
 }
 fn resolve_identity(
@@ -410,6 +460,11 @@ mod tests {
         crash_dialog.title = "Crash Reporter".into();
         assert!(resolve_identity(&original, &[crash_dialog]).is_none());
 
+        // 対象タイトル "AION2" を接頭辞に含む "AION2 Crash Reporter" の場合も拒否
+        let mut aion2_crash = original.clone();
+        aion2_crash.title = "AION2 Crash Reporter".into();
+        assert!(resolve_identity(&original, &[aion2_crash]).is_none());
+
         // HWNDが同一でも別スレッドやオーナー持ち（ダイアログ）の場合は拒否
         let mut child_dialog = original.clone();
         child_dialog.is_root_owner = false;
@@ -418,6 +473,11 @@ mod tests {
         let mut diff_thread = original.clone();
         diff_thread.thread_id = 99;
         assert!(resolve_identity(&original, &[diff_thread]).is_none());
+
+        // HWNDが同一でもウィンドウスタイルが異なる場合は拒否
+        let mut diff_style = original.clone();
+        diff_style.style = 0x80000000;
+        assert!(resolve_identity(&original, &[diff_style]).is_none());
     }
     #[test]
     fn reconnected_hwnd_supports_compatible_title_if_unique() {
@@ -434,6 +494,11 @@ mod tests {
         let mut unrelated = target(11, 42);
         unrelated.title = "Setup Wizard".into();
         assert!(resolve_identity(&original, &[unrelated]).is_none());
+
+        // HWND再生成だが "AION2 Crash Reporter" のような危険サフィックスの場合は拒否
+        let mut crash_regen = target(11, 42);
+        crash_regen.title = "AION2 Crash Reporter".into();
+        assert!(resolve_identity(&original, &[crash_regen]).is_none());
     }
     #[test]
     fn title_compatible_rules() {
@@ -444,6 +509,11 @@ mod tests {
         assert!(title_compatible("AION2", "AION2 [DirectX 11]"));
         assert!(title_compatible("Firefox", "GitHub — Mozilla Firefox"));
         assert!(!title_compatible("AION2", "Crash Reporter"));
+        assert!(!title_compatible("AION2", "AION2 Crash Reporter"));
+        assert!(!title_compatible("AION2", "AION2 Error"));
+        assert!(!title_compatible("AION2", "AION2 Settings"));
+        assert!(!title_compatible("AION2", "AION2 Updater"));
+        assert!(!title_compatible("AION2", "AION2 Setup Wizard"));
         assert!(!title_compatible("AION2", "Settings"));
         assert!(!title_compatible("AION2", ""));
         assert!(!title_compatible("", "AION2"));
