@@ -121,33 +121,52 @@ export async function getPromptsApi(): Promise<PromptItem[]> {
 
 export async function savePromptApi(
   id: string,
-  text: string,
-): Promise<{ success: boolean; error?: string }> {
+  value: string,
+): Promise<{ success: boolean; prompts?: PromptItem[]; error?: string }> {
   if (isTauriEnv()) {
     const { invoke } = await import("@tauri-apps/api/core");
-    await invoke("save_prompt", { promptId: id, text });
-    return { success: true };
+    const updatedList = await invoke<PromptItem[]>("save_prompt", {
+      id,
+      value,
+    });
+    if (updatedList && Array.isArray(updatedList)) {
+      return { success: true, prompts: updatedList };
+    }
+    return { success: false, error: "Invalid prompt list returned" };
   }
-  const res = await fetch(`${API_BASE}/api/prompts/${id}`, {
+  const res = await fetch(`${API_BASE}/api/prompts`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ id, value }),
   });
-  return await res.json();
+  const data = await res.json();
+  if (data.success && Array.isArray(data.prompts)) {
+    return { success: true, prompts: data.prompts };
+  }
+  return { success: false, error: data.error };
 }
 
 export async function resetPromptApi(
   id: string,
-): Promise<{ success: boolean; text?: string; error?: string }> {
+): Promise<{ success: boolean; prompts?: PromptItem[]; error?: string }> {
   if (isTauriEnv()) {
     const { invoke } = await import("@tauri-apps/api/core");
-    const defaultText = await invoke<string>("reset_prompt", { promptId: id });
-    return { success: true, text: defaultText };
+    const updatedList = await invoke<PromptItem[]>("reset_prompt", { id });
+    if (updatedList && Array.isArray(updatedList)) {
+      return { success: true, prompts: updatedList };
+    }
+    return { success: false, error: "Invalid prompt list returned" };
   }
-  const res = await fetch(`${API_BASE}/api/prompts/${id}/reset`, {
+  const res = await fetch(`${API_BASE}/api/prompts/reset`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
   });
-  return await res.json();
+  const data = await res.json();
+  if (data.success && Array.isArray(data.prompts)) {
+    return { success: true, prompts: data.prompts };
+  }
+  return { success: false, error: data.error };
 }
 
 /** Audio & Window devices APIs */

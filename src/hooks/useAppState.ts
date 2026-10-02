@@ -118,44 +118,62 @@ export function useAppState() {
     showToastRef.current = tauriEvents.showToast;
   }, [tauriEvents.showToast]);
 
+  const { fetchSettings, fetchPrompts } = settingsState;
+  const {
+    fetchDevices,
+    fetchWindows,
+    setEnableDiscordCapture,
+    setSelectedDevice,
+    setSelectedDiscordDevice,
+    setSelectedWindow,
+  } = audioDevices;
+  const { fetchModels } = modelStatus;
+  const { fetchLogs } = tauriEvents;
+
   // Initial full data load
   const fetchAllData = useCallback(async () => {
-    const loadedSettings = await settingsState.fetchSettings();
+    const loadedSettings = await fetchSettings();
     if (loadedSettings) {
       if (loadedSettings.enable_discord_capture !== undefined) {
-        audioDevices.setEnableDiscordCapture(
+        setEnableDiscordCapture(
           Boolean(loadedSettings.enable_discord_capture),
         );
       }
       if (loadedSettings.audio_device) {
-        audioDevices.setSelectedDevice(String(loadedSettings.audio_device));
+        setSelectedDevice(String(loadedSettings.audio_device));
       }
       if (loadedSettings.discord_audio_device) {
-        audioDevices.setSelectedDiscordDevice(
+        setSelectedDiscordDevice(
           String(loadedSettings.discord_audio_device),
         );
       }
       if (loadedSettings.window) {
-        audioDevices.setSelectedWindow(String(loadedSettings.window));
+        setSelectedWindow(String(loadedSettings.window));
       }
     }
     await Promise.all([
-      audioDevices.fetchDevices(),
-      audioDevices.fetchWindows(),
-      settingsState.fetchPrompts(),
-      modelStatus.fetchModels(),
+      fetchDevices(),
+      fetchWindows(),
+      fetchPrompts(),
+      fetchModels(),
     ]);
-    await tauriEvents.fetchLogs();
+    await fetchLogs();
   }, [
-    settingsState,
-    audioDevices,
-    modelStatus,
-    tauriEvents,
+    fetchSettings,
+    fetchPrompts,
+    fetchDevices,
+    fetchWindows,
+    fetchModels,
+    fetchLogs,
+    setEnableDiscordCapture,
+    setSelectedDevice,
+    setSelectedDiscordDevice,
+    setSelectedWindow,
   ]);
 
   useEffect(() => {
     void fetchAllData();
-  }, []);
+  }, [fetchAllData]);
 
   return {
     // WebSocket

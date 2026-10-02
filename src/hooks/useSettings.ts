@@ -11,6 +11,8 @@ import {
   isTauriEnv,
   loadSettingsApi,
   getPromptsApi,
+  savePromptApi,
+  resetPromptApi,
 } from "../services/backendAdapter";
 
 const asRecord = (value: unknown): Record<string, unknown> | null => {
@@ -158,26 +160,10 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsResult
   const savePrompt = useCallback(
     async (id: string, value: string): Promise<boolean> => {
       try {
-        if (isTauriEnv()) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const updatedList = await invoke<PromptItem[]>("save_prompt", {
-            id,
-            value,
-          });
-          if (updatedList && Array.isArray(updatedList)) {
-            setPrompts(updatedList);
-            showToast?.("✅ プロンプト設定を保存しました", "success");
-            return true;
-          }
-        }
-        const res = await fetch(`${API_BASE}/api/prompts`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, value }),
-        });
-        const data = await res.json();
-        if (data.success && data.prompts) {
-          setPrompts(data.prompts);
+        const result = await savePromptApi(id, value);
+        if (result.success && result.prompts) {
+          setPrompts(result.prompts);
+          showToast?.("✅ プロンプト設定を保存しました", "success");
           return true;
         }
         return false;
@@ -192,23 +178,9 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsResult
   const resetPrompt = useCallback(
     async (id: string): Promise<boolean> => {
       try {
-        if (isTauriEnv()) {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const updatedList = await invoke<PromptItem[]>("reset_prompt", { id });
-          if (updatedList && Array.isArray(updatedList)) {
-            setPrompts(updatedList);
-            showToast?.("🔄 プロンプトを初期デフォルトに戻しました", "info");
-            return true;
-          }
-        }
-        const res = await fetch(`${API_BASE}/api/prompts/reset`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id }),
-        });
-        const data = await res.json();
-        if (data.success && data.prompts) {
-          setPrompts(data.prompts);
+        const result = await resetPromptApi(id);
+        if (result.success && result.prompts) {
+          setPrompts(result.prompts);
           showToast?.("🔄 プロンプトを初期デフォルトに戻しました", "info");
           return true;
         }
