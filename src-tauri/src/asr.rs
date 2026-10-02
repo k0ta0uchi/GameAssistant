@@ -1730,8 +1730,14 @@ impl WhisperWsClient {
         }
     }
 
+    /// A supervisor request without an override preserves the active policy.
+    fn resolve_restart_device(&self, device: Option<String>) -> Option<String> {
+        device.or_else(|| self.forced_device.lock().clone())
+    }
+
     /// Whisper ワーカーを指定デバイス（"cpu" / "cuda"）で再起動
     pub async fn restart_with_device(&self, device: Option<String>) -> Result<(), String> {
+        let device = self.resolve_restart_device(device);
         let cb_opt = self.callback.lock().clone();
         self.stop();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -2545,6 +2551,23 @@ pub fn match_wake_word_in_source(text: &str, wake_words: &[String]) -> Option<St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_supervisor_restart_preserves_device_policy() {
+        let client = super::WhisperWsClient::new();
+        for device in ["cpu", "cuda"] {
+            *client.forced_device.lock() = Some(device.to_string());
+            assert_eq!(client.resolve_restart_device(None).as_deref(), Some(device));
+        }
+        *client.forced_device.lock() = Some("cuda".to_string());
+        assert_eq!(
+            client
+                .resolve_restart_device(Some("cpu".to_string()))
+                .as_deref(),
+            Some("cpu")
+        );
+        *client.forced_device.lock() = None;
+        assert_eq!(client.resolve_restart_device(None), None);
+    }
     use super::*;
 
     #[test]
