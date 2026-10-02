@@ -83,7 +83,18 @@ impl SessionManager {
     /// 設定/環境から解決した有効キーで利用可能な Gemini モデル一覧を返す
     /// (trigger=selected_memories_blog や設定UIのモデル選択用)。
     pub async fn list_gemini_models(&self) -> Result<Vec<String>, String> {
-        let key = self.get_effective_gemini_key();
+        self.list_gemini_models_with_override(None).await
+    }
+
+    /// キーのオーバーライド（指定がある場合）または保存済みキーで利用可能な Gemini モデル一覧を返す。
+    pub async fn list_gemini_models_with_override(
+        &self,
+        api_key_override: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let key = match api_key_override {
+            Some(k) if !k.trim().is_empty() => k.to_string(),
+            _ => self.get_effective_gemini_key(),
+        };
         if key.trim().is_empty() {
             return Err(
                 "Gemini API キーが未設定です。設定画面でAPIキーを保存してください。".to_string(),
