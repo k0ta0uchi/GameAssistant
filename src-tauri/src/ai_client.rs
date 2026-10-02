@@ -1031,11 +1031,26 @@ mod tests {
         let client = AiClient::with_endpoint(format!("http://{}/v1beta", address));
         let error = client.list_models(secret).await.unwrap_err();
 
-        assert!(!error.contains(secret), "Secret must be redacted from error message");
-        assert!(error.contains("[REDACTED]"), "Error must contain [REDACTED]");
-        assert!(error.contains("400 Bad Request"), "Error must contain HTTP status");
-        assert!(error.contains("API key"), "Error must contain error message reason");
-        assert!(error.contains("API_KEY_INVALID"), "Error must contain error details reason");
+        assert!(
+            !error.contains(secret),
+            "Secret must be redacted from error message"
+        );
+        assert!(
+            error.contains("[REDACTED]"),
+            "Error must contain [REDACTED]"
+        );
+        assert!(
+            error.contains("400 Bad Request"),
+            "Error must contain HTTP status"
+        );
+        assert!(
+            error.contains("API key"),
+            "Error must contain error message reason"
+        );
+        assert!(
+            error.contains("API_KEY_INVALID"),
+            "Error must contain error details reason"
+        );
         server.await.unwrap();
     }
 
